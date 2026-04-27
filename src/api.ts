@@ -18,6 +18,12 @@ export const API_BASE =
   import.meta.env.VITE_API_BASE ??
   "https://5vvp43vamk.execute-api.us-west-2.amazonaws.com";
 
+// Coach lives on a separate Lambda Function URL (RESPONSE_STREAM mode) so it
+// can stream; API Gateway HTTP API buffers. Falls back to the API Gateway
+// host for local dev before the Function URL is wired.
+export const COACH_URL =
+  import.meta.env.VITE_COACH_URL ?? `${API_BASE}/api/coach`;
+
 async function fetcher<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -138,35 +144,22 @@ export async function submitJournal(journal: Partial<JournalToday> & { tags: str
   return result;
 }
 
-export async function askCoach(messages: ChatMessage[]): Promise<string> {
-  const res = await fetch(`${API_BASE}/api/coach`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages }),
-  });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  const ct = res.headers.get("content-type") ?? "";
-  if (!ct.includes("application/json")) return res.text();
-  const data = await res.json();
-  const r = data.reply;
-  if (r && typeof r === "object" && typeof r.text === "string") return r.text;
-  if (typeof r === "string") return r;
-  return data.text ?? data.message ?? "";
-}
-
 export async function askCoachStream(
   messages: ChatMessage[],
-  onToken: (chunk: string) => void
+  snapshot: TodayResponse | undefined,
+  onToken: (chunk: string) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/coach`, {
+  const res = await fetch(COACH_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, context: "today_summary", stream: true }),
+    body: JSON.stringify({ messages, snapshot: snapshot ?? null }),
+    signal,
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   if (!res.body) {
     const text = await res.text();
-    onToken(text);
+    if (text) onToken(text);
     return;
   }
   const reader = res.body.getReader();
@@ -174,6 +167,7 @@ export async function askCoachStream(
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
-    onToken(decoder.decode(value, { stream: true }));
+    const chunk = decoder.decode(value, { stream: true });
+    if (chunk) onToken(chunk);
   }
 }

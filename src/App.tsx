@@ -153,7 +153,7 @@ export default function App() {
         }}
       />
       <LogWorkoutModal C={C} open={workoutOpen} onClose={() => setWorkoutOpen(false)} onAdd={() => {}} />
-      <ChatModal C={C} open={chatOpen} onClose={() => setChatOpen(false)} initialPrompt={chatPrefill} />
+      <ChatModal C={C} open={chatOpen} onClose={() => setChatOpen(false)} initialPrompt={chatPrefill} today={today.data} />
       <JournalSheet
         C={C}
         open={journalOpen}

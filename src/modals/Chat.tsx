@@ -1,22 +1,24 @@
 import { useEffect, useRef, useState } from "react";
+import { mutate } from "swr";
 import { FONT, MONO, type Palette } from "../theme";
-import type { ChatMessage } from "../types";
+import type { ChatMessage, TodayResponse } from "../types";
 import { Sheet } from "../components/Sheet";
 import { MicButton } from "../components/VoiceInput";
-import { askCoach } from "../api";
+import { askCoachStream, todayISO } from "../api";
 
 interface ChatModalProps {
   C: Palette;
   open: boolean;
   onClose: () => void;
   initialPrompt?: string;
+  today?: TodayResponse;
 }
 
 function nowStamp(): string {
   return new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }).toLowerCase().replace(" ", "");
 }
 
-export function ChatModal({ C, open, onClose, initialPrompt }: ChatModalProps) {
+export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalProps) {
   const [msgs, setMsgs] = useState<ChatMessage[]>([
     {
       from: "coach",
@@ -27,7 +29,7 @@ export function ChatModal({ C, open, onClose, initialPrompt }: ChatModalProps) {
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const animationRef = useRef<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (open && initialPrompt) setInput(initialPrompt);
@@ -38,69 +40,61 @@ export function ChatModal({ C, open, onClose, initialPrompt }: ChatModalProps) {
   }, [msgs, thinking]);
 
   useEffect(() => {
-    return () => {
-      if (animationRef.current != null) {
-        window.clearInterval(animationRef.current);
-        animationRef.current = null;
-      }
-    };
+    return () => abortRef.current?.abort();
   }, []);
-
-  const cancelAnimation = () => {
-    if (animationRef.current != null) {
-      window.clearInterval(animationRef.current);
-      animationRef.current = null;
-    }
-  };
-
-  const revealReply = (base: ChatMessage[], fullText: string) => {
-    cancelAnimation();
-    const reduceMotion =
-      typeof window !== "undefined" &&
-      window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
-
-    if (reduceMotion || fullText.length < 30) {
-      setMsgs([...base, { from: "coach", t: nowStamp(), text: fullText }]);
-      return;
-    }
-
-    const stamp = nowStamp();
-    setMsgs([...base, { from: "coach", t: stamp, text: "" }]);
-
-    const charsPerTick = 2;
-    const tickMs = 25;
-    let i = 0;
-    animationRef.current = window.setInterval(() => {
-      i = Math.min(i + charsPerTick, fullText.length);
-      setMsgs([...base, { from: "coach", t: stamp, text: fullText.slice(0, i) }]);
-      if (i >= fullText.length) cancelAnimation();
-    }, tickMs);
-  };
 
   const send = async () => {
     const text = input.trim();
     if (!text || thinking) return;
-    cancelAnimation();
     const t = nowStamp();
     const userMsg: ChatMessage = { from: "me", t, text };
     const next = [...msgs, userMsg];
     setMsgs(next);
     setInput("");
     setThinking(true);
+
+    const replyStamp = nowStamp();
+    let streamed = "";
+    let started = false;
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      const reply = await askCoach(next);
-      revealReply(next, reply || "(no response)");
-    } catch (err) {
-      setMsgs([
-        ...next,
-        {
-          from: "coach",
-          t: nowStamp(),
-          text: "Couldn't reach coach. Check your connection and try again.",
+      await askCoachStream(
+        next,
+        today,
+        (chunk) => {
+          streamed += chunk;
+          if (!started) {
+            started = true;
+            setMsgs([...next, { from: "coach", t: replyStamp, text: streamed }]);
+          } else {
+            setMsgs([...next, { from: "coach", t: replyStamp, text: streamed }]);
+          }
         },
-      ]);
+        controller.signal,
+      );
+      if (!streamed) {
+        setMsgs([...next, { from: "coach", t: replyStamp, text: "(no response)" }]);
+      }
+      // Pick up any side effects from coach tool use (log_meal, log_water, log_journal)
+      mutate("/api/today");
+      mutate(`/api/nutrition/${todayISO()}`);
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        setMsgs([
+          ...next,
+          {
+            from: "coach",
+            t: nowStamp(),
+            text: "Couldn't reach coach. Check your connection and try again.",
+          },
+        ]);
+      }
     } finally {
       setThinking(false);
+      abortRef.current = null;
     }
   };
 

@@ -1,46 +1,23 @@
 """
-Unit tests for the Coach Lambda (backend/functions/coach/handler.py).
+Unit tests for the coach system-prompt builder (shared/coach_context.py).
 
-Strategy:
-  - Bedrock is stubbed with botocore's Stubber at the module-level client.
-  - DynamoDB reads (get_item, query_items) are monkey-patched on shared.db
-    so the handler sees predictable scores/nutrition/user-config.
-  - No AWS calls, no moto — just unit-level verification of the handler
-    contract: input validation, system-prompt assembly, Bedrock wiring,
-    response shape, error paths.
+The coach Lambda itself (functions/coach/app.py) is a FastAPI app that runs
+behind Lambda Web Adapter and streams Bedrock responses; its request/response
+shape is exercised end-to-end in deploy smoke tests. These tests focus on the
+pure prompt-assembly logic, which is where the business rules live.
 
 Covers:
-  1. Happy path (valid messages → 200 with reply.text)
-  2. Empty messages list → 400
-  3. Malformed JSON body → 400
-  4. Last message not from user → 400
-  5. Bedrock raises ClientError → 500
-  6. System prompt includes today's scores + Retatrutide context
+  1. Snapshot path — TodayResponse-shaped dict yields today block with recovery,
+     strain, macros, caffeine, hydration.
+  2. DynamoDB fallback path — no snapshot → reads from DAILY_SCORES / NUTRITION
+     / WORKOUTS / BASELINES and produces the legacy today block.
+  3. All supporting sections: body composition, 7-day history, journal,
+     correlations, Retatrutide context, nutrition targets.
 """
-import importlib.util
-import json
-import os
 import sys
-from io import BytesIO
 from unittest.mock import MagicMock
 
 import pytest
-from botocore.exceptions import ClientError
-
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "shared"))
-
-COACH_HANDLER_PATH = os.path.join(ROOT, "functions", "coach", "handler.py")
-
-
-def _load_coach_handler():
-    """Load the coach handler under a unique module name so it doesn't collide
-    with other lambdas' `handler` modules in the same pytest session."""
-    spec = importlib.util.spec_from_file_location("coach_handler", COACH_HANDLER_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["coach_handler"] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 # ─── Fixtures ──────────────────────────────────────────────────────
@@ -103,7 +80,6 @@ def seed_baselines():
 
 @pytest.fixture
 def seed_body_comp():
-    """Withings body composition metrics keyed by date."""
     return {
         "2026-04-25": [
             {"metric_source": "weight#withings", "value": 169.2},
@@ -115,7 +91,6 @@ def seed_body_comp():
 
 @pytest.fixture
 def seed_week_scores():
-    """Last 7 days of scores for the history block."""
     return {
         "2026-04-25": {"recovery": 38, "recovery_zone": "red", "hrv": 45.5, "rhr": 70, "strain": 10.2, "sleep": {"total_min": 463}},
         "2026-04-24": {"recovery": 82, "recovery_zone": "green", "hrv": 49, "rhr": 60, "strain": 7.5, "sleep": {"total_min": 480}},
@@ -136,7 +111,7 @@ def seed_correlations():
 
 
 @pytest.fixture
-def handler_module(
+def patched_context(
     monkeypatch,
     seed_scores,
     seed_meals,
@@ -147,13 +122,17 @@ def handler_module(
     seed_journal,
     seed_correlations,
 ):
-    """Import a fresh coach.handler with shared.db stubbed and bedrock mocked."""
+    """Stub shared.db so coach_context sees deterministic data."""
+    # Force a fresh import so the monkeypatching takes effect on the module's
+    # own imports of get_table/get_item/query_items.
+    for name in ("shared.coach_context",):
+        sys.modules.pop(name, None)
+
     import shared.db as db_mod
 
     def fake_get_table(env_name):
         mock = MagicMock(name=f"Table<{env_name}>")
         mock._env = env_name
-        # Correlations block uses `.scan()` directly on the table object
         if env_name == "CORRELATIONS_TABLE":
             mock.scan.return_value = {"Items": seed_correlations}
         return mock
@@ -167,12 +146,9 @@ def handler_module(
         if env == "BASELINES_TABLE" and key.get("type") == "current":
             return seed_baselines
         if env == "JOURNAL_TABLE":
-            # Most recent journal lookup walks today → 2 days back
             if key.get("date") == seed_journal["date"]:
                 return seed_journal
             return None
-        if env == "USER_CONFIG_TABLE" and key.get("key") == "mateo":
-            return {"key": "mateo"}
         return None
 
     def fake_query_items(table, _sk, val, **_kw):
@@ -193,223 +169,87 @@ def handler_module(
     import shared.timezone as tz_mod
     monkeypatch.setattr(tz_mod, "local_today_str", lambda: "2026-04-26")
 
-    sys.modules.pop("coach_handler", None)
-    return _load_coach_handler()
+    # shared.coach_context binds get_table/get_item/query_items at import time
+    # so we patch the already-bound names too.
+    import shared.coach_context as ctx
+    monkeypatch.setattr(ctx, "get_table", fake_get_table)
+    monkeypatch.setattr(ctx, "get_item", fake_get_item)
+    monkeypatch.setattr(ctx, "query_items", fake_query_items)
+    monkeypatch.setattr(ctx, "local_today_str", lambda: "2026-04-26")
+    return ctx
 
 
-def _http_event(body):
-    """API Gateway HTTP API v2 event shape."""
-    if not isinstance(body, str):
-        body = json.dumps(body)
-    return {
-        "requestContext": {"http": {"method": "POST"}},
-        "routeKey": "POST /api/coach",
-        "body": body,
-        "isBase64Encoded": False,
-    }
+# ─── Tests: DynamoDB fallback path (no snapshot) ────────────────────
+
+def test_prompt_includes_today_data_and_reta(patched_context):
+    prompt = patched_context.build_system_prompt(None)
+    assert "Recovery: 72%" in prompt
+    assert "Strain so far: 8.4" in prompt
+    assert "Retatrutide" in prompt
+    assert "180g" in prompt
 
 
-def _stub_bedrock_response(handler_module, text="Recovery 72% — go train."):
-    """Replace the module-level bedrock client with a MagicMock that returns
-    a Bedrock-style response body with the given text."""
-    body_bytes = json.dumps({
-        "content": [{"type": "text", "text": text}],
-        "usage": {"input_tokens": 1234, "output_tokens": 12},
-    }).encode()
-    mock = MagicMock()
-    mock.invoke_model.return_value = {"body": BytesIO(body_bytes)}
-    handler_module.bedrock = mock
-    return mock
+def test_prompt_includes_todays_workouts(patched_context):
+    prompt = patched_context.build_system_prompt(None)
+    assert "Today's Workouts" in prompt
+    assert "Morning Workout" in prompt
+    assert "50 min" in prompt
+    assert "avg HR 112" in prompt
+    assert "strain 5.6" in prompt
 
 
-# ─── Tests ─────────────────────────────────────────────────────────
-
-def test_happy_path(handler_module):
-    mock = _stub_bedrock_response(handler_module, "Recovery 72% — go train.")
-    event = _http_event({"messages": [{"from": "me", "text": "am I clear to train?"}]})
-    resp = handler_module.lambda_handler(event, None)
-
-    assert resp["statusCode"] == 200, resp
-    body = json.loads(resp["body"])
-    assert body["reply"]["from"] == "coach"
-    assert body["reply"]["text"] == "Recovery 72% — go train."
-    assert "t" in body["reply"]
-
-    # Verify Bedrock was called with the right model + messages
-    mock.invoke_model.assert_called_once()
-    call_kwargs = mock.invoke_model.call_args.kwargs
-    assert call_kwargs["modelId"] == handler_module.MODEL_ID
-    sent_body = json.loads(call_kwargs["body"])
-    assert sent_body["messages"] == [{"role": "user", "content": "am I clear to train?"}]
+def test_prompt_includes_baselines_and_deltas(patched_context):
+    prompt = patched_context.build_system_prompt(None)
+    # Week history has HRV 45.5 vs baseline 42.0, RHR 70 vs 64 → deltas rendered
+    # on today's vitals.
+    assert "baseline 42.0" in prompt or "baseline 42" in prompt
+    assert "baseline 64" in prompt
 
 
-def test_no_messages_returns_400(handler_module):
-    _stub_bedrock_response(handler_module)
-    event = _http_event({"messages": []})
-    resp = handler_module.lambda_handler(event, None)
-
-    assert resp["statusCode"] == 400
-    assert "no messages provided" in json.loads(resp["body"])["error"]
+def test_prompt_includes_sleep_composition(patched_context):
+    prompt = patched_context.build_system_prompt(None)
+    assert "Deep:" in prompt
+    assert "REM:" in prompt
 
 
-def test_malformed_json_returns_400(handler_module):
-    _stub_bedrock_response(handler_module)
-    event = _http_event("not valid json at all")
-    resp = handler_module.lambda_handler(event, None)
-
-    assert resp["statusCode"] == 400
-    assert "invalid JSON body" in json.loads(resp["body"])["error"]
-
-
-def test_assistant_not_last_returns_400(handler_module):
-    _stub_bedrock_response(handler_module)
-    event = _http_event({
-        "messages": [
-            {"from": "me", "text": "hi"},
-            {"from": "coach", "text": "morning"},  # assistant last → invalid
-        ]
-    })
-    resp = handler_module.lambda_handler(event, None)
-
-    assert resp["statusCode"] == 400
-    assert "last message must be from user" in json.loads(resp["body"])["error"]
-
-
-def test_bedrock_exception_returns_500(handler_module):
-    mock = MagicMock()
-    mock.invoke_model.side_effect = ClientError(
-        {"Error": {"Code": "ValidationException", "Message": "bad model"}},
-        "InvokeModel",
-    )
-    handler_module.bedrock = mock
-    event = _http_event({"messages": [{"from": "me", "text": "hi"}]})
-    resp = handler_module.lambda_handler(event, None)
-
-    assert resp["statusCode"] == 500
-    assert "bedrock error" in json.loads(resp["body"])["error"]
-
-
-def test_system_prompt_has_today_data_and_reta(handler_module):
-    mock = _stub_bedrock_response(handler_module)
-    event = _http_event({"messages": [{"from": "me", "text": "briefing"}]})
-    handler_module.lambda_handler(event, None)
-
-    sent_body = json.loads(mock.invoke_model.call_args.kwargs["body"])
-    system = sent_body["system"]
-    # System may be either a string (pre-cache) or a list of blocks (post-cache).
-    # Concatenate for assertion so the test is resilient to Phase C changes.
-    if isinstance(system, list):
-        system_str = "".join(block.get("text", "") for block in system)
-    else:
-        system_str = system
-    assert "Recovery: 72%" in system_str
-    assert "Strain so far: 8.4" in system_str
-    assert "Retatrutide" in system_str
-    assert "180g" in system_str  # protein target anchor
-
-
-def test_system_prompt_includes_todays_workouts(handler_module):
-    mock = _stub_bedrock_response(handler_module)
-    event = _http_event({"messages": [{"from": "me", "text": "did i work out"}]})
-    handler_module.lambda_handler(event, None)
-
-    sent_body = json.loads(mock.invoke_model.call_args.kwargs["body"])
-    system = sent_body["system"]
-    system_str = system if isinstance(system, str) else "".join(b.get("text", "") for b in system)
-
-    # Workout section header + record details
-    assert "Today's Workouts" in system_str
-    assert "Morning Workout" in system_str
-    assert "50 min" in system_str
-    assert "avg HR 112" in system_str
-    assert "strain 5.6" in system_str
-
-
-def test_system_prompt_includes_baselines_and_deltas(handler_module):
-    mock = _stub_bedrock_response(handler_module)
-    event = _http_event({"messages": [{"from": "me", "text": "how do i look"}]})
-    handler_module.lambda_handler(event, None)
-    system = json.loads(mock.invoke_model.call_args.kwargs["body"])["system"]
-    s = system if isinstance(system, str) else "".join(b.get("text", "") for b in system)
-
-    # HRV 45.5 vs baseline 42.0 → ~8% above
-    assert "baseline 42.0" in s or "baseline 42" in s
-    # RHR 70 vs baseline 64 → ~9% above
-    assert "baseline 64" in s
-
-
-def test_system_prompt_includes_sleep_composition(handler_module):
-    mock = _stub_bedrock_response(handler_module)
-    handler_module.lambda_handler(_http_event({"messages": [{"from": "me", "text": "sleep"}]}), None)
-    system = json.loads(mock.invoke_model.call_args.kwargs["body"])["system"]
-    s = system if isinstance(system, str) else "".join(b.get("text", "") for b in system)
-
-    # Deep, REM, Core, Awake must appear
-    assert "Deep:" in s
-    assert "REM:" in s
-
-
-def test_system_prompt_includes_extended_vitals(handler_module, seed_scores):
-    # Add resp/spo2/wrist_temp to scores so they render
+def test_prompt_includes_extended_vitals(patched_context, seed_scores):
     seed_scores["resp"] = 14.3
     seed_scores["spo2"] = 97.2
     seed_scores["wrist_temp"] = 32.5
-
-    mock = _stub_bedrock_response(handler_module)
-    handler_module.lambda_handler(_http_event({"messages": [{"from": "me", "text": "vitals"}]}), None)
-    system = json.loads(mock.invoke_model.call_args.kwargs["body"])["system"]
-    s = system if isinstance(system, str) else "".join(b.get("text", "") for b in system)
-
-    assert "Respiratory rate:" in s and "14.3" in s
-    assert "SpO2:" in s and "97.2" in s
-    assert "Wrist temperature:" in s
+    prompt = patched_context.build_system_prompt(None)
+    assert "Respiratory rate:" in prompt and "14.3" in prompt
+    assert "SpO2:" in prompt and "97.2" in prompt
+    assert "Wrist temperature:" in prompt
 
 
-def test_system_prompt_includes_body_composition(handler_module):
-    mock = _stub_bedrock_response(handler_module)
-    handler_module.lambda_handler(_http_event({"messages": [{"from": "me", "text": "weight"}]}), None)
-    system = json.loads(mock.invoke_model.call_args.kwargs["body"])["system"]
-    s = system if isinstance(system, str) else "".join(b.get("text", "") for b in system)
-
-    assert "Body Composition" in s
-    assert "169.2" in s  # weight
-    assert "13.6" in s   # fat ratio
+def test_prompt_includes_body_composition(patched_context):
+    prompt = patched_context.build_system_prompt(None)
+    assert "Body Composition" in prompt
+    assert "169.2" in prompt
+    assert "13.6" in prompt
 
 
-def test_system_prompt_includes_week_history(handler_module):
-    mock = _stub_bedrock_response(handler_module)
-    handler_module.lambda_handler(_http_event({"messages": [{"from": "me", "text": "week"}]}), None)
-    system = json.loads(mock.invoke_model.call_args.kwargs["body"])["system"]
-    s = system if isinstance(system, str) else "".join(b.get("text", "") for b in system)
-
-    assert "Last 7 Days" in s
-    assert "2026-04-25" in s  # yesterday
+def test_prompt_includes_week_history(patched_context):
+    prompt = patched_context.build_system_prompt(None)
+    assert "Last 7 Days" in prompt
+    assert "2026-04-25" in prompt
 
 
-def test_system_prompt_includes_last_journal(handler_module):
-    mock = _stub_bedrock_response(handler_module)
-    handler_module.lambda_handler(_http_event({"messages": [{"from": "me", "text": "what did i do"}]}), None)
-    system = json.loads(mock.invoke_model.call_args.kwargs["body"])["system"]
-    s = system if isinstance(system, str) else "".join(b.get("text", "") for b in system)
-
-    assert "Most Recent Journal" in s
-    assert "alcohol" in s
-    assert "Mood: 3/5" in s
+def test_prompt_includes_last_journal(patched_context):
+    prompt = patched_context.build_system_prompt(None)
+    assert "Most Recent Journal" in prompt
+    assert "alcohol" in prompt
+    assert "Mood: 3/5" in prompt
 
 
-def test_system_prompt_includes_correlations(handler_module):
-    mock = _stub_bedrock_response(handler_module)
-    handler_module.lambda_handler(_http_event({"messages": [{"from": "me", "text": "patterns"}]}), None)
-    system = json.loads(mock.invoke_model.call_args.kwargs["body"])["system"]
-    s = system if isinstance(system, str) else "".join(b.get("text", "") for b in system)
-
-    assert "Learned Patterns" in s
-    assert "alcohol" in s and "HRV" in s
-    assert "-18" in s
+def test_prompt_includes_correlations(patched_context):
+    prompt = patched_context.build_system_prompt(None)
+    assert "Learned Patterns" in prompt
+    assert "alcohol" in prompt and "HRV" in prompt
+    assert "-18" in prompt
 
 
-def test_system_prompt_when_no_workouts_today(handler_module, monkeypatch):
-    # Swap the workouts fixture to empty without rewriting the whole chain
+def test_prompt_no_workouts_today(patched_context, monkeypatch):
     import shared.db as db_mod
     original = db_mod.query_items
 
@@ -420,16 +260,75 @@ def test_system_prompt_when_no_workouts_today(handler_module, monkeypatch):
         return original(table, sk, val, **kw)
 
     monkeypatch.setattr(db_mod, "query_items", no_workouts)
-    # Reload handler so it picks up the patched db
-    sys.modules.pop("coach_handler", None)
-    fresh = _load_coach_handler()
+    monkeypatch.setattr(patched_context, "query_items", no_workouts)
 
-    mock = _stub_bedrock_response(fresh)
-    event = _http_event({"messages": [{"from": "me", "text": "am i clear"}]})
-    fresh.lambda_handler(event, None)
+    prompt = patched_context.build_system_prompt(None)
+    assert "No workout logged today yet." in prompt
 
-    sent_body = json.loads(mock.invoke_model.call_args.kwargs["body"])
-    system_str = sent_body["system"] if isinstance(sent_body["system"], str) else "".join(
-        b.get("text", "") for b in sent_body["system"]
-    )
-    assert "No workout logged today yet." in system_str
+
+# ─── Tests: snapshot path (client-sent TodayResponse) ────────────────
+
+def test_snapshot_path_replaces_today_block(patched_context):
+    snapshot = {
+        "date": "Mon, Apr 27",
+        "recovery": 84,
+        "recoveryZone": "green",
+        "hrv": 55,
+        "rhr": 58,
+        "strain": 5.1,
+        "strainTarget": {"low": 13, "high": 16, "reason": "Recovered — push it"},
+        "sleep": {"score": 91, "hours": 7, "minutes": 50, "efficiency": 95, "deep": 110, "rem": 92, "core": 180, "awake": 8},
+        "sleepNeedTonight": {"totalMin": 460, "bedtimeBy": "10:00p"},
+        "steps": 8421,
+        "stepsGoal": 10000,
+        "calories": {"active": 420, "resting": 1680},
+        "water": 72,
+        "waterGoal": 100,
+        "caffeineMg": 180,
+        "caffeineGoal": 400,
+        "mealsToday": [
+            {"time": "08:00", "name": "Oikos Shake", "cal": 170, "p": 30, "c": 8, "f": 3},
+            {"time": "12:30", "name": "Chicken Bake", "cal": 770, "p": 61, "c": 78, "f": 25},
+        ],
+        "nutritionTargets": {"cal": 2200, "p": 180, "c": 190, "f": 65, "water": 100},
+        "base": {"hrv": 42.0, "rhr": 64, "resp": 14.5, "sleepNeed": 7.5, "steps": 10000},
+    }
+
+    prompt = patched_context.build_system_prompt(snapshot)
+    assert "live client snapshot" in prompt
+    assert "Recovery: 84%" in prompt
+    assert "HRV: 55 ms" in prompt
+    assert "baseline 42" in prompt  # delta rendered vs baseline
+    assert "Oikos Shake" in prompt
+    assert "Chicken Bake" in prompt
+    # Protein 30+61=91, calories 170+770=940
+    assert "Protein: 91g" in prompt
+    assert "Calories: 940" in prompt
+    assert "Caffeine: 180 mg" in prompt
+    assert "Water: 72 oz" in prompt
+    # Retatrutide / coach context still intact
+    assert "Retatrutide" in prompt
+    assert "Body Composition" in prompt  # still DB-driven
+
+
+def test_snapshot_with_null_vitals(patched_context):
+    """A snapshot with no HRV/RHR yet should degrade gracefully."""
+    snapshot = {
+        "date": "Tue, Apr 28",
+        "recovery": 70,
+        "recoveryZone": "yellow",
+        "hrv": None,
+        "rhr": None,
+        "strain": 0,
+        "strainTarget": {},
+        "sleep": {},
+        "sleepNeedTonight": {},
+        "calories": {},
+        "mealsToday": [],
+        "nutritionTargets": {},
+        "base": {},
+    }
+    prompt = patched_context.build_system_prompt(snapshot)
+    assert "HRV: n/a" in prompt
+    assert "Resting HR: n/a" in prompt
+    assert "No meals logged yet today." in prompt

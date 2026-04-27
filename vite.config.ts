@@ -25,6 +25,12 @@ export default defineConfig({
       },
       workbox: {
         runtimeCaching: [
+          // Meal writes and any GETs under /api/meal/* must never serve from
+          // cache — after tool-use logs a meal, stale cache would hide it.
+          {
+            urlPattern: /^https:\/\/5vvp43vamk\.execute-api\.us-west-2\.amazonaws\.com\/api\/meal.*/,
+            handler: "NetworkOnly",
+          },
           {
             urlPattern: /^https:\/\/5vvp43vamk\.execute-api\.us-west-2\.amazonaws\.com\/api\/.*/,
             handler: "NetworkFirst",

@@ -1,79 +1,20 @@
 """
-Coach Lambda — AI chat powered by Bedrock Claude.
+Coach context builder — assembles the system prompt for the coach Lambda.
 
-  POST /api/coach — Send messages, get streaming AI response
+Today's block is built from a client-supplied snapshot (TodayResponse shape
+from src/types.ts) so the coach sees the same data that's on Mateo's screen.
+Body composition, 7-day history, journal, and correlations are still read
+from DynamoDB since they change on daily cadence, not minute-by-minute.
 """
 
-import json
-import os
-from datetime import datetime, timedelta, timezone
-
-import boto3
+from datetime import datetime, timedelta
+from typing import Optional
 
 from shared.db import get_table, get_item, query_items
 from shared.timezone import local_today_str
 
-bedrock = boto3.client("bedrock-runtime", region_name="us-west-2")
-MODEL_ID = os.environ.get("COACH_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
 
-
-def lambda_handler(event, context):
-    body = _parse_body(event)
-    if not body:
-        return _resp(400, {"error": "invalid JSON body"})
-
-    messages = body.get("messages", [])
-    if not messages:
-        return _resp(400, {"error": "no messages provided"})
-
-    system_prompt = _build_system_prompt()
-
-    bedrock_messages = []
-    for m in messages:
-        role = "user" if m.get("from") == "me" else "assistant"
-        bedrock_messages.append({"role": role, "content": m.get("text", "")})
-
-    if bedrock_messages and bedrock_messages[-1]["role"] != "user":
-        return _resp(400, {"error": "last message must be from user"})
-
-    try:
-        response = bedrock.invoke_model(
-            modelId=MODEL_ID,
-            contentType="application/json",
-            accept="application/json",
-            body=json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 1024,
-                "system": system_prompt,
-                "messages": bedrock_messages,
-            }),
-        )
-
-        result = json.loads(response["body"].read())
-        reply_text = ""
-        for block in result.get("content", []):
-            if block.get("type") == "text":
-                reply_text += block["text"]
-
-        return _resp(200, {
-            "reply": {
-                "from": "coach",
-                "t": datetime.now(timezone.utc).strftime("%-I:%M%p").lower(),
-                "text": reply_text,
-            }
-        })
-
-    except Exception as e:
-        return _resp(500, {"error": f"bedrock error: {str(e)}"})
-
-
-def _build_system_prompt():
-    """Build the coach system prompt with today's real data + 7-day context.
-
-    Pulls from 6 DynamoDB tables: daily scores, workouts, nutrition, health
-    metrics (for body composition), baselines (for deviation context),
-    journal (last night's tags), and correlations (learned patterns).
-    """
+def build_system_prompt(snapshot: Optional[dict]) -> str:
     today_str = local_today_str()
 
     scores_table = get_table("DAILY_SCORES_TABLE")
@@ -84,13 +25,15 @@ def _build_system_prompt():
     journal_table = get_table("JOURNAL_TABLE")
     corr_table = get_table("CORRELATIONS_TABLE")
 
-    scores = get_item(scores_table, {"date": today_str}) or {}
-    baselines = get_item(baselines_table, {"type": "current"}) or {}
+    if snapshot and isinstance(snapshot, dict):
+        today_block = _today_block_from_snapshot(snapshot)
+    else:
+        scores = get_item(scores_table, {"date": today_str}) or {}
+        baselines = get_item(baselines_table, {"type": "current"}) or {}
+        meals_today = query_items(nutrition_table, "date", today_str)
+        workouts_today = query_items(workouts_table, "date", today_str)
+        today_block = _today_block_from_db(today_str, scores, meals_today, workouts_today, baselines)
 
-    meals_today = query_items(nutrition_table, "date", today_str)
-    workouts_today = query_items(workouts_table, "date", today_str)
-
-    today_block = _today_block(today_str, scores, meals_today, workouts_today, baselines)
     body_block = _body_composition_block(metrics_table, today_str)
     week_block = _week_history_block(scores_table, workouts_table, today_str)
     journal_block = _last_night_journal_block(journal_table, today_str)
@@ -111,6 +54,16 @@ Retatrutide (GLP-1/GIP/Glucagon triple agonist), 2mg dose, started April 21, 202
 - Protein (180g/day) is NON-NEGOTIABLE to protect lean mass
 - Smaller frequent meals work better than large ones
 - Suggest liquid protein (shakes, Oikos) when appetite is low
+
+## Your Tools
+You have tools to take action for Mateo. Use them proactively when he mentions consuming something or notes a feeling.
+
+- log_meal(text): Free-form meal description → estimates macros AND logs it. Use this the moment Mateo says "had a …", "just ate …", "drank a …". Includes hydration and caffeine automatically.
+- log_water(oz): Log water intake in ounces. Use for "drank a glass of water" type messages with no food.
+- log_journal(tags, mood?, stress?, soreness?): Tag how he's feeling. Use when he mentions mood, stress, soreness, alcohol, back flare, travel, etc. Valid tags: alcohol, caffeine_late, ate_late, heavy_meal, hydrated, screens_bed, late_bedtime, meditated, stretched, sauna, cold, sunlight_am, stress, social, travel, sick, back_flare.
+- get_recent_meals(days): Look up the last N days of meals. Use when Mateo asks about what he ate or when you need context on recent intake.
+
+When you log something, confirm what you did with specific numbers (e.g. "Logged: green tea — 2 cal, 12 oz water, 30 mg caffeine."). Don't ask for confirmation first; he can edit in the Fuel tab if you got it wrong.
 
 {today_block}
 
@@ -140,10 +93,103 @@ Direct, data-first. Like a coach reviewing game film.
 - Keep responses concise (2-4 sentences for simple questions, more for briefings)"""
 
 
-# ─── Prompt section builders ──────────────────────────────────────────
+def _today_block_from_snapshot(s: dict) -> str:
+    """Build today's data block from the client-sent TodayResponse shape."""
+    recovery = s.get("recovery", "unknown")
+    zone = s.get("recoveryZone", "unknown")
+    hrv = s.get("hrv")
+    rhr = s.get("rhr")
+    resp = s.get("resp")
+    spo2 = s.get("spo2")
+    wrist = s.get("wristTemp")
+    strain = s.get("strain", 0)
+    strain_target = s.get("strainTarget") or {}
+    sleep = s.get("sleep") or {}
+    sleep_need = s.get("sleepNeedTonight") or {}
+    steps = s.get("steps")
+    steps_goal = s.get("stepsGoal")
+    calories = s.get("calories") or {}
+    meals = s.get("mealsToday") or []
+    water = s.get("water", 0)
+    water_goal = s.get("waterGoal", 100)
+    caffeine = s.get("caffeineMg", 0)
+    caffeine_goal = s.get("caffeineGoal", 400)
+    nutrition_targets = s.get("nutritionTargets") or {}
+    base = s.get("base") or {}
+
+    protein = sum(m.get("p", 0) for m in meals)
+    carbs = sum(m.get("c", 0) for m in meals)
+    fat = sum(m.get("f", 0) for m in meals)
+    cals = sum(m.get("cal", 0) for m in meals)
+
+    def _delta(val, base_val):
+        if val is None or base_val is None:
+            return ""
+        try:
+            d = float(val) - float(base_val)
+            pct = (d / float(base_val)) * 100 if float(base_val) else 0
+            sign = "+" if d >= 0 else ""
+            return f" (baseline {base_val}, {sign}{pct:.0f}%)"
+        except Exception:
+            return ""
+
+    hrv_str = f"{hrv} ms{_delta(hrv, base.get('hrv'))}" if hrv is not None else "n/a"
+    rhr_str = f"{rhr} bpm{_delta(rhr, base.get('rhr'))}" if rhr is not None else "n/a"
+    resp_str = f"{resp} br/min{_delta(resp, base.get('resp'))}" if resp is not None else "n/a"
+    spo2_str = f"{spo2}%" if spo2 is not None else "n/a"
+    wrist_str = f"{wrist}°C" if wrist is not None else "n/a"
+
+    hours = sleep.get("hours", 0)
+    minutes = sleep.get("minutes", 0)
+    sleep_str = f"{hours}h {minutes}m" if (hours or minutes) else "n/a"
+
+    meal_lines = []
+    for m in meals:
+        meal_lines.append(
+            f"- {m.get('time', '')} {m.get('name', '')}: "
+            f"{m.get('cal', 0)} cal, {m.get('p', 0)}P / {m.get('c', 0)}C / {m.get('f', 0)}F"
+        )
+    meals_block = "\n".join(meal_lines) if meal_lines else "No meals logged yet today."
+
+    target_cal = nutrition_targets.get("cal", 2200)
+    target_p = nutrition_targets.get("p", 180)
+    target_c = nutrition_targets.get("c", 190)
+    target_f = nutrition_targets.get("f", 65)
+
+    return f"""## Today's Data (from live client snapshot — {s.get('date', '')})
+
+### Recovery & Readiness
+- Recovery: {recovery}% ({zone})
+- HRV: {hrv_str}
+- Resting HR: {rhr_str}
+- Respiratory rate: {resp_str}
+- SpO2: {spo2_str}
+- Wrist temperature: {wrist_str}
+
+### Sleep Last Night
+- Score: {sleep.get('score', 'n/a')}/100
+- Duration: {sleep_str} ({sleep.get('efficiency', 0)}% efficiency)
+- Deep: {sleep.get('deep', 0)} min | REM: {sleep.get('rem', 0)} min | Core: {sleep.get('core', 0)} min | Awake: {sleep.get('awake', 0)} min
+- Sleep need tonight: {sleep_need.get('totalMin', 'n/a')} min (bed by {sleep_need.get('bedtimeBy', 'n/a')})
+
+### Strain & Activity
+- Strain so far: {strain}/21 (target {strain_target.get('low', '?')}-{strain_target.get('high', '?')}: {strain_target.get('reason', '')})
+- Steps: {steps if steps is not None else 'n/a'} / {steps_goal if steps_goal else '—'}
+- Active calories: {calories.get('active', 'n/a')} kcal
+
+### Nutrition So Far
+{meals_block}
+
+- Calories: {cals} / {target_cal} target
+- Protein: {protein}g / {target_p}g target
+- Carbs: {carbs}g / {target_c}g target
+- Fat: {fat}g / {target_f}g target
+- Water: {water} oz / {water_goal} oz target
+- Caffeine: {caffeine} mg / {caffeine_goal} mg cap"""
 
 
-def _today_block(today_str, scores, meals_today, workouts_today, baselines):
+def _today_block_from_db(today_str, scores, meals_today, workouts_today, baselines):
+    """Fallback today block if the client didn't send a snapshot."""
     protein = sum(m.get("p", 0) for m in meals_today if m.get("meal_id", "").startswith("meal_"))
     carbs = sum(m.get("c", 0) for m in meals_today if m.get("meal_id", "").startswith("meal_"))
     fat = sum(m.get("f", 0) for m in meals_today if m.get("meal_id", "").startswith("meal_"))
@@ -165,7 +211,6 @@ def _today_block(today_str, scores, meals_today, workouts_today, baselines):
     steps = scores.get("steps")
     active_cal = scores.get("active_cal")
 
-    # Baseline deltas (so coach can say "above baseline" / "below baseline")
     def delta(val, base):
         if val is None or base is None:
             return ""
@@ -186,7 +231,6 @@ def _today_block(today_str, scores, meals_today, workouts_today, baselines):
         if wrist_temp is not None else "n/a"
     )
 
-    # Sleep breakdown
     total_min = sleep.get("total_min", 0)
     sleep_hours = f"{total_min // 60}h {total_min % 60}m" if total_min else "n/a"
     deep = sleep.get("deep_min", 0)
@@ -249,7 +293,6 @@ def _today_block(today_str, scores, meals_today, workouts_today, baselines):
 
 
 def _body_composition_block(metrics_table, today_str):
-    """Latest Withings body comp reading within the last 14 days."""
     latest = {}
     try:
         dt = datetime.strptime(today_str, "%Y-%m-%d")
@@ -261,7 +304,7 @@ def _body_composition_block(metrics_table, today_str):
                 if src.endswith("#withings") and src.replace("#withings", "") not in latest:
                     key = src.replace("#withings", "")
                     latest[key] = (m.get("value"), d)
-            if len(latest) >= 5:  # weight, fat_ratio, fat_mass, muscle_mass, hydration
+            if len(latest) >= 5:
                 break
     except Exception:
         pass
@@ -286,7 +329,6 @@ def _body_composition_block(metrics_table, today_str):
 
 
 def _week_history_block(scores_table, workouts_table, today_str):
-    """Last 7 days of recovery/strain/sleep/HRV + last 7 workouts."""
     try:
         dt = datetime.strptime(today_str, "%Y-%m-%d")
     except Exception:
@@ -294,7 +336,7 @@ def _week_history_block(scores_table, workouts_table, today_str):
 
     day_lines = []
     workout_lines = []
-    for i in range(1, 8):  # yesterday → 7 days ago
+    for i in range(1, 8):
         d = (dt - timedelta(days=i)).strftime("%Y-%m-%d")
         s = get_item(scores_table, {"date": d}) or {}
         if s:
@@ -318,18 +360,17 @@ def _week_history_block(scores_table, workouts_table, today_str):
     if day_lines:
         sections.append("## Last 7 Days (daily summary)\n" + "\n".join(day_lines))
     if workout_lines:
-        sections.append("## Last 7 Days (workouts)\n" + "\n".join(workout_lines[:10]))  # cap at 10
+        sections.append("## Last 7 Days (workouts)\n" + "\n".join(workout_lines[:10]))
     return "\n\n".join(sections) if sections else "## Last 7 Days\nNo recent data."
 
 
 def _last_night_journal_block(journal_table, today_str):
-    """Most recent journal within the last 2 days."""
     try:
         dt = datetime.strptime(today_str, "%Y-%m-%d")
     except Exception:
         return ""
 
-    for i in range(3):  # today, yesterday, 2 days ago
+    for i in range(3):
         d = (dt - timedelta(days=i)).strftime("%Y-%m-%d")
         j = get_item(journal_table, {"date": d})
         if j and (j.get("tags") or j.get("mood") is not None):
@@ -352,16 +393,8 @@ def _last_night_journal_block(journal_table, today_str):
 
 
 def _correlations_block(corr_table):
-    """Top correlations by confidence, capped at 5. Table is tag+metric keyed,
-    so we scan — it's tiny."""
-    try:
-        from shared.db import get_client
-    except ImportError:
-        get_client = None
-
     items = []
     try:
-        # Scan is fine here; the table only contains tens of rows
         resp = corr_table.scan(Limit=50)
         items = resp.get("Items", [])
     except Exception:
@@ -370,7 +403,6 @@ def _correlations_block(corr_table):
     if not items:
         return "## Learned Patterns\nNot enough data yet (need ~14 days of journal entries)."
 
-    # Prefer high-confidence, then absolute effect size
     conf_rank = {"high": 3, "medium": 2, "low": 1}
     items.sort(key=lambda x: (conf_rank.get(x.get("confidence"), 0), abs(float(x.get("effect", 0)))), reverse=True)
 
@@ -383,25 +415,3 @@ def _correlations_block(corr_table):
             f"(n={c.get('n')}, {c.get('confidence')} confidence)"
         )
     return "\n".join(lines)
-
-
-def _parse_body(event):
-    body = event.get("body", "")
-    if event.get("isBase64Encoded"):
-        import base64
-        body = base64.b64decode(body).decode("utf-8")
-    try:
-        return json.loads(body) if isinstance(body, str) else body
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-
-def _resp(code, body):
-    return {
-        "statusCode": code,
-        "headers": {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-        },
-        "body": json.dumps(body, default=str),
-    }

@@ -1,3 +1,5 @@
+import { useEffect } from "react";
+import { mutate } from "swr";
 import { FONT, type Palette } from "../theme";
 import type { TodayResponse } from "../types";
 import { Panel } from "../components/Panel";
@@ -10,6 +12,13 @@ interface CoachScreenProps {
 }
 
 export function CoachScreen({ C, today, onOpenChat }: CoachScreenProps) {
+  // SWR's revalidateOnFocus only fires on browser-level focus, not tab
+  // switches within the SPA. Explicit mutate on mount guarantees fresh data
+  // whenever Mateo opens the Coach tab.
+  useEffect(() => {
+    mutate("/api/today");
+  }, []);
+
   return (
     <div>
       <SectionHead C={C} kicker="AI briefings" title="Coach" />

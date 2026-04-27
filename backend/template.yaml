@@ -427,14 +427,23 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: functions/coach/
-      Handler: handler.lambda_handler
+      Handler: run.sh
       Timeout: 120
-      MemorySize: 512
+      MemorySize: 1024
+      Layers:
+        - !Sub 'arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:27'
+      Environment:
+        Variables:
+          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
+          PORT: '8080'
+          AWS_LWA_INVOKE_MODE: response_stream
       Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref NutritionTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JournalTable
         - DynamoDBReadPolicy:
             TableName: !Ref DailyScoresTable
-        - DynamoDBReadPolicy:
-            TableName: !Ref NutritionTable
         - DynamoDBReadPolicy:
             TableName: !Ref HealthMetricsTable
         - DynamoDBReadPolicy:
@@ -444,8 +453,6 @@ Resources:
         - DynamoDBReadPolicy:
             TableName: !Ref BaselinesTable
         - DynamoDBReadPolicy:
-            TableName: !Ref JournalTable
-        - DynamoDBReadPolicy:
             TableName: !Ref CorrelationsTable
         - Statement:
             - Effect: Allow
@@ -453,13 +460,17 @@ Resources:
                 - bedrock:InvokeModelWithResponseStream
                 - bedrock:InvokeModel
               Resource: '*'
-      Events:
-        PostCoach:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref HttpApi
-            Path: /api/coach
-            Method: POST
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: RESPONSE_STREAM
+        Cors:
+          AllowOrigins:
+            - '*'
+          AllowMethods:
+            - POST
+          AllowHeaders:
+            - Content-Type
+          MaxAge: 3600
 
 Outputs:
   ApiUrl:
@@ -468,3 +479,6 @@ Outputs:
   IngestHealthUrl:
     Description: HealthAutoExport target URL
     Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/ingest/health'
+  CoachFunctionUrl:
+    Description: Streaming coach Function URL (set as VITE_COACH_URL in Vercel)
+    Value: !GetAtt CoachFunctionUrl.FunctionUrl
