@@ -418,8 +418,9 @@ def save_meal(payload: dict, date: Optional[str] = None) -> dict:
         body = {**body, **KNOWN_FOODS[quick]}
 
     meal_id = f"meal_{int(time.time() * 1000)}"
-    now_hour = local_now().hour
-    time_str = body.get("time") or f"{now_hour}:00"
+    now_local = local_now()
+    now_hour = now_local.hour
+    time_str = body.get("time") or f"{now_local.hour:02d}:{now_local.minute:02d}"
 
     item = {
         "date": date,
@@ -575,9 +576,25 @@ def delete_meal(meal_id: str, date: Optional[str] = None) -> dict:
     return {"ok": True, "meal_id": meal_id, "companions_deleted": companions}
 
 
+def delete_water(water_id: str, date: Optional[str] = None) -> dict:
+    """Delete a standalone water row. Use for correcting duplicate log_water calls."""
+    if not water_id or not water_id.startswith("water_"):
+        raise ValueError("invalid water_id")
+    table = get_table("NUTRITION_TABLE")
+    date = date or local_today_str()
+
+    existing = get_item(table, {"date": date, "meal_id": water_id})
+    if not existing:
+        return {"ok": False, "reason": "not found", "water_id": water_id}
+
+    table.delete_item(Key={"date": date, "meal_id": water_id})
+    return {"ok": True, "water_id": water_id}
+
+
 def get_recent_meals(days: int = 1) -> list:
-    """Return meal rows for the last `days` days (today + days-1 prior),
-    sorted by date desc then time desc. Water rows excluded."""
+    """Return meal AND water rows for the last `days` days (today + days-1 prior),
+    sorted by date desc then time desc. Each row has a `kind` discriminator so
+    the coach knows which delete tool to use (delete_meal vs delete_water)."""
     table = get_table("NUTRITION_TABLE")
     today_dt = local_now()
     out = []
@@ -585,20 +602,30 @@ def get_recent_meals(days: int = 1) -> list:
         d = (today_dt - timedelta(days=i)).strftime("%Y-%m-%d")
         rows = query_items(table, "date", d) or []
         for m in rows:
-            if not m.get("meal_id", "").startswith("meal_"):
-                continue
-            out.append({
-                "date": d,
-                "meal_id": m.get("meal_id"),
-                "time": m.get("time"),
-                "name": m.get("name"),
-                "cal": m.get("cal"),
-                "p": m.get("p"),
-                "c": m.get("c"),
-                "f": m.get("f"),
-                "tag": m.get("tag"),
-                "water_oz": m.get("water_oz"),
-                "caffeine_mg": m.get("caffeine_mg"),
-            })
-    out.sort(key=lambda m: (m["date"], m.get("time") or ""), reverse=True)
+            mid = m.get("meal_id", "")
+            if mid.startswith("meal_"):
+                out.append({
+                    "kind": "meal",
+                    "date": d,
+                    "meal_id": mid,
+                    "time": m.get("time"),
+                    "name": m.get("name"),
+                    "cal": m.get("cal"),
+                    "p": m.get("p"),
+                    "c": m.get("c"),
+                    "f": m.get("f"),
+                    "tag": m.get("tag"),
+                    "water_oz": m.get("water_oz"),
+                    "caffeine_mg": m.get("caffeine_mg"),
+                })
+            elif mid.startswith("water_"):
+                out.append({
+                    "kind": "water",
+                    "date": d,
+                    "water_id": mid,
+                    "oz": m.get("oz"),
+                    "logged_at": m.get("logged_at"),
+                    "source_meal_id": m.get("source_meal_id"),
+                })
+    out.sort(key=lambda m: (m["date"], m.get("time") or m.get("logged_at") or ""), reverse=True)
     return out

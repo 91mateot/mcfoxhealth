@@ -28,6 +28,7 @@ from shared.nutrition_service import (
     log_journal as svc_log_journal,
     get_recent_meals as svc_get_recent_meals,
     delete_meal as svc_delete_meal,
+    delete_water as svc_delete_water,
 )
 
 logger = logging.getLogger("coach")
@@ -139,6 +140,24 @@ TOOLS = [
             "required": ["meal_id"],
         },
     },
+    {
+        "name": "delete_water",
+        "description": (
+            "Delete a previously-logged standalone water row. Use ONLY to correct a "
+            "duplicate or wrong log_water call. get_recent_meals returns water rows "
+            "with kind='water' and water_id — use that water_id here."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "water_id": {
+                    "type": "string",
+                    "description": "The water_id to delete (e.g. 'water_1777323846487').",
+                },
+            },
+            "required": ["water_id"],
+        },
+    },
 ]
 
 
@@ -159,6 +178,8 @@ def _execute_tool(name: str, args: dict) -> dict:
             return {"meals": svc_get_recent_meals(int(args.get("days", 1)))}
         if name == "delete_meal":
             return svc_delete_meal(args.get("meal_id", ""))
+        if name == "delete_water":
+            return svc_delete_water(args.get("water_id", ""))
         return {"error": f"unknown tool {name}"}
     except Exception as e:
         logger.exception("tool %s failed", name)

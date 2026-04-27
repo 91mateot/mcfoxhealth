@@ -9,6 +9,7 @@ import { SectionHead } from "../components/SectionHead";
 import { Btn } from "../components/Btn";
 import { HydrationPanel } from "../components/HydrationPanel";
 import { CaffeinePanel } from "../components/CaffeinePanel";
+import { formatMealTime } from "../api";
 
 interface FuelScreenProps {
   C: Palette;
@@ -208,8 +209,8 @@ function MealRow({ C, m, last, planned, onClick }: { C: Palette; m: Meal; last: 
         borderBottom: last ? "none" : `1px solid ${C.border}`,
       }}
     >
-      <div style={{ width: 42 }}>
-        <div style={{ fontSize: 11, color: planned ? C.t4 : C.t3, fontFamily: MONO, fontWeight: 600 }}>{m.time}</div>
+      <div style={{ width: 52 }}>
+        <div style={{ fontSize: 11, color: planned ? C.t4 : C.t3, fontFamily: MONO, fontWeight: 600 }}>{formatMealTime(m.time)}</div>
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div

@@ -59,18 +59,24 @@ Retatrutide (GLP-1/GIP/Glucagon triple agonist), 2mg dose, started April 21, 202
 You have tools to take action for Mateo. Use them proactively when he mentions consuming something or notes a feeling.
 
 - log_meal(text): Free-form meal description → estimates macros AND logs it. Use this the moment Mateo says "had a …", "just ate …", "drank a …". Includes hydration and caffeine automatically.
-- log_water(oz): Log water intake in ounces. Use for "drank a glass of water" type messages with no food.
+- log_water(oz): Log plain water intake in ounces. Use for "drank a glass of water" / "16 oz water". Do NOT use for beverages that contain water (tea, coffee, soda, etc. — those go through log_meal).
 - log_journal(tags, mood?, stress?, soreness?): Tag how he's feeling. Use when he mentions mood, stress, soreness, alcohol, back flare, travel, etc. Valid tags: alcohol, caffeine_late, ate_late, heavy_meal, hydrated, screens_bed, late_bedtime, meditated, stretched, sauna, cold, sunlight_am, stress, social, travel, sick, back_flare.
-- get_recent_meals(days): Look up the last N days of meals. Returns each meal's meal_id, which you'll need if you must delete one.
-- delete_meal(meal_id): Remove a previously-logged meal (and its water companion). ONLY use this to fix a mistake — e.g. you logged the wrong thing, or Mateo says "delete that".
+- get_recent_meals(days): Look up recent rows. Returns both meals (kind="meal", with meal_id) AND water entries (kind="water", with water_id). Use to find an id you need to delete.
+- delete_meal(meal_id): Remove a previously-logged meal (and its water companion). ONLY use to fix a mistake — e.g. you logged the wrong thing, or Mateo says "delete that".
+- delete_water(water_id): Remove a previously-logged standalone water entry. Same rule — only to fix a mistake.
 
 ## CRITICAL: logging rules
-- **log_meal is append-only** — each call creates a NEW row. Never call log_meal twice for the same consumption. If Mateo corrects or clarifies what he ate (e.g. he said "tea" and then "I meant green tea"), you MUST:
-  1. Call get_recent_meals to find the meal_id of the one you just logged.
-  2. Call delete_meal with that meal_id.
-  3. THEN call log_meal once with the corrected description.
-- Never "update" a meal by re-logging it. Either log once correctly, or delete-then-relog.
+- **log_meal AND log_water are append-only** — each call creates a NEW row. Never call either one twice for the same consumption. If Mateo corrects or clarifies (e.g. "had tea" then "I meant green tea", or "34 oz water" then "wait, 24 oz"), you MUST:
+  1. Call get_recent_meals to find the meal_id (kind="meal") or water_id (kind="water") of the row you just logged.
+  2. Call delete_meal(meal_id) OR delete_water(water_id) — pick based on `kind`.
+  3. THEN call log_meal or log_water ONCE with the corrected value.
+- Never "update" a row by re-logging it. Either log once correctly, or delete-then-relog.
 - When confirming, state the specific numbers: "Logged: green tea — 2 cal, 8 oz water, 30 mg caffeine." Don't ask for confirmation first; Mateo can edit in the Fuel tab.
+
+## CRITICAL: what "water" and "hydration" mean
+Two different numbers live in your context and they are NOT the same:
+- **Beverage hydration intake** is in the "Nutrition So Far" block as "Water: X oz". This is what Mateo cares about day-to-day. When he asks about hydration, this is what you report.
+- **Body water** appears in the "Body Composition" block as "Body composition: body water (lbs)". This is a Withings scale estimate of the water weight inside his body, not what he drank. Only mention it if he specifically asks about body composition. NEVER cite it when discussing daily hydration.
 
 {today_block}
 
@@ -319,13 +325,13 @@ def _body_composition_block(metrics_table, today_str):
     if not latest:
         return "## Body Composition\nNo recent body composition data."
 
-    lines = ["## Body Composition (most recent Withings reads)"]
+    lines = ["## Body Composition (most recent Withings reads — these are body-composition metrics, NOT daily intake)"]
     labels = {
         "weight": "Weight",
         "fat_ratio": "Body fat",
         "fat_mass": "Fat mass",
         "muscle_mass": "Lean mass",
-        "hydration": "Body water",
+        "hydration": "Body water (Withings estimate of water inside the body — NOT beverage intake)",
     }
     units = {"weight": "lbs", "fat_ratio": "%", "fat_mass": "lbs", "muscle_mass": "lbs", "hydration": "lbs"}
     for key in ("weight", "fat_ratio", "muscle_mass", "fat_mass", "hydration"):

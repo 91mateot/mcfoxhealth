@@ -6,7 +6,7 @@ import { Btn } from "../components/Btn";
 import { Chip } from "../components/Chip";
 import { ProgressBar } from "../components/ProgressBar";
 import { VoiceInput } from "../components/VoiceInput";
-import { addFavorite, deleteMeal, estimateMeal, patchMeal } from "../api";
+import { addFavorite, deleteMeal, estimateMeal, formatMealTime, patchMeal } from "../api";
 
 interface MealDetailProps {
   C: Palette;
@@ -138,7 +138,7 @@ export function MealDetailModal({ C, open, onClose, meal, date, targets }: MealD
   const shareOf = (val: number, goal: number) => (goal > 0 ? Math.min(100, (val / goal) * 100) : 0);
 
   return (
-    <Sheet C={C} open={open} onClose={onClose} title={meal.time ? `${meal.time} · ${titleCase(meal.tag) || "Meal"}` : "Meal"} height="88%">
+    <Sheet C={C} open={open} onClose={onClose} title={meal.time ? `${formatMealTime(meal.time)} · ${titleCase(meal.tag) || "Meal"}` : "Meal"} height="88%">
       {mode === "view" && (
         <>
           <div style={{ fontSize: 14, fontWeight: 700, color: C.t, marginBottom: 10, lineHeight: 1.35, whiteSpace: "pre-wrap" }}>

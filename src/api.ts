@@ -87,6 +87,17 @@ export function todayISO(): string {
   return `${y}-${m}-${d}`;
 }
 
+export function formatMealTime(t: string): string {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(t);
+  if (!match) return t;
+  const h24 = Number(match[1]);
+  const mm = match[2];
+  if (h24 < 0 || h24 > 23) return t;
+  const suffix = h24 >= 12 ? "pm" : "am";
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${h12}:${mm}${suffix}`;
+}
+
 export async function logMeal(meal: MealInput) {
   const result = await post<{ ok: boolean; meal_id?: string }>("/api/meal", meal);
   mutate("/api/today");
