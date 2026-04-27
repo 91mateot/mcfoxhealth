@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mateo · Performance</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; background: #050505; font-family: 'Outfit', system-ui, sans-serif; color: #eee; overflow-x: hidden; }
+  * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+  ::-webkit-scrollbar { width: 0; height: 0; }
+  .app-bg {
+    min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    padding: 28px 12px;
+    background:
+      radial-gradient(1000px 600px at 15% 10%, rgba(212,255,58,0.05), transparent 50%),
+      radial-gradient(800px 500px at 85% 90%, rgba(255,107,53,0.04), transparent 50%),
+      #050505;
+  }
+  .tweak-panel {
+    position: fixed; bottom: 20px; right: 20px; z-index: 1000;
+    background: #141418; border: 1px solid rgba(255,255,255,0.08); border-radius: 18px;
+    padding: 14px; color: #eee; font-family: 'Outfit', sans-serif; font-size: 12px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.6);
+    width: 220px;
+  }
+  .tweak-panel h4 { margin: 0 0 10px; font-size: 10px; text-transform: uppercase; letter-spacing: .14em; color: #888; font-weight: 700; }
+  .tweak-panel .opt {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 10px;
+    cursor: pointer; margin-bottom: 4px; transition: background .15s;
+  }
+  .tweak-panel .opt:hover { background: #1d1d22; }
+  .tweak-panel .opt.active { background: #222227; }
+  .tweak-panel .swatch { width: 14px; height: 14px; border-radius: 4px; flex-shrink: 0; }
+  .tweak-panel .swatch-row { display: flex; gap: 3px; }
+  .tweak-panel label { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; font-size: 11.5px; color: #aaa; }
+</style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script type="text/babel" src="ios-frame.jsx"></script>
+  <script type="text/babel" src="data.jsx"></script>
+  <script type="text/babel" src="theme.jsx"></script>
+  <script type="text/babel" src="ui.jsx"></script>
+  <script type="text/babel" src="screens1.jsx"></script>
+  <script type="text/babel" src="screens2.jsx"></script>
+  <script type="text/babel" src="modals.jsx"></script>
+  <script type="text/babel" src="voice.jsx"></script>
+  <script type="text/babel" src="journal.jsx"></script>
+  <script type="text/babel" src="trends.jsx"></script>
+
+  <script type="text/babel">
+  const { useState, useEffect, useRef } = React;
+
+  function App() {
+    const [palette, setPalette] = useState(TWEAKS.palette || "lime");
+    const [tab, setTab] = useState(() => localStorage.getItem("mateo-tab") || "today");
+    const [week, setWeek] = useState(0);
+    const [showCoach, setShowCoachToggle] = useState(TWEAKS.showCoachInsights !== false);
+    const [sheetRing, setSheetRing] = useState(null);
+    const [mealOpen, setMealOpen] = useState(false);
+    const [mealPrefill, setMealPrefill] = useState("");
+    const [workoutOpen, setWorkoutOpen] = useState(false);
+    const [chatOpen, setChatOpen] = useState(false);
+    const [journalOpen, setJournalOpen] = useState(false);
+    const [tweakOpen, setTweakOpen] = useState(false);
+
+    useEffect(() => { localStorage.setItem("mateo-tab", tab); }, [tab]);
+
+    // Sync tweak defaults
+    useEffect(() => {
+      TWEAKS.showCoachInsights = showCoach;
+    }, [showCoach]);
+
+    // Edit mode handshake
+    useEffect(() => {
+      const handler = (e) => {
+        if (!e.data) return;
+        if (e.data.type === "__activate_edit_mode") setTweakOpen(true);
+        if (e.data.type === "__deactivate_edit_mode") setTweakOpen(false);
+      };
+      window.addEventListener("message", handler);
+      window.parent.postMessage({ type: "__edit_mode_available" }, "*");
+      return () => window.removeEventListener("message", handler);
+    }, []);
+
+    const persist = (edits) => {
+      try { window.parent.postMessage({ type: "__edit_mode_set_keys", edits }, "*"); } catch (e) {}
+    };
+
+    const C = PALETTES[palette];
+
+    const tabs = [
+      { id: "today",  label: "Today" },
+      { id: "train",  label: "Train" },
+      { id: "fuel",   label: "Fuel" },
+      { id: "body",   label: "Body" },
+      { id: "trends", label: "Trends" },
+      { id: "coach",  label: "Coach" },
+    ];
+
+    const openLogMeal = (prefill) => {
+      setMealPrefill(typeof prefill === "string" ? prefill : "");
+      setMealOpen(true);
+    };
+
+    return (
+      <div className="app-bg">
+        <IOSDevice width={402} height={874} dark={true}>
+          <div style={{
+            minHeight: "100%", background: C.bg, color: C.t, fontFamily: FONT,
+            padding: "56px 14px 118px", position: "relative",
+          }}>
+            {tab === "today" && (
+              <TodayScreen C={C}
+                onRingTap={(k) => setSheetRing(k)}
+                onOpenChat={() => setChatOpen(true)}
+                onLogMeal={openLogMeal}
+                onLogWorkout={() => setWorkoutOpen(true)}
+                onOpenJournal={() => setJournalOpen(true)} />
+            )}
+            {tab === "trends" && (
+              <TrendsScreen C={C} />
+            )}
+            {tab === "train" && (
+              <TrainScreen C={C}
+                onLogWorkout={() => setWorkoutOpen(true)}
+                week={week} setWeek={setWeek} />
+            )}
+            {tab === "fuel" && (
+              <FuelScreen C={C} onLogMeal={openLogMeal} />
+            )}
+            {tab === "body" && (
+              <BodyScreen C={C} />
+            )}
+            {tab === "coach" && (
+              <CoachScreen C={C} onOpenChat={() => setChatOpen(true)} />
+            )}
+
+            <TabBar C={C} tabs={tabs} active={tab} onChange={setTab} />
+
+            <RingDetailSheet C={C} open={!!sheetRing} which={sheetRing} onClose={() => setSheetRing(null)} />
+            <LogMealModal C={C} open={mealOpen} prefill={mealPrefill}
+              onClose={() => setMealOpen(false)}
+              onAdd={(m) => { /* would persist */ }} />
+            <LogWorkoutModal C={C} open={workoutOpen}
+              onClose={() => setWorkoutOpen(false)}
+              onAdd={(w) => {}} />
+            <ChatModal C={C} open={chatOpen} onClose={() => setChatOpen(false)} />
+            <JournalSheet C={C} open={journalOpen} onClose={() => setJournalOpen(false)} />
+          </div>
+        </IOSDevice>
+
+        {tweakOpen && (
+          <div className="tweak-panel">
+            <h4>Tweaks</h4>
+            <div style={{ fontSize: 10, color: "#666", marginBottom: 6, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700 }}>Palette</div>
+            {Object.entries(PALETTES).map(([k, p]) => (
+              <div key={k} className={"opt " + (palette === k ? "active" : "")}
+                onClick={() => { setPalette(k); persist({ palette: k }); }}>
+                <div className="swatch-row">
+                  <div className="swatch" style={{ background: p.primary }} />
+                  <div className="swatch" style={{ background: p.warn }} />
+                  <div className="swatch" style={{ background: p.cyan }} />
+                </div>
+                <div style={{ flex: 1, fontSize: 11.5, color: palette === k ? "#eee" : "#888", fontWeight: palette === k ? 600 : 500 }}>{p.name}</div>
+                {palette === k && <div style={{ color: p.primary, fontSize: 10 }}>●</div>}
+              </div>
+            ))}
+            <div style={{ height: 1, background: "#222", margin: "10px 0" }} />
+            <label>
+              <input type="checkbox" checked={showCoach} onChange={e => { setShowCoachToggle(e.target.checked); persist({ showCoachInsights: e.target.checked }); }} />
+              Show AI coach banner
+            </label>
+            <div style={{ height: 1, background: "#222", margin: "10px 0" }} />
+            <div style={{ fontSize: 9.5, color: "#555", padding: "4px 10px", lineHeight: 1.5 }}>
+              Tap rings on Today for detail.
+              Tap ⓘ Coach for live chat.
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>

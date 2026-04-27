@@ -1,0 +1,36 @@
+node_modules
+dist
+dist-ssr
+*.local
+.vscode/*
+.DS_Store
+.aws-sam
+.hae-api-key.txt
+.strava-verify-token.txt
+withings-mcp/config/withings_tokens.json
+withings-mcp/config/withings_client.json
+backfill/*.json
+backfill/*.zip
+
+# Python virtual envs
+.venv/
+**/.venv/
+__pycache__/
+*.pyc
+
+# Large binary / personal
+*.pdf
+
+# Vercel
+.vercel
+
+# Withings MCP lives in its own repo at partymola/withings-mcp
+withings-mcp/
+
+# Env files (any path, any name)
+.env
+.env.*
+!.env.example
+
+# TS build info
+*.tsbuildinfo

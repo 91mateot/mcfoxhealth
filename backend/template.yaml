@@ -1,0 +1,426 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Mateo Fitness Dashboard — serverless backend
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        HEALTH_METRICS_TABLE: !Ref HealthMetricsTable
+        DAILY_SCORES_TABLE: !Ref DailyScoresTable
+        WORKOUTS_TABLE: !Ref WorkoutsTable
+        NUTRITION_TABLE: !Ref NutritionTable
+        JOURNAL_TABLE: !Ref JournalTable
+        BASELINES_TABLE: !Ref BaselinesTable
+        CORRELATIONS_TABLE: !Ref CorrelationsTable
+        USER_CONFIG_TABLE: !Ref UserConfigTable
+        CALIBRATION_TABLE: !Ref CalibrationTable
+        SECRETS_ARN: !Ref SecretsArn
+        INGEST_API_KEY: !Ref IngestApiKey
+
+Parameters:
+  SecretsArn:
+    Type: String
+    Description: ARN of the Secrets Manager secret holding API keys and OAuth tokens
+    Default: ''
+  IngestApiKey:
+    Type: String
+    Description: API key for HealthAutoExport ingest endpoint
+    Default: 'fitness-hae-2026'
+    NoEcho: true
+
+Resources:
+
+  # ── HTTP API ─────────────────────────────────────────────────
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/apigateway/fitness-dashboard
+      RetentionInDays: 14
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: '$default'
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - x-api-key
+        MaxAge: 3600
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","path":"$context.path","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","integrationStatus":"$context.integrationStatus","integrationErrorMessage":"$context.integrationErrorMessage","error":"$context.error.message","userAgent":"$context.identity.userAgent","sourceIp":"$context.identity.sourceIp"}'
+
+  # ── DynamoDB Tables ──────────────────────────────────────────
+  HealthMetricsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-health-metrics
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: date
+          AttributeType: S
+        - AttributeName: metric_source
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+        - AttributeName: metric_source
+          KeyType: RANGE
+
+  DailyScoresTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-daily-scores
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+
+  WorkoutsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-workouts
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: date
+          AttributeType: S
+        - AttributeName: strava_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+        - AttributeName: strava_id
+          KeyType: RANGE
+
+  NutritionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-nutrition
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: date
+          AttributeType: S
+        - AttributeName: meal_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+        - AttributeName: meal_id
+          KeyType: RANGE
+
+  JournalTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-journal
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+
+  BaselinesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-baselines
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: type
+          AttributeType: S
+      KeySchema:
+        - AttributeName: type
+          KeyType: HASH
+
+  CorrelationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-correlations
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: tag
+          AttributeType: S
+        - AttributeName: metric
+          AttributeType: S
+      KeySchema:
+        - AttributeName: tag
+          KeyType: HASH
+        - AttributeName: metric
+          KeyType: RANGE
+
+  UserConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-user-config
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: key
+          KeyType: HASH
+
+  CalibrationTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-calibration
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+
+  # ── Lambda Functions ─────────────────────────────────────────
+
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/ingest/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref HealthMetricsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkoutsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+                - secretsmanager:UpdateSecret
+              Resource:
+                - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:fitness-api-key-*'
+                - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:withings-oauth-*'
+                - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:strava-oauth-*'
+        - Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource: !GetAtt ComputeFunction.Arn
+      Environment:
+        Variables:
+          COMPUTE_FUNCTION_NAME: !Ref ComputeFunction
+      Events:
+        IngestHealth:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /ingest/health
+            Method: POST
+        IngestWithings:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /ingest/withings
+            Method: POST
+        IngestStrava:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /ingest/strava
+            Method: POST
+        StravaVerify:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /ingest/strava
+            Method: GET
+
+  ComputeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/compute/
+      Handler: handler.lambda_handler
+      Timeout: 60
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref HealthMetricsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DailyScoresTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref BaselinesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JournalTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CorrelationsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref NutritionTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref WorkoutsTable
+      Events:
+        DailyBaselines:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 9 * * ? *)
+            Description: Daily baseline computation (2am PT = 9am UTC)
+        WeeklyCorrelations:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 13 ? * SUN *)
+            Description: Weekly correlation computation (6am PT Sunday = 1pm UTC)
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/api/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref HealthMetricsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DailyScoresTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref WorkoutsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref NutritionTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref JournalTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref BaselinesTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref CorrelationsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref UserConfigTable
+      Events:
+        GetToday:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/today
+            Method: GET
+        GetTrends:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/trends
+            Method: GET
+        GetWorkouts:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/workouts
+            Method: GET
+        GetNutrition:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/nutrition/{date}
+            Method: GET
+        GetBody:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/body
+            Method: GET
+
+  NutritionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/nutrition/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref NutritionTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JournalTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CalibrationTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref UserConfigTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:fitness-api-key-*'
+      Events:
+        PostMeal:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/meal
+            Method: POST
+        PostWater:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/water
+            Method: POST
+        PostJournal:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/journal
+            Method: POST
+        PostCalibration:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/calibration/reference
+            Method: POST
+        GetCalibration:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/calibration/reference
+            Method: GET
+
+  CoachFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/coach/
+      Handler: handler.lambda_handler
+      Timeout: 120
+      MemorySize: 512
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref DailyScoresTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref NutritionTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref HealthMetricsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref UserConfigTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref WorkoutsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref BaselinesTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref JournalTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref CorrelationsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModelWithResponseStream
+                - bedrock:InvokeModel
+              Resource: '*'
+      Events:
+        PostCoach:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/coach
+            Method: POST
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway URL
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  IngestHealthUrl:
+    Description: HealthAutoExport target URL
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/ingest/health'
