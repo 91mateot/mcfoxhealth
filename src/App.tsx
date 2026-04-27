@@ -12,6 +12,8 @@ import { LogMealModal } from "./modals/LogMeal";
 import { LogWorkoutModal } from "./modals/LogWorkout";
 import { ChatModal } from "./modals/Chat";
 import { JournalSheet } from "./modals/Journal";
+import { MealDetailModal } from "./modals/MealDetail";
+import type { Meal } from "./types";
 import { useToday, useTrends, useWorkouts, useBody, useNutrition, logMeal, submitJournal, todayISO } from "./api";
 
 type TabId = "today" | "train" | "fuel" | "body" | "trends" | "coach";
@@ -33,6 +35,7 @@ export default function App() {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatPrefill, setChatPrefill] = useState<string | undefined>();
   const [journalOpen, setJournalOpen] = useState(false);
+  const [mealDetail, setMealDetail] = useState<Meal | null>(null);
 
   useEffect(() => {
     localStorage.setItem("mateo-tab", tab);
@@ -112,7 +115,13 @@ export default function App() {
       )}
 
       {today.data && nutrition.data && tab === "fuel" && (
-        <FuelScreen C={C} today={today.data} nutrition={nutrition.data} onLogMeal={openLogMeal} />
+        <FuelScreen
+          C={C}
+          today={today.data}
+          nutrition={nutrition.data}
+          onLogMeal={openLogMeal}
+          onOpenMeal={(m) => setMealDetail(m)}
+        />
       )}
 
       {today.data && body.data && tab === "body" && <BodyScreen C={C} today={today.data} body={body.data} />}
@@ -157,6 +166,16 @@ export default function App() {
           }
         }}
       />
+      {nutrition.data && (
+        <MealDetailModal
+          C={C}
+          open={mealDetail !== null}
+          onClose={() => setMealDetail(null)}
+          meal={mealDetail}
+          date={todayISO()}
+          targets={nutrition.data.targets}
+        />
+      )}
     </div>
   );
 }

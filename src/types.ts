@@ -83,6 +83,11 @@ export interface Meal {
   c: number;
   f: number;
   tag: string;
+  originalText?: string;
+  assumptions?: string[];
+  confidence?: EstimateConfidence;
+  source?: "known_foods" | "llm";
+  sourceUrl?: string;
 }
 
 export interface NutritionTargets {
@@ -315,6 +320,36 @@ export interface MealInput {
   f: number;
   tag?: string;
   time?: string;
+  original_text?: string;
+  assumptions?: string[];
+  confidence?: EstimateConfidence;
+  source?: "known_foods" | "llm";
+  sourceUrl?: string;
+}
+
+export interface MealPatch {
+  name?: string;
+  cal?: number;
+  p?: number;
+  c?: number;
+  f?: number;
+  tag?: string;
+  portion?: string;
+  time?: string;
+  original_text?: string;
+  assumptions?: string[];
+  confidence?: EstimateConfidence;
+  source_url?: string;
+}
+
+export interface Favorite {
+  id: string;
+  name: string;
+  cal: number;
+  p: number;
+  c: number;
+  f: number;
+  tag: string;
 }
 
 export type EstimateConfidence = "high" | "medium" | "low";

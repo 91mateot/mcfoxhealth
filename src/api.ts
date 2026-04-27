@@ -5,8 +5,11 @@ import type {
   WorkoutsResponse,
   NutritionResponse,
   BodyResponse,
+  Meal,
   MealInput,
   MealEstimate,
+  MealPatch,
+  Favorite,
   ChatMessage,
   JournalToday,
 } from "./types";
@@ -27,6 +30,22 @@ async function post<TResp>(path: string, body: unknown): Promise<TResp> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function patch<TResp>(path: string, body: unknown): Promise<TResp> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+async function del<TResp>(path: string): Promise<TResp> {
+  const res = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
@@ -71,6 +90,39 @@ export async function logMeal(meal: MealInput) {
 
 export async function estimateMeal(text: string): Promise<MealEstimate> {
   return post<MealEstimate>("/api/meal/estimate", { text });
+}
+
+function invalidateMealCaches() {
+  mutate("/api/today");
+  mutate(`/api/nutrition/${todayISO()}`);
+}
+
+export async function patchMeal(date: string, mealId: string, updates: MealPatch) {
+  const result = await patch<{ meal: Meal }>(`/api/meal/${date}/${mealId}`, updates);
+  invalidateMealCaches();
+  return result;
+}
+
+export async function deleteMeal(date: string, mealId: string) {
+  const result = await del<{ ok: boolean; date: string; meal_id: string }>(`/api/meal/${date}/${mealId}`);
+  invalidateMealCaches();
+  return result;
+}
+
+export function useFavorites(): SWRResponse<{ favorites: Favorite[] }> {
+  return useSWR<{ favorites: Favorite[] }>("/api/favorites", fetcher);
+}
+
+export async function addFavorite(fav: Omit<Favorite, "id">) {
+  const result = await post<{ favorite: Favorite; count: number }>("/api/favorites", fav);
+  mutate("/api/favorites");
+  return result;
+}
+
+export async function deleteFavorite(id: string) {
+  const result = await del<{ ok: boolean; count: number }>(`/api/favorites/${id}`);
+  mutate("/api/favorites");
+  return result;
 }
 
 export async function logWater(oz: number) {

@@ -359,6 +359,16 @@ def _get_nutrition(date_str):
                 "f": m.get("f", 0),
                 "tag": m.get("tag", ""),
             }
+            if m.get("original_text"):
+                meal["originalText"] = m["original_text"]
+            if m.get("assumptions"):
+                meal["assumptions"] = list(m["assumptions"])
+            if m.get("confidence"):
+                meal["confidence"] = m["confidence"]
+            if m.get("source"):
+                meal["source"] = m["source"]
+            if m.get("source_url"):
+                meal["sourceUrl"] = m["source_url"]
             meals.append(meal)
             totals["cal"] += meal["cal"]
             totals["p"] += meal["p"]

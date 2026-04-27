@@ -51,6 +51,8 @@ Resources:
         AllowMethods:
           - GET
           - POST
+          - PATCH
+          - DELETE
           - OPTIONS
         AllowHeaders:
           - Content-Type
@@ -340,7 +342,7 @@ Resources:
             TableName: !Ref JournalTable
         - DynamoDBCrudPolicy:
             TableName: !Ref CalibrationTable
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: !Ref UserConfigTable
         - Statement:
             - Effect: Allow
@@ -366,6 +368,36 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/meal/estimate
             Method: POST
+        PatchMeal:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/meal/{date}/{meal_id}
+            Method: PATCH
+        DeleteMeal:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/meal/{date}/{meal_id}
+            Method: DELETE
+        GetFavorites:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/favorites
+            Method: GET
+        PostFavorite:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/favorites
+            Method: POST
+        DeleteFavorite:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/favorites/{id}
+            Method: DELETE
         PostWater:
           Type: HttpApi
           Properties:

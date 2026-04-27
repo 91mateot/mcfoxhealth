@@ -1,12 +1,17 @@
 """
 Nutrition Lambda — meal logging, water tracking, journal, and calibration.
 
-  POST /api/meal                    — Log a meal
-  POST /api/meal/estimate           — Estimate macros from free-form text (no save)
-  POST /api/water                   — Log water intake
-  POST /api/journal                 — Submit morning journal check-in
-  POST /api/calibration/reference   — Submit Whoop-proxy numbers for scoring calibration
-  GET  /api/calibration/reference   — Return last 14 days of our scores vs proxy
+  POST   /api/meal                       — Log a meal
+  PATCH  /api/meal/{date}/{meal_id}      — Edit a meal (macros, name, tag)
+  DELETE /api/meal/{date}/{meal_id}      — Delete a meal
+  POST   /api/meal/estimate              — Estimate macros from free-form text (no save)
+  POST   /api/water                      — Log water intake
+  POST   /api/journal                    — Submit morning journal check-in
+  GET    /api/favorites                  — List saved quick-add favorites
+  POST   /api/favorites                  — Save a meal as a favorite
+  DELETE /api/favorites/{id}             — Remove a favorite
+  POST   /api/calibration/reference      — Submit Whoop-proxy numbers for scoring calibration
+  GET    /api/calibration/reference      — Return last 14 days of our scores vs proxy
 """
 
 import ipaddress
@@ -61,15 +66,28 @@ KNOWN_FOODS = {
 def lambda_handler(event, context):
     path = event.get("rawPath", "")
     method = event.get("requestContext", {}).get("http", {}).get("method", "POST")
+    params = event.get("pathParameters") or {}
 
     if path.endswith("/api/meal/estimate"):
         return _post_meal_estimate(event)
-    if "/api/meal" in path:
+    if path.startswith("/api/meal/") and params.get("date") and params.get("meal_id"):
+        if method == "PATCH":
+            return _patch_meal(params["date"], params["meal_id"], event)
+        if method == "DELETE":
+            return _delete_meal(params["date"], params["meal_id"])
+    if path == "/api/meal" or path.endswith("/api/meal"):
         return _post_meal(event)
-    if "/api/water" in path:
+    if path == "/api/water":
         return _post_water(event)
-    if "/api/journal" in path:
+    if path == "/api/journal":
         return _post_journal(event)
+    if path == "/api/favorites":
+        if method == "GET":
+            return _get_favorites()
+        return _post_favorite(event)
+    if path.startswith("/api/favorites/") and params.get("id"):
+        if method == "DELETE":
+            return _delete_favorite(params["id"])
     if "/api/calibration/reference" in path:
         if method == "GET":
             return _get_calibration(event)
@@ -186,6 +204,18 @@ def _post_meal(event):
         "logged_at": datetime.now(timezone.utc).isoformat(),
     }
 
+    # Optional metadata from the estimator or re-estimate flow.
+    if body.get("original_text"):
+        item["original_text"] = str(body["original_text"])[:2000]
+    if isinstance(body.get("assumptions"), list):
+        item["assumptions"] = [str(a)[:200] for a in body["assumptions"] if str(a).strip()][:10]
+    if body.get("confidence") in ("high", "medium", "low"):
+        item["confidence"] = body["confidence"]
+    if body.get("source"):
+        item["source"] = str(body["source"])[:30]
+    if body.get("sourceUrl"):
+        item["source_url"] = str(body["sourceUrl"])[:500]
+
     put_item(table, item)
 
     all_meals = query_items(table, "date", date)
@@ -267,6 +297,148 @@ def _post_meal_estimate(event):
         estimate["sourceUrl"] = source_url
     estimate.setdefault("source", "llm")
     return _resp(200, estimate)
+
+
+_PATCHABLE_FIELDS = {"name", "cal", "p", "c", "f", "tag", "portion", "time",
+                     "original_text", "assumptions", "confidence", "source_url"}
+
+
+def _patch_meal(date_str: str, meal_id: str, event):
+    """Edit a meal's macros, name, or related metadata.
+
+    Body: any subset of {name, cal, p, c, f, tag, portion, time,
+                        original_text, assumptions, confidence, source_url}
+    """
+    body = _parse_body(event)
+    if body is None:
+        return _resp(400, {"error": "invalid JSON body"})
+    if not meal_id.startswith("meal_"):
+        return _resp(400, {"error": "invalid meal_id"})
+
+    table = get_table("NUTRITION_TABLE")
+    existing = get_item(table, {"date": date_str, "meal_id": meal_id})
+    if not existing:
+        return _resp(404, {"error": "meal not found"})
+
+    updates = {}
+    for k, v in body.items():
+        if k in _PATCHABLE_FIELDS:
+            if k == "assumptions":
+                if not isinstance(v, list):
+                    continue
+                v = [str(a)[:200] for a in v if str(a).strip()][:10]
+            elif k == "confidence" and v not in ("high", "medium", "low"):
+                continue
+            elif k in ("cal", "p", "c", "f"):
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    continue
+            elif isinstance(v, str):
+                v = v[:2000]
+            updates[k] = v
+
+    if not updates:
+        return _resp(400, {"error": "no valid fields to update"})
+
+    updates["edited_at"] = datetime.now(timezone.utc).isoformat()
+
+    merged = {**existing, **updates}
+    put_item(table, merged)
+
+    return _resp(200, {"meal": _serialize_meal(merged)})
+
+
+def _delete_meal(date_str: str, meal_id: str):
+    if not meal_id.startswith("meal_"):
+        return _resp(400, {"error": "invalid meal_id"})
+    table = get_table("NUTRITION_TABLE")
+    existing = get_item(table, {"date": date_str, "meal_id": meal_id})
+    if not existing:
+        return _resp(404, {"error": "meal not found"})
+    table.delete_item(Key={"date": date_str, "meal_id": meal_id})
+    return _resp(200, {"ok": True, "date": date_str, "meal_id": meal_id})
+
+
+def _serialize_meal(item: dict) -> dict:
+    """Convert a DynamoDB row back to the API meal shape."""
+    out = {
+        "id": item.get("meal_id", ""),
+        "time": item.get("time", ""),
+        "name": item.get("name", ""),
+        "portion": item.get("portion", ""),
+        "cal": item.get("cal", 0),
+        "p": item.get("p", 0),
+        "c": item.get("c", 0),
+        "f": item.get("f", 0),
+        "tag": item.get("tag", ""),
+    }
+    if item.get("original_text"):
+        out["originalText"] = item["original_text"]
+    if item.get("assumptions"):
+        out["assumptions"] = list(item["assumptions"])
+    if item.get("confidence"):
+        out["confidence"] = item["confidence"]
+    if item.get("source"):
+        out["source"] = item["source"]
+    if item.get("source_url"):
+        out["sourceUrl"] = item["source_url"]
+    return out
+
+
+# ── Favorites (quick-add list) ──────────────────────────────────────────────
+# Stored as a single row in USER_CONFIG_TABLE with key="favorites" and an
+# "items" attribute that is a list of {id, name, cal, p, c, f, tag}.
+
+def _get_favorites():
+    table = get_table("USER_CONFIG_TABLE")
+    row = get_item(table, {"key": "favorites"}) or {}
+    items = row.get("items") or []
+    return _resp(200, {"favorites": items})
+
+
+def _post_favorite(event):
+    body = _parse_body(event)
+    if not body:
+        return _resp(400, {"error": "invalid JSON body"})
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return _resp(400, {"error": "name required"})
+
+    def _num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    fav = {
+        "id": f"fav_{int(time.time() * 1000)}",
+        "name": name[:80],
+        "cal": _num(body.get("cal")),
+        "p": _num(body.get("p")),
+        "c": _num(body.get("c")),
+        "f": _num(body.get("f")),
+        "tag": str(body.get("tag") or "snack")[:20],
+    }
+
+    table = get_table("USER_CONFIG_TABLE")
+    row = get_item(table, {"key": "favorites"}) or {"key": "favorites", "items": []}
+    items = list(row.get("items") or [])
+    # Dedup by name (case-insensitive) — updating the numbers if user saves same name again.
+    items = [i for i in items if str(i.get("name", "")).strip().lower() != name.lower()]
+    items.insert(0, fav)
+    # Cap at 24 to keep the list tidy.
+    items = items[:24]
+    put_item(table, {"key": "favorites", "items": items})
+    return _resp(200, {"favorite": fav, "count": len(items)})
+
+
+def _delete_favorite(fav_id: str):
+    table = get_table("USER_CONFIG_TABLE")
+    row = get_item(table, {"key": "favorites"}) or {"key": "favorites", "items": []}
+    items = [i for i in (row.get("items") or []) if i.get("id") != fav_id]
+    put_item(table, {"key": "favorites", "items": items})
+    return _resp(200, {"ok": True, "count": len(items)})
 
 
 def _post_water(event):

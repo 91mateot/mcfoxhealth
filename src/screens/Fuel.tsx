@@ -13,9 +13,10 @@ interface FuelScreenProps {
   today: TodayResponse;
   nutrition: NutritionResponse;
   onLogMeal: (prefill?: string) => void;
+  onOpenMeal?: (m: Meal) => void;
 }
 
-export function FuelScreen({ C, today, nutrition, onLogMeal }: FuelScreenProps) {
+export function FuelScreen({ C, today, nutrition, onLogMeal, onOpenMeal }: FuelScreenProps) {
   const T = nutrition.targets;
   const eaten = nutrition.totals;
   const planned = nutrition.mealPlanned ?? today.mealPlanned;
@@ -90,7 +91,13 @@ export function FuelScreen({ C, today, nutrition, onLogMeal }: FuelScreenProps) 
       ) : (
         <Panel C={C} style={{ padding: 6 }}>
           {nutrition.meals.map((m, i) => (
-            <MealRow key={String(m.id)} C={C} m={m} last={i === nutrition.meals.length - 1} />
+            <MealRow
+              key={String(m.id)}
+              C={C}
+              m={m}
+              last={i === nutrition.meals.length - 1}
+              onClick={onOpenMeal ? () => onOpenMeal(m) : undefined}
+            />
           ))}
         </Panel>
       )}
@@ -181,8 +188,9 @@ function MacroLine({ C, label, val, goal, color, unit }: { C: Palette; label: st
   );
 }
 
-function MealRow({ C, m, last, planned }: { C: Palette; m: Meal; last: boolean; planned?: boolean }) {
-  return (
+function MealRow({ C, m, last, planned, onClick }: { C: Palette; m: Meal; last: boolean; planned?: boolean; onClick?: () => void }) {
+  const tappable = !!onClick && !planned;
+  const content = (
     <div
       style={{
         display: "flex",
@@ -219,6 +227,25 @@ function MealRow({ C, m, last, planned }: { C: Palette; m: Meal; last: boolean; 
           P{Math.round(m.p)} C{Math.round(m.c)} F{Math.round(m.f)}
         </div>
       </div>
+      {tappable && <span style={{ color: C.t4, fontSize: 14, marginLeft: 4 }}>›</span>}
     </div>
+  );
+  if (!tappable) return content;
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        width: "100%",
+        padding: 0,
+        background: "transparent",
+        border: "none",
+        textAlign: "left",
+        cursor: "pointer",
+        fontFamily: "inherit",
+        color: "inherit",
+      }}
+    >
+      {content}
+    </button>
   );
 }

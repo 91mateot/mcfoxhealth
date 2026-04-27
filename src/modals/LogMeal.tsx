@@ -5,7 +5,7 @@ import { Sheet } from "../components/Sheet";
 import { Btn } from "../components/Btn";
 import { Chip } from "../components/Chip";
 import { VoiceInput } from "../components/VoiceInput";
-import { estimateMeal } from "../api";
+import { estimateMeal, useFavorites } from "../api";
 
 interface LogMealModalProps {
   C: Palette;
@@ -45,6 +45,8 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
   const [estimate, setEstimate] = useState<MealEstimate | null>(null);
   const [edited, setEdited] = useState<{ name: string; cal: number; p: number; c: number; f: number; tag: string } | null>(null);
   const [assumptionsOpen, setAssumptionsOpen] = useState(false);
+  const favoritesResp = useFavorites();
+  const favorites = favoritesResp.data?.favorites ?? [];
 
   useEffect(() => {
     if (open) {
@@ -91,7 +93,15 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
 
   const handleSave = () => {
     if (!edited) return;
-    onAdd({ ...edited, time: clientTime() });
+    const payload: MealInput = { ...edited, time: clientTime() };
+    if (estimate) {
+      payload.original_text = custom.trim() || estimate.name;
+      payload.assumptions = estimate.assumptions;
+      payload.confidence = estimate.confidence;
+      payload.source = estimate.source;
+      payload.sourceUrl = estimate.sourceUrl;
+    }
+    onAdd(payload);
     onClose();
   };
 
@@ -104,7 +114,59 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
     <Sheet C={C} open={open} onClose={onClose} title="Log a meal" height="82%">
       {step === "describe" && (
         <>
-          <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginTop: 6, marginBottom: 8 }}>
+          {favorites.length > 0 && (
+            <>
+              <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginTop: 6, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                <span>Your favorites</span>
+                <span style={{ color: C.primary, fontSize: 10 }}>★</span>
+              </div>
+              {favorites.map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => handleQuickAdd({ name: f.name, cal: f.cal, p: f.p, c: f.c, f: f.f, tag: f.tag })}
+                  style={{
+                    width: "100%",
+                    background: C.s,
+                    border: `1px solid ${C.border}`,
+                    borderRadius: 14,
+                    padding: 12,
+                    marginBottom: 6,
+                    textAlign: "left",
+                    cursor: "pointer",
+                    fontFamily: FONT,
+                    color: C.t,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                  }}
+                >
+                  <div
+                    style={{
+                      width: 34,
+                      height: 34,
+                      borderRadius: 10,
+                      background: C.primaryDim,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      color: C.primary,
+                      fontSize: 16,
+                      fontWeight: 800,
+                    }}
+                  >
+                    ★
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.name}</div>
+                    <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO }}>
+                      {Math.round(f.cal)} kcal · P{Math.round(f.p)} C{Math.round(f.c)} F{Math.round(f.f)}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </>
+          )}
+          <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginTop: favorites.length > 0 ? 14 : 6, marginBottom: 8 }}>
             Quick add
           </div>
           {QUICK.map((q, i) => (
