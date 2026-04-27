@@ -1,103 +1,95 @@
 # Mateo Fitness Dashboard — Handoff
 
-High-fidelity prototype for a personal performance dashboard. iPhone-sized,
-dark theme, built in React via inline JSX (no build step — all files are
-loaded through Babel Standalone at runtime).
+Personal performance dashboard. iPhone-first PWA, dark theme, real data from
+Apple Health + Withings + Strava, AI coach on Bedrock.
 
-## File map
+## Live
+
+- **Frontend:** https://mcfoxhealth.vercel.app (Vercel, auto-deploys from GitHub `main`)
+- **GitHub:** https://github.com/91mateot/mcfoxhealth (private)
+- **API:** https://5vvp43vamk.execute-api.us-west-2.amazonaws.com (AWS API Gateway, us-west-2)
+
+## Stack
+
+### Frontend (`src/`)
+- Vite + React 18 + TypeScript strict
+- SWR for data fetching (60s refresh on Today, on-demand for others)
+- `vite-plugin-pwa` → service worker + offline + standalone iOS install
+- No CSS framework; inline styles with palette tokens from `src/theme.ts`
+- 3 palettes: Lime (default), Zine, Graphite
 
 ```
-Mateo Fitness Dashboard.html   Root. Mounts <App/> and wires all screens.
-ios-frame.jsx                  iPhone bezel + status bar chrome.
-theme.jsx                      Palette tokens (Lime, Sunset, Electric, Ice, Graphite).
-data.jsx                       ALL mock data — replace with real API.
-ui.jsx                         Shared primitives: Ring, Panel, Stat, Chip, Sparkline,
-                                BarRow, ProgressBar, Sheet, SectionHead, TabBar, Btn.
-screens1.jsx                   Today, Train screens.
-screens2.jsx                   Fuel, Body, Coach screens.
-trends.jsx                     Trends screen (30d metrics + correlations).
-journal.jsx                    Morning check-in card + journal tag sheet.
-modals.jsx                     Ring-detail sheet, Log Meal, Log Workout, Chat, Primer.
-voice.jsx                      Voice input UI (demo only — no STT wired).
+src/
+  App.tsx                root, tab shell
+  api.ts                 SWR hooks + POST helpers
+  theme.ts               palette tokens (lime/zine/graphite)
+  types.ts               TypeScript data models
+  screens/               Today, Train, Fuel, Body, Trends, Coach
+  modals/                Chat, Journal, LogMeal, LogWorkout, RingDetail
+  components/            Ring, Panel, Stat, Sheet, TabBar, etc.
 ```
 
-Components share scope through `Object.assign(window, {...})` at the bottom
-of each file. If you port this to a bundler, replace those with proper
-ES exports.
+### Backend (`backend/`)
+- AWS SAM (`template.yaml`), Python 3.13 Lambdas
+- 5 functions: `ingest`, `compute`, `api`, `nutrition`, `coach`
+- 8 DynamoDB tables: health-metrics, daily-scores, workouts, nutrition,
+  journal, baselines, correlations, user-config, calibration
+- EventBridge schedules: compute daily 2am PT, correlations Sunday 6am PT
+- Secrets in AWS Secrets Manager (strava-oauth, withings-oauth, fitness-api-key)
 
-## What's real vs mocked
+Scoring engine in `backend/shared/shared/scoring.py`:
+- **Recovery:** 6-signal weighted composite (HRV 40% / RHR 25% / sleep 20% /
+  resp 5% / spo2 5% / wrist temp 5%), weakest-link penalty on core signals
+- **Strain:** Edwards TRIMP from zone-weighted HR samples, log curve to 0–21
+- **Sleep:** Oura-style 35/25/20/20 (duration / efficiency / deep / REM)
 
-| Interactive                                                | Cosmetic only                                 |
-| :--------------------------------------------------------- | :-------------------------------------------- |
-| Tab navigation (persisted in localStorage)                 | Voice input button (animation only)           |
-| Tap a ring → detail sheet                                  | Log Meal form (validates, doesn't persist)    |
-| "What do these numbers mean?" primer sheet                 | Log Workout form (same)                       |
-| Journal morning check-in (submit mutates module object)    | Chat uses `window.claude.complete()` — sandbox helper, WILL NOT EXIST in prod |
-| Palette picker in Tweaks panel                             | Hydration "+ add" buttons (no state update)   |
-| Week scrubber on Train screen                              | Supplement checkboxes (static)                |
+Tested in `backend/tests/test_scoring.py` (Whoop-proxy calibration + sanity).
 
-Sparklines are computed from arrays in `data.jsx`. Bar charts the same.
-Nothing comes from an API.
+### Ingestion
+- **Apple Health:** `POST /ingest/health` from HealthAutoExport (backfill script in `backend/scripts/hae_backfill.py`)
+- **Withings:** `POST /ingest/withings` webhook + backfill script
+- **Strava:** `POST /ingest/strava` webhook + OAuth refresh
 
-## Known shortcuts (fix before shipping)
+### Companion tools
+- `withings-mcp/` — separate public repo `partymola/withings-mcp`, registered MCP server for Claude Code queries against local Withings data
 
-1. **`JOURNAL_TODAY.submitted = true` mutates the module object directly**
-   (see `journal.jsx` → `save()` in `JournalSheet`). Prototype convenience.
-   Move to real state + API persistence.
+## Data contract (frontend ↔ backend)
 
-2. **Chat LLM**: `modals.jsx → ChatModal` uses `window.claude.complete()`,
-   a sandbox-only helper. Point at your LLM endpoint and stream the response.
+| Endpoint                   | Method | Purpose                                   |
+| :------------------------- | :----- | :---------------------------------------- |
+| `/api/today`               | GET    | Today dashboard (recovery/strain/sleep…) |
+| `/api/trends`              | GET    | 30-day metrics + learned correlations     |
+| `/api/workouts`            | GET    | Recent sessions                           |
+| `/api/body`                | GET    | Weight/BF/lean mass/steps                 |
+| `/api/nutrition/{date}`    | GET    | Per-day macros + meals                    |
+| `/api/meal`                | POST   | Log a meal                                |
+| `/api/water`               | POST   | Log water intake                          |
+| `/api/journal`             | POST   | Morning check-in                          |
+| `/api/coach`               | POST   | Chat (streaming via `stream: true`)       |
 
-3. **Palette tweaks** live in the `TWEAKS` object and persist via
-   `__edit_mode_set_keys` postMessage — that's a host-specific protocol.
-   In prod, move palette choice to user settings.
+## Deploy
 
-4. **Per-user data**: `MATEO`, `BASE`, `TODAY` are all hardcoded. These
-   become API reads (most likely a single `GET /v1/today` payload + a
-   `GET /v1/trends` payload for the Trends tab).
+- **Frontend:** `git push origin main` → Vercel auto-deploys in ~60s.
+  Env var: `VITE_API_BASE` in Vercel production.
+- **Backend:** `cd backend && sam build && sam deploy` (manual).
+- **Scoring tweaks:** update `fitness-user-config` DynamoDB row with key `scoring`; weights hot-swap.
 
-5. **Correlations**: `CORRELATIONS` in `data.jsx` is static dummy data.
-   In prod, these are computed server-side from 30–60 days of journal
-   tags × biometric deltas. The UI expects:
-   `{ tag, metric, effect, unit, n, confidence: "high" | "medium" | "low", direction }`
+## Known gaps
 
-6. **Date/time handling** is zero. `TODAY.dateFull` is a string literal.
-   Swap to real Date objects and a timezone-aware formatter.
+1. **Chat is non-streaming.** `askCoachStream()` exists in `src/api.ts:100` but
+   `src/modals/Chat.tsx:6` imports `askCoach` instead.
+2. **LogWorkout doesn't persist.** `src/modals/LogWorkout.tsx` — `onAdd` is
+   currently a no-op callback. Needs a POST endpoint or Strava auto-match.
+3. **No auth on the API.** CORS is `*`, no API key enforcement. Non-guessable
+   URL is the only moat.
+4. **PWA icons missing.** `public/` only has `favicon.svg`. Need
+   `icon-192.png`, `icon-512.png`, and `apple-touch-icon.png` for the
+   home-screen icon to look right.
+5. **Prototype folder.** `prototype/` holds the original Babel Standalone
+   export (Apr 2026). Archived — do not touch.
 
-## Data contracts the screens expect
+## Context
 
-Today screen (`screens1.jsx` → `TodayScreen`) reads:
-- `TODAY.recovery` (0–100)
-- `TODAY.strain` (0–21 float) + `TODAY.strainTarget: { low, high, reason }`
-- `TODAY.sleep: { score, hours, minutes, efficiency, deep, rem, core, awake }`
-- `TODAY.sleepNeedTonight: { totalMin, bedtimeBy }`
-- `TODAY.hrv`, `TODAY.rhr`, `BASE.hrv`, `BASE.rhr`
-- `HRV_30D` (array of 30 numbers)
-- `RECOVERY_WEEK` (array of 7 `{ d, date, rec, strain, tag, today }`)
-- `TODAY.water`, `TODAY.waterGoal`
-
-Trends screen reads `TRENDS_30D` (paired `{ cur, prev, unit, better }` for each metric)
-and `TREND_SERIES` (30-entry sparkline arrays keyed by metric).
-
-## Accessibility gaps
-
-- No ARIA roles on the custom controls (rings, tabs, sheets).
-- No focus management on modal open/close.
-- Ring colors meet contrast but the label text at 9px is borderline.
-  Consider min-size 11px when you port to production.
-
-## Design tokens
-
-Primary accent: defined per-palette in `theme.jsx`. The "Lime" default is
-`#C6F85B`. Warn (strain/effort) is orange, Cyan is hydration/sleep,
-Purple is REM, Yellow is mid-state. If you migrate to a token system,
-these five roles are the full set used.
-
-## Open questions for the PM
-
-- When does the AI Coach chat need streaming vs. a single completion?
-- Does the morning journal need to be blocking (like Whoop) or
-  dismissible (like Oura)? Current design: dismissible card.
-- Trends correlations — how many days before we show them? Current
-  copy says 14, but the data pipeline may need 30+.
-- Is the "Tweaks" palette picker a real feature or designer-only?
+- **User:** Mateo (34, Pacific Beach SD, recomp goal, on retatrutide post-back-surgery).
+- **Devices:** iPhone 17 Pro, Apple Watch S10, Withings scale.
+- **Reta + back surgery** info is known to the coach (via Secrets Manager / user config) but **hidden from the UI** unless asked.
