@@ -96,6 +96,7 @@ def _get_today():
     meals = query_items(nutrition_table, "date", today_str)
     meals_today = []
     water_total = 0
+    caffeine_total = 0
     for m in meals:
         mid = m.get("meal_id", "")
         if mid.startswith("water_"):
@@ -112,6 +113,8 @@ def _get_today():
                 "f": m.get("f", 0),
                 "tag": m.get("tag", ""),
             })
+            if m.get("caffeine_mg"):
+                caffeine_total += m.get("caffeine_mg", 0)
 
     config = get_item(config_table, {"key": "mateo"}) or {}
     targets = config.get("nutrition_targets", {"cal": 2200, "p": 180, "c": 190, "f": 65, "water": 100})
@@ -183,6 +186,8 @@ def _get_today():
         },
         "water": water_total,
         "waterGoal": targets.get("water", 100),
+        "caffeineMg": caffeine_total,
+        "caffeineGoal": targets.get("caffeine", 400),
         "recoveryWeek": recovery_week,
         "hrv30d": hrv_30d,
         "stepsWeek": steps_week,
@@ -341,6 +346,7 @@ def _get_nutrition(date_str):
 
     meals = []
     water_total = 0
+    caffeine_total = 0
     totals = {"cal": 0, "p": 0, "c": 0, "f": 0}
 
     for m in items:
@@ -373,6 +379,9 @@ def _get_nutrition(date_str):
                 meal["ingredients"] = list(m["ingredients"])
             if m.get("water_oz") is not None:
                 meal["waterOz"] = m["water_oz"]
+            if m.get("caffeine_mg") is not None:
+                meal["caffeineMg"] = m["caffeine_mg"]
+                caffeine_total += m.get("caffeine_mg", 0)
             meals.append(meal)
             totals["cal"] += meal["cal"]
             totals["p"] += meal["p"]
@@ -384,6 +393,8 @@ def _get_nutrition(date_str):
         "meals": meals,
         "totals": totals,
         "water": water_total,
+        "caffeineMg": caffeine_total,
+        "caffeineGoal": targets.get("caffeine", 400),
         "targets": targets,
     })
 

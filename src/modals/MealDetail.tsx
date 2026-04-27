@@ -169,6 +169,13 @@ export function MealDetailModal({ C, open, onClose, meal, date, targets }: MealD
             </div>
           )}
 
+          {meal.caffeineMg !== undefined && meal.caffeineMg > 0 && (
+            <div style={{ background: C.s, border: `1px solid ${C.warn}40`, borderRadius: 14, padding: "10px 12px", marginBottom: 10, fontSize: 12, color: C.t2, display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ color: C.warn, fontSize: 14 }}>☕</span>
+              <span>Contains <strong style={{ color: C.warn }}>{Math.round(meal.caffeineMg)} mg</strong> caffeine.</span>
+            </div>
+          )}
+
           {meal.ingredients && meal.ingredients.length > 0 && (
             <div style={{ background: C.s, border: `1px solid ${C.border}`, borderRadius: 14, padding: 12, marginBottom: 10 }}>
               <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 8 }}>

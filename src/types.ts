@@ -99,6 +99,7 @@ export interface Meal {
   sourceUrl?: string;
   ingredients?: Ingredient[];
   waterOz?: number;
+  caffeineMg?: number;
 }
 
 export interface NutritionTargets {
@@ -170,6 +171,8 @@ export interface TodayResponse {
   calories: { active: number; resting: number };
   water: number;
   waterGoal: number;
+  caffeineMg?: number;
+  caffeineGoal?: number;
   recoveryWeek: RecoveryDay[];
   hrv30d: number[];
   stepsWeek: StepsDay[];
@@ -224,6 +227,8 @@ export interface NutritionResponse {
   mealPlanned?: Meal;
   totals: { cal: number; p: number; c: number; f: number };
   water: number;
+  caffeineMg?: number;
+  caffeineGoal?: number;
   targets: NutritionTargets;
   supplements?: Supplement[];
 }
@@ -338,6 +343,7 @@ export interface MealInput {
   sourceUrl?: string;
   ingredients?: Ingredient[];
   water_oz?: number;
+  caffeine_mg?: number;
 }
 
 export interface MealPatch {
@@ -355,6 +361,7 @@ export interface MealPatch {
   source_url?: string;
   ingredients?: Ingredient[];
   water_oz?: number;
+  caffeine_mg?: number;
 }
 
 export interface Favorite {
@@ -383,6 +390,7 @@ export interface MealEstimate {
   ingredients?: Ingredient[];
   time?: string;
   water_oz?: number;
+  caffeine_mg?: number;
 }
 
 export interface CoachRequest {

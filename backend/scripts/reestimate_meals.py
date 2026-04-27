@@ -120,6 +120,10 @@ def _update_meal(table, d: str, meal_id: str, est: dict, prev_tag: str):
     if water_oz is not None and water_oz > 0:
         sets.append("water_oz = :water_oz")
         vals[":water_oz"] = _dec(water_oz)
+    caffeine_mg = est.get("caffeine_mg")
+    if caffeine_mg is not None and caffeine_mg > 0:
+        sets.append("caffeine_mg = :caffeine_mg")
+        vals[":caffeine_mg"] = _dec(caffeine_mg)
 
     kwargs = {
         "Key": {"date": d, "meal_id": meal_id},
@@ -212,6 +216,8 @@ def main():
                 extras.append(f"time={est['time']}")
             if est.get("water_oz"):
                 extras.append(f"water={est['water_oz']}oz")
+            if est.get("caffeine_mg"):
+                extras.append(f"caf={est['caffeine_mg']}mg")
             if est.get("ingredients"):
                 extras.append(f"ings={len(est['ingredients'])}")
             extra_str = (" · " + " ".join(extras)) if extras else ""

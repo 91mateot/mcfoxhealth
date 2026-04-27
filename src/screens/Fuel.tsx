@@ -8,6 +8,7 @@ import { ProgressBar } from "../components/ProgressBar";
 import { SectionHead } from "../components/SectionHead";
 import { Btn } from "../components/Btn";
 import { HydrationPanel } from "../components/HydrationPanel";
+import { CaffeinePanel } from "../components/CaffeinePanel";
 
 interface FuelScreenProps {
   C: Palette;
@@ -81,8 +82,11 @@ export function FuelScreen({ C, today, nutrition, onLogMeal, onOpenMeal }: FuelS
         </Panel>
       )}
 
-      {/* Hydration */}
-      <HydrationPanel C={C} water={today.water} waterGoal={today.waterGoal} />
+      {/* Hydration + Caffeine */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <HydrationPanel C={C} water={today.water} waterGoal={today.waterGoal} />
+        <CaffeinePanel C={C} mg={today.caffeineMg ?? 0} goal={today.caffeineGoal ?? 400} />
+      </div>
 
       {/* Today's meals */}
       <SectionHead C={C} kicker="Logged" title="Today's meals" right={<Chip C={C}>{nutrition.meals.length} items</Chip>} />

@@ -9,6 +9,7 @@ import { Sparkline } from "../components/Sparkline";
 import { ProgressBar } from "../components/ProgressBar";
 import { Btn } from "../components/Btn";
 import { HydrationPanel } from "../components/HydrationPanel";
+import { CaffeinePanel } from "../components/CaffeinePanel";
 
 interface TodayScreenProps {
   C: Palette;
@@ -287,8 +288,11 @@ export function TodayScreen({ C, data, onRingTap, onOpenChat, onLogMeal, onLogWo
         </div>
       </Panel>
 
-      {/* Hydration */}
-      <HydrationPanel C={C} water={data.water} waterGoal={data.waterGoal} />
+      {/* Hydration + Caffeine */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <HydrationPanel C={C} water={data.water} waterGoal={data.waterGoal} />
+        <CaffeinePanel C={C} mg={data.caffeineMg ?? 0} goal={data.caffeineGoal ?? 400} />
+      </div>
 
       {/* Quick actions */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, margin: "4px 0 8px" }}>

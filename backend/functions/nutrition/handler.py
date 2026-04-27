@@ -230,6 +230,15 @@ def _post_meal(event):
     if water_oz is not None:
         item["water_oz"] = water_oz
 
+    caffeine_raw = body.get("caffeine_mg")
+    if caffeine_raw is not None:
+        try:
+            cmg = float(caffeine_raw)
+            if cmg > 0:
+                item["caffeine_mg"] = round(min(cmg, 1000.0), 0)
+        except (TypeError, ValueError):
+            pass
+
     put_item(table, item)
 
     # Auto-log a water_ row for hydrating beverages so the Today hydration panel counts it.
@@ -326,7 +335,7 @@ def _post_meal_estimate(event):
 
 _PATCHABLE_FIELDS = {"name", "cal", "p", "c", "f", "tag", "portion", "time",
                      "original_text", "assumptions", "confidence", "source_url",
-                     "ingredients", "water_oz"}
+                     "ingredients", "water_oz", "caffeine_mg"}
 
 
 def _sanitize_ingredients(raw) -> list:
@@ -384,13 +393,17 @@ def _patch_meal(date_str: str, meal_id: str, event):
                 v = _sanitize_ingredients(v)
             elif k == "confidence" and v not in ("high", "medium", "low"):
                 continue
-            elif k in ("cal", "p", "c", "f", "water_oz"):
+            elif k in ("cal", "p", "c", "f", "water_oz", "caffeine_mg"):
                 try:
                     v = float(v)
                     if k == "water_oz":
                         if v <= 0:
                             continue
                         v = round(min(v, 200.0), 1)
+                    elif k == "caffeine_mg":
+                        if v <= 0:
+                            continue
+                        v = round(min(v, 1000.0), 0)
                 except (TypeError, ValueError):
                     continue
             elif isinstance(v, str):
@@ -446,6 +459,8 @@ def _serialize_meal(item: dict) -> dict:
         out["ingredients"] = list(item["ingredients"])
     if item.get("water_oz") is not None:
         out["waterOz"] = item["water_oz"]
+    if item.get("caffeine_mg") is not None:
+        out["caffeineMg"] = item["caffeine_mg"]
     return out
 
 
@@ -662,10 +677,33 @@ Time parsing:
 - "breakfast" without a time ⇒ null; "breakfast at 7am" ⇒ "07:00".
 
 Hydration (beverages only):
-- If the meal is a drink that hydrates (tea, coffee, water, juice, soda, sports drink, broth-only), estimate `water_oz` as the total fluid ounces consumed.
-- Typical cup of coffee/tea: 8 oz. Grande latte: 16 oz. Venti: 20 oz. Bottle of water: 16.9 oz. Can of soda: 12 oz.
-- Milk, smoothies, protein shakes, bone broth as food, and soup ⇒ `water_oz: null` (they're food).
+- `water_oz` is the beverage's HYDRATION VALUE — usually just fluid volume, except alcohol.
+- Water, tea (any kind), coffee, latte, cappuccino, juice, soda, sports drink, kombucha, milk, smoothies: `water_oz` = the full fluid volume. Caffeine does NOT reduce this — recent research (IOM, Killer 2014) shows caffeinated drinks hydrate nearly as well as water in habitual drinkers.
+- Alcohol is the exception. Apply a penalty based on ABV:
+  - Beer (~5% ABV, 12 oz): water_oz ≈ volume × 0.85 (so 12 oz beer ⇒ 10.2)
+  - Strong beer / cider (7–9% ABV): × 0.70
+  - Wine (12–14% ABV, 5 oz pour): × 0.60 (so 5 oz wine ⇒ 3.0)
+  - Spirits neat (40%+ ABV, 1.5 oz shot): × 0 (0 oz — net dehydrating)
+  - Mixed drink: estimate water contribution from the mixer only (Jack+Coke with 1.5 oz spirit in 8 oz total ≈ 6.5 oz mixer × 1.0)
+- Typical fluid volumes: cup of coffee/tea 8 oz; grande latte 16 oz; venti 20 oz; bottle of water 16.9 oz; can of soda/beer 12 oz; pint of beer 16 oz; wine pour 5 oz; shot 1.5 oz.
+- Bone broth, soup, and solid food ⇒ `water_oz: null` (they're food, not a beverage).
 - If unsure, return null.
+
+Caffeine (any drink or food with caffeine):
+- Return `caffeine_mg` as the total milligrams of caffeine in what the user consumed. Null if none.
+- Reference amounts:
+  - Drip coffee, 8 oz: ~95 mg (12 oz ~140 mg, 16 oz ~180 mg)
+  - Espresso shot, 1 oz: ~63 mg
+  - Latte / cappuccino: 1 shot = 63 mg; 2 shots = 126 mg; larger sizes often have 2 shots default
+  - Cold brew, 8 oz: ~155 mg
+  - Black tea, 8 oz: ~50 mg
+  - Green tea, 8 oz: ~30 mg
+  - Matcha latte, 8 oz: ~70 mg
+  - Herbal/rooibos tea: 0 mg
+  - Soda (Coke, Pepsi) 12 oz: ~35 mg; Diet Coke 12 oz: ~45 mg
+  - Energy drinks (Celsius, Red Bull, Monster) 12 oz: typically 80–200 mg
+  - Dark chocolate, pre-workout supplements, some protein bars: check if user mentions them
+- Decaf coffee still has ~5 mg per 8 oz — round down to 0 unless they specify "half-caf".
 
 Per-ingredient breakdown:
 - `ingredients` is an array of the components that make up the meal. Each has `{name, portion, cal, p, c, f}`.
@@ -685,6 +723,7 @@ Return ONLY valid JSON, no prose. Schema:
   "tag": "breakfast"|"lunch"|"dinner"|"snack",
   "time": "HH:MM" | null,
   "water_oz": number | null,
+  "caffeine_mg": number | null,
   "confidence": "high"|"medium"|"low",
   "assumptions": ["string", ...],
   "ingredients": [{"name": "string", "portion": "string", "cal": number, "p": number, "c": number, "f": number}, ...]
@@ -776,6 +815,17 @@ Known foods reference (use these exact numbers if the description matches):
         except (TypeError, ValueError):
             pass
 
+    # Caffeine — non-negative mg, capped at 1000 (sanity).
+    caffeine_mg = None
+    raw_caf = data.get("caffeine_mg")
+    if raw_caf is not None:
+        try:
+            c = float(raw_caf)
+            if c > 0:
+                caffeine_mg = round(min(c, 1000.0), 0)
+        except (TypeError, ValueError):
+            pass
+
     # Ingredients — sanitize to [{name, portion, cal, p, c, f}], cap at 15.
     ingredients = []
     raw_ings = data.get("ingredients")
@@ -824,6 +874,8 @@ Known foods reference (use these exact numbers if the description matches):
         out["time"] = parsed_time
     if water_oz is not None:
         out["water_oz"] = water_oz
+    if caffeine_mg is not None:
+        out["caffeine_mg"] = caffeine_mg
     return out
 
 

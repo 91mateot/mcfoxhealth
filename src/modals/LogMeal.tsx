@@ -107,6 +107,9 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
       if (estimate.water_oz && estimate.water_oz > 0) {
         payload.water_oz = estimate.water_oz;
       }
+      if (estimate.caffeine_mg && estimate.caffeine_mg > 0) {
+        payload.caffeine_mg = estimate.caffeine_mg;
+      }
     }
     onAdd(payload);
     onClose();
@@ -289,6 +292,13 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
             <div style={{ background: C.s, border: `1px solid ${C.cyan}40`, borderRadius: 14, padding: "10px 12px", marginBottom: 10, fontSize: 12, color: C.t2, display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ color: C.cyan, fontSize: 14 }}>💧</span>
               <span>Will also log <strong style={{ color: C.cyan }}>{estimate.water_oz} oz</strong> to today's hydration.</span>
+            </div>
+          )}
+
+          {estimate.caffeine_mg && estimate.caffeine_mg > 0 && (
+            <div style={{ background: C.s, border: `1px solid ${C.warn}40`, borderRadius: 14, padding: "10px 12px", marginBottom: 10, fontSize: 12, color: C.t2, display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ color: C.warn, fontSize: 14 }}>☕</span>
+              <span>Contains <strong style={{ color: C.warn }}>{Math.round(estimate.caffeine_mg)} mg</strong> caffeine.</span>
             </div>
           )}
 
