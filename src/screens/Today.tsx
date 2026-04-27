@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { mutate } from "swr";
 import { FONT, MONO, type Palette } from "../theme";
-import { JOURNAL_TAGS, type TodayResponse } from "../types";
+import { JOURNAL_TAGS, type NutritionResponse, type TodayResponse } from "../types";
 import { BigRing } from "../components/BigRing";
 import { Panel } from "../components/Panel";
 import { Chip } from "../components/Chip";
@@ -10,10 +10,13 @@ import { ProgressBar } from "../components/ProgressBar";
 import { Btn } from "../components/Btn";
 import { HydrationPanel } from "../components/HydrationPanel";
 import { CaffeinePanel } from "../components/CaffeinePanel";
+import { HydrationDetail } from "../modals/HydrationDetail";
+import { todayISO } from "../api";
 
 interface TodayScreenProps {
   C: Palette;
   data: TodayResponse;
+  nutrition?: NutritionResponse;
   onRingTap: (which: "recovery" | "strain" | "sleep" | "primer") => void;
   onOpenChat: () => void;
   onLogMeal: () => void;
@@ -21,7 +24,8 @@ interface TodayScreenProps {
   onOpenJournal: () => void;
 }
 
-export function TodayScreen({ C, data, onRingTap, onOpenChat, onLogMeal, onLogWorkout, onOpenJournal }: TodayScreenProps) {
+export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMeal, onLogWorkout, onOpenJournal }: TodayScreenProps) {
+  const [hydrationOpen, setHydrationOpen] = useState(false);
   const need = data.sleepNeedTonight;
   const needH = Math.floor(need.totalMin / 60);
   const needM = need.totalMin % 60;
@@ -290,9 +294,21 @@ export function TodayScreen({ C, data, onRingTap, onOpenChat, onLogMeal, onLogWo
 
       {/* Hydration + Caffeine */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-        <HydrationPanel C={C} water={data.water} waterGoal={data.waterGoal} />
+        <HydrationPanel C={C} water={data.water} waterGoal={data.waterGoal} onOpenDetail={nutrition ? () => setHydrationOpen(true) : undefined} />
         <CaffeinePanel C={C} mg={data.caffeineMg ?? 0} goal={data.caffeineGoal ?? 400} />
       </div>
+      {nutrition && (
+        <HydrationDetail
+          C={C}
+          open={hydrationOpen}
+          onClose={() => setHydrationOpen(false)}
+          date={nutrition.date || todayISO()}
+          water={data.water}
+          waterGoal={data.waterGoal}
+          waterLogs={nutrition.waterLogs ?? []}
+          meals={nutrition.meals}
+        />
+      )}
 
       {/* Quick actions */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, margin: "4px 0 8px" }}>

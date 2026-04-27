@@ -115,6 +115,7 @@ def _get_today():
             })
             if m.get("caffeine_mg"):
                 caffeine_total += m.get("caffeine_mg", 0)
+    meals_today.sort(key=lambda x: x.get("time") or "")
 
     config = get_item(config_table, {"key": "mateo"}) or {}
     targets = config.get("nutrition_targets", {"cal": 2200, "p": 180, "c": 190, "f": 65, "water": 100})
@@ -345,6 +346,7 @@ def _get_nutrition(date_str):
     targets = config.get("nutrition_targets", {"cal": 2200, "p": 180, "c": 190, "f": 65, "water": 100})
 
     meals = []
+    water_logs = []
     water_total = 0
     caffeine_total = 0
     totals = {"cal": 0, "p": 0, "c": 0, "f": 0}
@@ -352,7 +354,14 @@ def _get_nutrition(date_str):
     for m in items:
         mid = m.get("meal_id", "")
         if mid.startswith("water_"):
-            water_total += m.get("oz", 0)
+            oz = m.get("oz", 0)
+            water_total += oz
+            water_logs.append({
+                "id": mid,
+                "oz": oz,
+                "loggedAt": m.get("logged_at"),
+                "sourceMealId": m.get("source_meal_id"),
+            })
         elif mid.startswith("meal_"):
             meal = {
                 "id": mid,
@@ -388,11 +397,15 @@ def _get_nutrition(date_str):
             totals["c"] += meal["c"]
             totals["f"] += meal["f"]
 
+    # Chronological sort so the Fuel timeline reads top-to-bottom by time-of-day.
+    meals.sort(key=lambda x: x.get("time") or "")
+
     return _resp(200, {
         "date": date_str,
         "meals": meals,
         "totals": totals,
         "water": water_total,
+        "waterLogs": water_logs,
         "caffeineMg": caffeine_total,
         "caffeineGoal": targets.get("caffeine", 400),
         "targets": targets,

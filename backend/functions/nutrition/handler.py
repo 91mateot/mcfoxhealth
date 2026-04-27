@@ -28,6 +28,7 @@ from shared.nutrition_service import (
     save_meal,
     log_water as svc_log_water,
     log_journal as svc_log_journal,
+    delete_water as svc_delete_water,
     sanitize_ingredients,
 )
 
@@ -67,6 +68,9 @@ def lambda_handler(event, context):
         return _post_meal(event)
     if path == "/api/water":
         return _post_water(event)
+    if path.startswith("/api/water/") and params.get("date") and params.get("water_id"):
+        if method == "DELETE":
+            return _delete_water(params["date"], params["water_id"])
     if path == "/api/journal":
         return _post_journal(event)
     if path == "/api/favorites":
@@ -339,6 +343,16 @@ def _post_water(event):
         result = svc_log_water(body.get("oz", 0), date=body.get("date"))
     except ValueError as e:
         return _resp(400, {"error": str(e)})
+    return _resp(200, result)
+
+
+def _delete_water(date_str: str, water_id: str):
+    try:
+        result = svc_delete_water(water_id, date=date_str)
+    except ValueError as e:
+        return _resp(400, {"error": str(e)})
+    if not result.get("ok"):
+        return _resp(404, result)
     return _resp(200, result)
 
 

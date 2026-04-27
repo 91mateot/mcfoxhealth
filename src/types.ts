@@ -221,12 +221,20 @@ export interface WorkoutsResponse {
   lastDetail?: WorkoutDetail;
 }
 
+export interface WaterLog {
+  id: string;
+  oz: number;
+  loggedAt?: string;
+  sourceMealId?: string;
+}
+
 export interface NutritionResponse {
   date: string;
   meals: Meal[];
   mealPlanned?: Meal;
   totals: { cal: number; p: number; c: number; f: number };
   water: number;
+  waterLogs?: WaterLog[];
   caffeineMg?: number;
   caffeineGoal?: number;
   targets: NutritionTargets;

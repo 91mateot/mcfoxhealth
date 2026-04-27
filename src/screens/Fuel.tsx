@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { MONO, type Palette } from "../theme";
 import type { Meal, NutritionResponse, TodayResponse } from "../types";
 import { Ring } from "../components/Ring";
@@ -9,7 +10,8 @@ import { SectionHead } from "../components/SectionHead";
 import { Btn } from "../components/Btn";
 import { HydrationPanel } from "../components/HydrationPanel";
 import { CaffeinePanel } from "../components/CaffeinePanel";
-import { formatMealTime } from "../api";
+import { HydrationDetail } from "../modals/HydrationDetail";
+import { formatMealTime, todayISO } from "../api";
 
 interface FuelScreenProps {
   C: Palette;
@@ -28,6 +30,7 @@ export function FuelScreen({ C, today, nutrition, onLogMeal, onOpenMeal }: FuelS
     : eaten;
   const proteinGap = Math.max(0, T.p - proj.p);
   const supplements = nutrition.supplements ?? today.supplements ?? [];
+  const [hydrationOpen, setHydrationOpen] = useState(false);
 
   return (
     <div>
@@ -85,9 +88,19 @@ export function FuelScreen({ C, today, nutrition, onLogMeal, onOpenMeal }: FuelS
 
       {/* Hydration + Caffeine */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-        <HydrationPanel C={C} water={today.water} waterGoal={today.waterGoal} />
+        <HydrationPanel C={C} water={today.water} waterGoal={today.waterGoal} onOpenDetail={() => setHydrationOpen(true)} />
         <CaffeinePanel C={C} mg={today.caffeineMg ?? 0} goal={today.caffeineGoal ?? 400} />
       </div>
+      <HydrationDetail
+        C={C}
+        open={hydrationOpen}
+        onClose={() => setHydrationOpen(false)}
+        date={nutrition.date || todayISO()}
+        water={today.water}
+        waterGoal={today.waterGoal}
+        waterLogs={nutrition.waterLogs ?? []}
+        meals={nutrition.meals}
+      />
 
       {/* Today's meals */}
       <SectionHead C={C} kicker="Logged" title="Today's meals" right={<Chip C={C}>{nutrition.meals.length} items</Chip>} />

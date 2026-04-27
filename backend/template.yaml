@@ -404,6 +404,12 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/water
             Method: POST
+        DeleteWater:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/water/{date}/{water_id}
+            Method: DELETE
         PostJournal:
           Type: HttpApi
           Properties:

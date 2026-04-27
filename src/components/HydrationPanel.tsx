@@ -9,9 +9,10 @@ interface HydrationPanelProps {
   C: Palette;
   water: number;
   waterGoal: number;
+  onOpenDetail?: () => void;
 }
 
-export function HydrationPanel({ C, water, waterGoal }: HydrationPanelProps) {
+export function HydrationPanel({ C, water, waterGoal, onOpenDetail }: HydrationPanelProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,18 +45,31 @@ export function HydrationPanel({ C, water, waterGoal }: HydrationPanelProps) {
 
   return (
     <Panel C={C} title="Hydration" right={<Chip C={C} color={C.cyan}>{roundOz(water)} / {waterGoal} oz</Chip>}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 8 }}>
-        <div style={{ fontSize: 24, fontWeight: 800, fontFamily: MONO, color: C.cyan, letterSpacing: "-.04em" }}>
-          {roundOz(water)}
+      <button
+        type="button"
+        onClick={onOpenDetail}
+        disabled={!onOpenDetail}
+        style={{
+          all: "unset",
+          display: "block",
+          width: "100%",
+          cursor: onOpenDetail ? "pointer" : "default",
+        }}
+        aria-label={onOpenDetail ? "Show hydration breakdown" : undefined}
+      >
+        <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 8 }}>
+          <div style={{ fontSize: 24, fontWeight: 800, fontFamily: MONO, color: C.cyan, letterSpacing: "-.04em" }}>
+            {roundOz(water)}
+          </div>
+          <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO }}>
+            oz · {pct}% of daily
+          </div>
+          <div style={{ marginLeft: "auto", fontSize: 11, color: C.t4, fontFamily: MONO }}>
+            {roundOz(remaining)} oz left
+          </div>
         </div>
-        <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO }}>
-          oz · {pct}% of daily
-        </div>
-        <div style={{ marginLeft: "auto", fontSize: 11, color: C.t4, fontFamily: MONO }}>
-          {roundOz(remaining)} oz left
-        </div>
-      </div>
-      <ProgressBar C={C} val={water} max={waterGoal} color={C.cyan} height={6} />
+        <ProgressBar C={C} val={water} max={waterGoal} color={C.cyan} height={6} />
+      </button>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginTop: 10 }}>
         <WaterBtn C={C} label="+8 oz" onClick={() => add(8)} disabled={busy} />
         <WaterBtn C={C} label="+16 oz" onClick={() => add(16)} disabled={busy} />

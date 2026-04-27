@@ -149,6 +149,13 @@ export async function logWater(oz: number) {
   return result;
 }
 
+export async function deleteWater(date: string, waterId: string) {
+  const result = await del<{ ok: boolean; water_id: string }>(`/api/water/${date}/${waterId}`);
+  mutate("/api/today");
+  mutate(`/api/nutrition/${date}`);
+  return result;
+}
+
 export async function submitJournal(journal: Partial<JournalToday> & { tags: string[] }) {
   const result = await post<{ ok: boolean }>("/api/journal", journal);
   mutate("/api/today");
