@@ -317,6 +317,21 @@ export interface MealInput {
   time?: string;
 }
 
+export type EstimateConfidence = "high" | "medium" | "low";
+
+export interface MealEstimate {
+  name: string;
+  cal: number;
+  p: number;
+  c: number;
+  f: number;
+  tag: string;
+  confidence: EstimateConfidence;
+  assumptions: string[];
+  source?: "known_foods" | "llm";
+  sourceUrl?: string;
+}
+
 export interface CoachRequest {
   messages: ChatMessage[];
   context?: string;

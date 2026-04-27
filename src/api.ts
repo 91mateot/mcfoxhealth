@@ -6,6 +6,7 @@ import type {
   NutritionResponse,
   BodyResponse,
   MealInput,
+  MealEstimate,
   ChatMessage,
   JournalToday,
 } from "./types";
@@ -66,6 +67,10 @@ export async function logMeal(meal: MealInput) {
   mutate("/api/today");
   mutate(`/api/nutrition/${todayISO()}`);
   return result;
+}
+
+export async function estimateMeal(text: string): Promise<MealEstimate> {
+  return post<MealEstimate>("/api/meal/estimate", { text });
 }
 
 export async function logWater(oz: number) {

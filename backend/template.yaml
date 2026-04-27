@@ -332,6 +332,7 @@ Resources:
     Properties:
       CodeUri: functions/nutrition/
       Handler: handler.lambda_handler
+      Timeout: 30
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref NutritionTable
@@ -347,12 +348,23 @@ Resources:
                 - secretsmanager:GetSecretValue
               Resource:
                 - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:fitness-api-key-*'
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: '*'
       Events:
         PostMeal:
           Type: HttpApi
           Properties:
             ApiId: !Ref HttpApi
             Path: /api/meal
+            Method: POST
+        PostMealEstimate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/meal/estimate
             Method: POST
         PostWater:
           Type: HttpApi
