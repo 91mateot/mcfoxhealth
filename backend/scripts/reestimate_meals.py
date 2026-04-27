@@ -131,16 +131,26 @@ def _update_meal(table, d: str, meal_id: str, est: dict, prev_tag: str):
     table.update_item(**kwargs)
 
     # Also log the water intake if the estimator flagged this as a beverage.
+    # Idempotent: only insert if no existing water_ row already points at this meal.
     if water_oz is not None and water_oz > 0:
-        water_row = {
-            "date": d,
-            "meal_id": f"water_{int(time.time() * 1000)}",
-            "oz": _dec(water_oz),
-            "source_meal_id": meal_id,
-            "source": "reestimate",
-            "logged_at": datetime.now(timezone.utc).isoformat(),
-        }
-        table.put_item(Item=water_row)
+        existing = table.query(
+            KeyConditionExpression="#d = :d AND begins_with(meal_id, :prefix)",
+            ExpressionAttributeNames={"#d": "date"},
+            ExpressionAttributeValues={":d": d, ":prefix": "water_"},
+        ).get("Items", [])
+        already_logged = any(
+            str(r.get("source_meal_id")) == meal_id for r in existing
+        )
+        if not already_logged:
+            water_row = {
+                "date": d,
+                "meal_id": f"water_{int(time.time() * 1000)}",
+                "oz": _dec(water_oz),
+                "source_meal_id": meal_id,
+                "source": "reestimate",
+                "logged_at": datetime.now(timezone.utc).isoformat(),
+            }
+            table.put_item(Item=water_row)
 
 
 def main():
