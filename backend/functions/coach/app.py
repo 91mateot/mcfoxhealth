@@ -20,7 +20,6 @@ from typing import Optional
 import boto3
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 
 from shared.coach_context import build_system_prompt
 from shared.nutrition_service import (
@@ -28,6 +27,7 @@ from shared.nutrition_service import (
     log_water as svc_log_water,
     log_journal as svc_log_journal,
     get_recent_meals as svc_get_recent_meals,
+    delete_meal as svc_delete_meal,
 )
 
 logger = logging.getLogger("coach")
@@ -38,13 +38,9 @@ MODEL_ID = os.environ.get("COACH_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
 MAX_TOOL_ROUNDS = 6
 
 app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
-)
+# CORS is handled by the Lambda Function URL's own Cors config — do not add
+# a FastAPI CORSMiddleware here or browsers will see duplicate
+# Access-Control-Allow-Origin headers and reject the response.
 
 
 TOOLS = [
@@ -111,7 +107,7 @@ TOOLS = [
     },
     {
         "name": "get_recent_meals",
-        "description": "Look up meals logged over the last N days. Use when you need context on what Mateo has eaten.",
+        "description": "Look up meals logged over the last N days. Use when you need context on what Mateo has eaten, or to find a meal_id you need to delete.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -122,6 +118,25 @@ TOOLS = [
                     "description": "How many days back to fetch. Default 1 (today).",
                 }
             },
+        },
+    },
+    {
+        "name": "delete_meal",
+        "description": (
+            "Delete a previously-logged meal and its companion water row. "
+            "Use ONLY to correct a mistake you (or Mateo) made — e.g. you logged the "
+            "wrong item, or the user asked you to remove something. Call get_recent_meals "
+            "first if you don't know the meal_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "meal_id": {
+                    "type": "string",
+                    "description": "The meal_id to delete (e.g. 'meal_1777318094580').",
+                },
+            },
+            "required": ["meal_id"],
         },
     },
 ]
@@ -142,6 +157,8 @@ def _execute_tool(name: str, args: dict) -> dict:
             )
         if name == "get_recent_meals":
             return {"meals": svc_get_recent_meals(int(args.get("days", 1)))}
+        if name == "delete_meal":
+            return svc_delete_meal(args.get("meal_id", ""))
         return {"error": f"unknown tool {name}"}
     except Exception as e:
         logger.exception("tool %s failed", name)

@@ -553,6 +553,28 @@ def log_journal(
     return {"status": "saved", "date": date}
 
 
+def delete_meal(meal_id: str, date: Optional[str] = None) -> dict:
+    """Delete a meal row (and any companion water row that references it)."""
+    if not meal_id or not meal_id.startswith("meal_"):
+        raise ValueError("invalid meal_id")
+    table = get_table("NUTRITION_TABLE")
+    date = date or local_today_str()
+
+    existing = get_item(table, {"date": date, "meal_id": meal_id})
+    if not existing:
+        return {"ok": False, "reason": "not found", "meal_id": meal_id}
+
+    table.delete_item(Key={"date": date, "meal_id": meal_id})
+
+    companions = 0
+    for row in query_items(table, "date", date) or []:
+        if row.get("meal_id", "").startswith("water_") and row.get("source_meal_id") == meal_id:
+            table.delete_item(Key={"date": date, "meal_id": row["meal_id"]})
+            companions += 1
+
+    return {"ok": True, "meal_id": meal_id, "companions_deleted": companions}
+
+
 def get_recent_meals(days: int = 1) -> list:
     """Return meal rows for the last `days` days (today + days-1 prior),
     sorted by date desc then time desc. Water rows excluded."""
