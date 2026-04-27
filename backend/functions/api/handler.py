@@ -369,6 +369,10 @@ def _get_nutrition(date_str):
                 meal["source"] = m["source"]
             if m.get("source_url"):
                 meal["sourceUrl"] = m["source_url"]
+            if m.get("ingredients"):
+                meal["ingredients"] = list(m["ingredients"])
+            if m.get("water_oz") is not None:
+                meal["waterOz"] = m["water_oz"]
             meals.append(meal)
             totals["cal"] += meal["cal"]
             totals["p"] += meal["p"]

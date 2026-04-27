@@ -215,8 +215,33 @@ def _post_meal(event):
         item["source"] = str(body["source"])[:30]
     if body.get("sourceUrl"):
         item["source_url"] = str(body["sourceUrl"])[:500]
+    ingredients = _sanitize_ingredients(body.get("ingredients"))
+    if ingredients:
+        item["ingredients"] = ingredients
+    water_oz_raw = body.get("water_oz")
+    water_oz = None
+    if water_oz_raw is not None:
+        try:
+            w = float(water_oz_raw)
+            if w > 0:
+                water_oz = round(min(w, 200.0), 1)
+        except (TypeError, ValueError):
+            pass
+    if water_oz is not None:
+        item["water_oz"] = water_oz
 
     put_item(table, item)
+
+    # Auto-log a water_ row for hydrating beverages so the Today hydration panel counts it.
+    if water_oz is not None:
+        water_row = {
+            "date": date,
+            "meal_id": f"water_{int(time.time() * 1000)}",
+            "oz": water_oz,
+            "source_meal_id": meal_id,
+            "logged_at": datetime.now(timezone.utc).isoformat(),
+        }
+        put_item(table, water_row)
 
     all_meals = query_items(table, "date", date)
     totals = {"cal": 0, "p": 0, "c": 0, "f": 0}
@@ -300,7 +325,35 @@ def _post_meal_estimate(event):
 
 
 _PATCHABLE_FIELDS = {"name", "cal", "p", "c", "f", "tag", "portion", "time",
-                     "original_text", "assumptions", "confidence", "source_url"}
+                     "original_text", "assumptions", "confidence", "source_url",
+                     "ingredients", "water_oz"}
+
+
+def _sanitize_ingredients(raw) -> list:
+    """Accept a list of ingredient dicts; drop anything malformed. Cap at 15."""
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for ing in raw[:15]:
+        if not isinstance(ing, dict):
+            continue
+        name = str(ing.get("name", "")).strip()
+        if not name:
+            continue
+        def _n(v):
+            try:
+                return round(float(v), 1)
+            except (TypeError, ValueError):
+                return 0.0
+        out.append({
+            "name": name[:80],
+            "portion": str(ing.get("portion", ""))[:60],
+            "cal": _n(ing.get("cal")),
+            "p": _n(ing.get("p")),
+            "c": _n(ing.get("c")),
+            "f": _n(ing.get("f")),
+        })
+    return out
 
 
 def _patch_meal(date_str: str, meal_id: str, event):
@@ -327,11 +380,17 @@ def _patch_meal(date_str: str, meal_id: str, event):
                 if not isinstance(v, list):
                     continue
                 v = [str(a)[:200] for a in v if str(a).strip()][:10]
+            elif k == "ingredients":
+                v = _sanitize_ingredients(v)
             elif k == "confidence" and v not in ("high", "medium", "low"):
                 continue
-            elif k in ("cal", "p", "c", "f"):
+            elif k in ("cal", "p", "c", "f", "water_oz"):
                 try:
                     v = float(v)
+                    if k == "water_oz":
+                        if v <= 0:
+                            continue
+                        v = round(min(v, 200.0), 1)
                 except (TypeError, ValueError):
                     continue
             elif isinstance(v, str):
@@ -383,6 +442,10 @@ def _serialize_meal(item: dict) -> dict:
         out["source"] = item["source"]
     if item.get("source_url"):
         out["sourceUrl"] = item["source_url"]
+    if item.get("ingredients"):
+        out["ingredients"] = list(item["ingredients"])
+    if item.get("water_oz") is not None:
+        out["waterOz"] = item["water_oz"]
     return out
 
 
@@ -578,13 +641,13 @@ User profile:
 - Goal: recomp (sub-12% body fat while defending lean mass)
 - On retatrutide (GLP-1 triple agonist) — appetite is suppressed, so portions typed may be smaller than average unless explicitly large
 
-Your job: given a free-form meal description (and optional recipe webpage content), return calories and macros in strict JSON.
+Your job: given a free-form meal description (and optional recipe webpage content), return calories, macros, per-ingredient breakdown, the time the user ate it, and (for beverages) hydration volume in strict JSON.
 
-Rules:
+General rules:
 - Be precise about portions. "½ cup cooked jasmine rice" ≈ 100g ≈ 128 cal, 2.7g P, 28g C, 0.3g F.
 - If the user pasted a recipe URL, the webpage content will be provided. Use it but assume the user ate ONE serving unless they specified otherwise.
 - If the description lists multiple components, sum them.
-- Pick a `tag` from: breakfast, lunch, dinner, snack. Default: snack.
+- Pick a `tag` from: breakfast, lunch, dinner, snack. Default based on stated time if given; else snack.
 - Confidence:
   - "high" when portions are unambiguous and ingredients are common
   - "medium" when you made reasonable estimates but portions were vague
@@ -592,6 +655,25 @@ Rules:
 - Always return assumptions so the user can verify. Be specific: include portion sizes you inferred.
 - Numbers only (not ranges). Round to 1 decimal.
 - If the text is clearly not a meal (e.g. "coffee, black" is fine; "walked the dog" is not), return cal=0 p=0 c=0 f=0 with confidence="low" and an assumption explaining why.
+
+Time parsing:
+- If the text states a time (e.g., "at 3pm", "7pm dinner", "10:30am breakfast", "around noon"), extract it into `time` as 24-hour "HH:MM".
+- If no time is stated, return `time: null` — the app will fall back to the current moment.
+- "breakfast" without a time ⇒ null; "breakfast at 7am" ⇒ "07:00".
+
+Hydration (beverages only):
+- If the meal is a drink that hydrates (tea, coffee, water, juice, soda, sports drink, broth-only), estimate `water_oz` as the total fluid ounces consumed.
+- Typical cup of coffee/tea: 8 oz. Grande latte: 16 oz. Venti: 20 oz. Bottle of water: 16.9 oz. Can of soda: 12 oz.
+- Milk, smoothies, protein shakes, bone broth as food, and soup ⇒ `water_oz: null` (they're food).
+- If unsure, return null.
+
+Per-ingredient breakdown:
+- `ingredients` is an array of the components that make up the meal. Each has `{name, portion, cal, p, c, f}`.
+- `portion` is a short human-readable string like "1/2 cup cooked", "4 oz", "1 medium", "15 chips".
+- Ingredient cal/p/c/f MUST sum to the top-level totals (within rounding). Be consistent.
+- Single-item meals still return a one-element `ingredients` array (e.g., "oikos shake" ⇒ one ingredient).
+- Skip the breakdown for pure beverages (coffee, tea, water) — return `ingredients: []`.
+- Cap at 15 ingredients. Combine minor items into "seasonings/oil" if needed.
 
 Return ONLY valid JSON, no prose. Schema:
 {
@@ -601,8 +683,11 @@ Return ONLY valid JSON, no prose. Schema:
   "c": number,
   "f": number,
   "tag": "breakfast"|"lunch"|"dinner"|"snack",
+  "time": "HH:MM" | null,
+  "water_oz": number | null,
   "confidence": "high"|"medium"|"low",
-  "assumptions": ["string", ...]
+  "assumptions": ["string", ...],
+  "ingredients": [{"name": "string", "portion": "string", "cal": number, "p": number, "c": number, "f": number}, ...]
 }"""
 
 
@@ -632,7 +717,7 @@ Known foods reference (use these exact numbers if the description matches):
         accept="application/json",
         body=json.dumps({
             "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 700,
+            "max_tokens": 1800,
             "system": _ESTIMATOR_SYSTEM,
             "messages": [{"role": "user", "content": user_msg}],
         }),
@@ -669,16 +754,77 @@ Known foods reference (use these exact numbers if the description matches):
         assumptions = [assumptions]
     assumptions = [str(a)[:200] for a in assumptions if str(a).strip()][:10]
 
-    return {
+    # Time — accept "HH:MM" 24-hour, else drop.
+    parsed_time = None
+    raw_time = data.get("time")
+    if isinstance(raw_time, str):
+        m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", raw_time)
+        if m:
+            hh, mm = int(m.group(1)), int(m.group(2))
+            if 0 <= hh < 24 and 0 <= mm < 60:
+                parsed_time = f"{hh:02d}:{mm:02d}"
+
+    # Water — non-negative, capped at 200 oz; treat 0 the same as null so the frontend
+    # can show the "will also log X oz" hint only when there's something to log.
+    water_oz = None
+    raw_water = data.get("water_oz")
+    if raw_water is not None:
+        try:
+            w = float(raw_water)
+            if w > 0:
+                water_oz = round(min(w, 200.0), 1)
+        except (TypeError, ValueError):
+            pass
+
+    # Ingredients — sanitize to [{name, portion, cal, p, c, f}], cap at 15.
+    ingredients = []
+    raw_ings = data.get("ingredients")
+    if isinstance(raw_ings, list):
+        for ing in raw_ings[:15]:
+            if not isinstance(ing, dict):
+                continue
+            name = str(ing.get("name", "")).strip()
+            if not name:
+                continue
+            ingredients.append({
+                "name": name[:80],
+                "portion": str(ing.get("portion", ""))[:60],
+                "cal": _num(ing.get("cal")),
+                "p": _num(ing.get("p")),
+                "c": _num(ing.get("c")),
+                "f": _num(ing.get("f")),
+            })
+
+    totals_cal = _num(data.get("cal"))
+    totals_p = _num(data.get("p"))
+    totals_c = _num(data.get("c"))
+    totals_f = _num(data.get("f"))
+
+    # If ingredients exist and disagree with totals by >5%, trust the ingredient sums.
+    if ingredients:
+        def _sum(key):
+            return round(sum(i[key] for i in ingredients), 1)
+        s_cal = _sum("cal")
+        # Only override when there's a meaningful disagreement AND the totals aren't trivially small.
+        if totals_cal > 20 and abs(s_cal - totals_cal) / totals_cal > 0.05:
+            totals_cal, totals_p, totals_c, totals_f = s_cal, _sum("p"), _sum("c"), _sum("f")
+
+    out = {
         "name": str(data.get("name") or text)[:80],
-        "cal": _num(data.get("cal")),
-        "p": _num(data.get("p")),
-        "c": _num(data.get("c")),
-        "f": _num(data.get("f")),
+        "cal": totals_cal,
+        "p": totals_p,
+        "c": totals_c,
+        "f": totals_f,
         "tag": tag,
         "confidence": conf,
         "assumptions": assumptions,
+        "ingredients": ingredients,
     }
+    if parsed_time is not None:
+        out["time"] = parsed_time
+    if water_oz is not None:
+        out["water_oz"] = water_oz
+    return out
 
 
 def _parse_body(event):

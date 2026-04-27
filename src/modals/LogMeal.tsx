@@ -43,7 +43,7 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [estimate, setEstimate] = useState<MealEstimate | null>(null);
-  const [edited, setEdited] = useState<{ name: string; cal: number; p: number; c: number; f: number; tag: string } | null>(null);
+  const [edited, setEdited] = useState<{ name: string; cal: number; p: number; c: number; f: number; tag: string; time: string } | null>(null);
   const [assumptionsOpen, setAssumptionsOpen] = useState(false);
   const favoritesResp = useFavorites();
   const favorites = favoritesResp.data?.favorites ?? [];
@@ -82,6 +82,7 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
         c: est.c,
         f: est.f,
         tag: est.tag,
+        time: est.time ?? clientTime(),
       });
       setStep("review");
     } catch (e) {
@@ -93,13 +94,19 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
 
   const handleSave = () => {
     if (!edited) return;
-    const payload: MealInput = { ...edited, time: clientTime() };
+    const payload: MealInput = { ...edited };
     if (estimate) {
       payload.original_text = custom.trim() || estimate.name;
       payload.assumptions = estimate.assumptions;
       payload.confidence = estimate.confidence;
       payload.source = estimate.source;
       payload.sourceUrl = estimate.sourceUrl;
+      if (estimate.ingredients && estimate.ingredients.length > 0) {
+        payload.ingredients = estimate.ingredients;
+      }
+      if (estimate.water_oz && estimate.water_oz > 0) {
+        payload.water_oz = estimate.water_oz;
+      }
     }
     onAdd(payload);
     onClose();
@@ -267,6 +274,9 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
 
           <div style={{ background: C.s, border: `1px solid ${C.border}`, borderRadius: 14, padding: 12, marginBottom: 10 }}>
             <EditField C={C} label="Name" value={edited.name} onChange={(v) => setEdited({ ...edited, name: v })} />
+            <div style={{ marginTop: 10 }}>
+              <EditTime C={C} label={estimate.time ? "Time (parsed from your text)" : "Time"} value={edited.time} onChange={(v) => setEdited({ ...edited, time: v })} />
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
               <EditNum C={C} label="Calories" value={edited.cal} onChange={(v) => setEdited({ ...edited, cal: v })} unit="kcal" color={C.primary} />
               <EditNum C={C} label="Protein" value={edited.p} onChange={(v) => setEdited({ ...edited, p: v })} unit="g" color={C.primary} />
@@ -274,6 +284,32 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
               <EditNum C={C} label="Fat" value={edited.f} onChange={(v) => setEdited({ ...edited, f: v })} unit="g" color={C.purple} />
             </div>
           </div>
+
+          {estimate.water_oz && estimate.water_oz > 0 && (
+            <div style={{ background: C.s, border: `1px solid ${C.cyan}40`, borderRadius: 14, padding: "10px 12px", marginBottom: 10, fontSize: 12, color: C.t2, display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ color: C.cyan, fontSize: 14 }}>💧</span>
+              <span>Will also log <strong style={{ color: C.cyan }}>{estimate.water_oz} oz</strong> to today's hydration.</span>
+            </div>
+          )}
+
+          {estimate.ingredients && estimate.ingredients.length > 1 && (
+            <div style={{ background: C.s, border: `1px solid ${C.border}`, borderRadius: 14, padding: 12, marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 6 }}>
+                Ingredients ({estimate.ingredients.length})
+              </div>
+              {estimate.ingredients.map((ing, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "4px 0", borderTop: i === 0 ? "none" : `1px solid ${C.border}` }}>
+                  <div style={{ flex: 1, minWidth: 0, marginRight: 8 }}>
+                    <div style={{ fontSize: 12, color: C.t, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ing.name}</div>
+                    {ing.portion && <div style={{ fontSize: 10, color: C.t4, fontFamily: MONO }}>{ing.portion}</div>}
+                  </div>
+                  <div style={{ fontSize: 11, fontFamily: MONO, color: C.t3, whiteSpace: "nowrap" }}>
+                    {Math.round(ing.cal)} · P{Math.round(ing.p)} C{Math.round(ing.c)} F{Math.round(ing.f)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
           {estimate.assumptions.length > 0 && (
             <div style={{ background: C.s, border: `1px solid ${C.border}`, borderRadius: 14, padding: 12, marginBottom: 10 }}>
@@ -345,6 +381,34 @@ function EditField({ C, label, value, onChange }: { C: Palette; label: string; v
           padding: "8px 10px",
           color: C.t,
           fontFamily: FONT,
+          fontSize: 13,
+          fontWeight: 600,
+          outline: "none",
+          boxSizing: "border-box",
+        }}
+      />
+    </div>
+  );
+}
+
+function EditTime({ C, label, value, onChange }: { C: Palette; label: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: C.t4, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 4 }}>
+        {label}
+      </div>
+      <input
+        type="time"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          width: "100%",
+          background: C.bg,
+          border: `1px solid ${C.border}`,
+          borderRadius: 8,
+          padding: "8px 10px",
+          color: C.t,
+          fontFamily: MONO,
           fontSize: 13,
           fontWeight: 600,
           outline: "none",

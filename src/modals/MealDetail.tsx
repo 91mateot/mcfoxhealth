@@ -162,6 +162,43 @@ export function MealDetailModal({ C, open, onClose, meal, date, targets }: MealD
             <MacroRow C={C} label="Fat" val={meal.f} goal={targets.f} color={C.purple} unit="g" share={shareOf(meal.f, targets.f)} last />
           </div>
 
+          {meal.waterOz !== undefined && meal.waterOz > 0 && (
+            <div style={{ background: C.s, border: `1px solid ${C.cyan}40`, borderRadius: 14, padding: "10px 12px", marginBottom: 10, fontSize: 12, color: C.t2, display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ color: C.cyan, fontSize: 14 }}>💧</span>
+              <span>Logged <strong style={{ color: C.cyan }}>{roundUnit(meal.waterOz)} oz</strong> to hydration.</span>
+            </div>
+          )}
+
+          {meal.ingredients && meal.ingredients.length > 0 && (
+            <div style={{ background: C.s, border: `1px solid ${C.border}`, borderRadius: 14, padding: 12, marginBottom: 10 }}>
+              <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 8 }}>
+                Ingredients ({meal.ingredients.length})
+              </div>
+              {meal.ingredients.map((ing, i) => {
+                const totalCal = meal.ingredients!.reduce((s, x) => s + x.cal, 0) || meal.cal || 1;
+                const pct = Math.round((ing.cal / totalCal) * 100);
+                return (
+                  <div key={i} style={{ padding: "8px 0", borderTop: i === 0 ? "none" : `1px solid ${C.border}` }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12.5, color: C.t, fontWeight: 600 }}>{ing.name}</div>
+                        {ing.portion && <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 1 }}>{ing.portion}</div>}
+                      </div>
+                      <div style={{ textAlign: "right", minWidth: 90 }}>
+                        <div style={{ fontSize: 13, fontFamily: MONO, color: C.t, fontWeight: 700 }}>
+                          {roundUnit(ing.cal)} <span style={{ color: C.t4, fontWeight: 500, fontSize: 11 }}>· {pct}%</span>
+                        </div>
+                        <div style={{ fontSize: 11, fontFamily: MONO, color: C.t4, marginTop: 1 }}>
+                          P{roundUnit(ing.p)} C{roundUnit(ing.c)} F{roundUnit(ing.f)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {meal.assumptions && meal.assumptions.length > 0 && (
             <div style={{ background: C.s, border: `1px solid ${C.border}`, borderRadius: 14, padding: 12, marginBottom: 10 }}>
               <button

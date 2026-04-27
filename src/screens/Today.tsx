@@ -8,6 +8,7 @@ import { Chip } from "../components/Chip";
 import { Sparkline } from "../components/Sparkline";
 import { ProgressBar } from "../components/ProgressBar";
 import { Btn } from "../components/Btn";
+import { HydrationPanel } from "../components/HydrationPanel";
 
 interface TodayScreenProps {
   C: Palette;
@@ -287,24 +288,7 @@ export function TodayScreen({ C, data, onRingTap, onOpenChat, onLogMeal, onLogWo
       </Panel>
 
       {/* Hydration */}
-      <Panel
-        C={C}
-        title="Hydration"
-        right={<Chip C={C} color={C.cyan}>{data.water} / {data.waterGoal} oz</Chip>}
-      >
-        <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 8 }}>
-          <div style={{ fontSize: 24, fontWeight: 800, fontFamily: MONO, color: C.cyan, letterSpacing: "-.04em" }}>
-            {data.water}
-          </div>
-          <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO }}>
-            oz · {Math.round((data.water / data.waterGoal) * 100)}% of daily
-          </div>
-          <div style={{ marginLeft: "auto", fontSize: 11, color: C.t4, fontFamily: MONO }}>
-            {Math.max(0, data.waterGoal - data.water)} oz left
-          </div>
-        </div>
-        <ProgressBar C={C} val={data.water} max={data.waterGoal} color={C.cyan} height={6} />
-      </Panel>
+      <HydrationPanel C={C} water={data.water} waterGoal={data.waterGoal} />
 
       {/* Quick actions */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, margin: "4px 0 8px" }}>

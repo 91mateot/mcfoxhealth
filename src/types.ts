@@ -73,6 +73,15 @@ export interface ProteinDay {
   inProgress?: boolean;
 }
 
+export interface Ingredient {
+  name: string;
+  portion?: string;
+  cal: number;
+  p: number;
+  c: number;
+  f: number;
+}
+
 export interface Meal {
   id: string | number;
   time: string;
@@ -88,6 +97,8 @@ export interface Meal {
   confidence?: EstimateConfidence;
   source?: "known_foods" | "llm";
   sourceUrl?: string;
+  ingredients?: Ingredient[];
+  waterOz?: number;
 }
 
 export interface NutritionTargets {
@@ -325,6 +336,8 @@ export interface MealInput {
   confidence?: EstimateConfidence;
   source?: "known_foods" | "llm";
   sourceUrl?: string;
+  ingredients?: Ingredient[];
+  water_oz?: number;
 }
 
 export interface MealPatch {
@@ -340,6 +353,8 @@ export interface MealPatch {
   assumptions?: string[];
   confidence?: EstimateConfidence;
   source_url?: string;
+  ingredients?: Ingredient[];
+  water_oz?: number;
 }
 
 export interface Favorite {
@@ -365,6 +380,9 @@ export interface MealEstimate {
   assumptions: string[];
   source?: "known_foods" | "llm";
   sourceUrl?: string;
+  ingredients?: Ingredient[];
+  time?: string;
+  water_oz?: number;
 }
 
 export interface CoachRequest {
