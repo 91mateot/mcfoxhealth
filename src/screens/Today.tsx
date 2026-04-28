@@ -68,7 +68,7 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
           val={data.recovery}
           max={100}
           color={zoneColor}
-          label="Recovered"
+          label="Recovery"
           display={data.recovery}
           unit="%"
           tag={zone === "green" ? "Ready" : zone === "yellow" ? "Mod" : "Rest"}
@@ -81,7 +81,7 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
           val={data.sleep.score}
           max={100}
           color={C.cyan}
-          label="Slept"
+          label="Sleep"
           display={data.sleep.score}
           unit={`${data.sleep.hours}h ${data.sleep.minutes}m`}
           tag={data.sleep.score >= 80 ? "Solid" : data.sleep.score >= 60 ? "Ok" : "Low"}
@@ -97,7 +97,7 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
         </div>
         <div style={{ fontSize: 13, color: C.t, marginTop: 6, lineHeight: 1.5, fontWeight: 500 }}>
           Recovery is <span style={{ color: zoneColor, fontWeight: 700 }}>{data.recovery}%</span>.
-          Effort target <span style={{ color: C.warn, fontWeight: 700 }}>{data.strainTarget.low}–{data.strainTarget.high}</span>,
+          Strain target <span style={{ color: C.warn, fontWeight: 700 }}>{data.strainTarget.low}–{data.strainTarget.high}</span>,
           then in bed by <span style={{ color: C.cyan, fontWeight: 700 }}>{need.bedtimeBy}</span>.
         </div>
         <button
@@ -148,7 +148,7 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
               <div style={{ fontSize: 20, fontWeight: 800, fontFamily: MONO, color: C.warn, letterSpacing: "-.04em" }}>
                 {data.strainTarget.low}–{data.strainTarget.high}
               </div>
-              <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO }}>effort</div>
+              <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO }}>strain</div>
             </div>
             <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
               {data.strainTarget.reason}
@@ -417,7 +417,7 @@ function StrainRing({ C, data, onClick }: { C: Palette; data: TodayResponse; onC
   return (
     <button
       onClick={onClick}
-      aria-label={`Effort ${val.toFixed(1)} of 21, target ${tgt.low} to ${tgt.high}`}
+      aria-label={`Strain ${val.toFixed(1)} of 21, target ${tgt.low} to ${tgt.high}`}
       style={{
         background: C.s,
         borderRadius: 22,
@@ -431,7 +431,7 @@ function StrainRing({ C, data, onClick }: { C: Palette; data: TodayResponse; onC
       }}
     >
       <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".16em", color: C.t3, fontWeight: 700, marginBottom: 12 }}>
-        Effort
+        Strain
       </div>
       <div style={{ position: "relative", width: 82, height: 82, margin: "0 auto 10px" }}>
         <svg viewBox="0 0 100 100" style={{ width: size, height: size, transform: "rotate(-90deg)", position: "absolute", inset: 0 }}>

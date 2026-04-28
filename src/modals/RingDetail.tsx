@@ -52,7 +52,7 @@ export function RingDetailSheet({ C, open, onClose, which, today }: RingDetailSh
       };
     })(),
     strain: {
-      title: "Effort today",
+      title: "Strain today",
       color: C.warn,
       hero: (today.strain ?? 0).toFixed(1),
       heroUnit: "/21",
@@ -174,7 +174,7 @@ function PrimerSheet({ C, open, onClose }: { C: Palette; open: boolean; onClose:
     {
       color: C.warn,
       icon: "◆",
-      term: "Strain / Effort (0–21)",
+      term: "Strain (0–21)",
       plain: "A score of how hard you pushed your heart today. Logarithmic — 10 is moderate, 15 is hard, 18+ is very hard.",
       details: "Green day → push (14–17). Yellow → keep it chill (8–12). Red → rest (<8).",
     },
@@ -189,7 +189,7 @@ function PrimerSheet({ C, open, onClose }: { C: Palette; open: boolean; onClose:
       color: C.cyan,
       icon: "⌚",
       term: "Sleep need",
-      plain: "How much sleep your body needs tonight, given recent debt and today's effort.",
+      plain: "How much sleep your body needs tonight, given recent debt and today's strain.",
       details: "More debt + harder day = a bigger number.",
     },
   ];
