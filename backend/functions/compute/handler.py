@@ -11,9 +11,16 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 from shared.db import get_table, put_item, get_item, query_items
+from shared.lift_compute import (
+    detect_prs as _detect_prs_shared,
+    detect_stall as _detect_stall_shared,
+    epley_e1rm as _epley_e1rm_shared,
+    recompute_prs_for_canonicals,
+    scan_exercise_history as _scan_history_shared,
+    session_top_e1rm as _session_top_e1rm_shared,
+)
 
 logger = logging.getLogger("compute")
 logger.setLevel(logging.INFO)
@@ -460,132 +467,49 @@ def _compute_acwr(workouts_table, date_str: str):
 
 
 # ── Lift compute (PRs, stalls, e1RM, weekly volume) ──────────────────────
-
-
-def _epley_e1rm(weight: float, reps: int) -> float:
-    """Epley formula for estimated 1-rep max.
-    e1RM = weight * (1 + reps/30). Good for 2-10 reps.
-    reps=1 returns weight unchanged. reps=0 returns 0 (no work done)."""
-    if reps <= 0 or weight <= 0:
-        return 0.0
-    if reps == 1:
-        return round(float(weight), 1)
-    return round(float(weight) * (1.0 + reps / 30.0), 1)
-
-
-def _scan_exercise_history(exercises_table, canonical: str, days: int = 180) -> list:
-    """Return all sessions for a canonical exercise in the last `days`, sorted
-    by date ascending. ExercisesTable is (PK=canonical, SK=date) so this is a
-    single Query."""
-    rows = query_items(exercises_table, "canonical", canonical) or []
-    cutoff = (local_now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    rows = [r for r in rows if r.get("date", "") >= cutoff]
-    rows.sort(key=lambda r: r.get("date", ""))
-    return rows
-
-
-def _session_top_e1rm(row: dict) -> float:
-    """Best Epley-e1RM across all working sets in a session."""
-    best = 0.0
-    for s in row.get("sets") or []:
-        if s.get("warmup"):
-            continue
-        w = float(s.get("weight") or 0)
-        r = int(s.get("reps") or 0)
-        e = _epley_e1rm(w, r)
-        if e > best:
-            best = e
-    return best
-
-
-def _detect_prs(history: list) -> dict[str, dict]:
-    """For each session in history, decide whether it set a PR vs all prior
-    sessions. Returns {date: {weight: bool, e1rm: bool, volume: bool}}."""
-    out = {}
-    best_weight = 0.0
-    best_e1rm = 0.0
-    best_volume = 0.0
-    for row in history:
-        top_weight = float(row.get("top_weight") or 0)
-        top_e1rm = _session_top_e1rm(row)
-        volume = float(row.get("working_volume") or 0)
-
-        flags = {
-            "weight": top_weight > best_weight,
-            "e1rm": top_e1rm > best_e1rm,
-            "volume": volume > best_volume,
-        }
-        out[row["date"]] = flags
-
-        if top_weight > best_weight:
-            best_weight = top_weight
-        if top_e1rm > best_e1rm:
-            best_e1rm = top_e1rm
-        if volume > best_volume:
-            best_volume = volume
-    return out
-
-
-def _detect_stall(history: list, min_sessions: int = 3) -> Optional[dict]:
-    """A stall = last `min_sessions` sessions have top_weight equal or
-    decreasing with similar rep range (±2). Returns dict or None."""
-    if len(history) < min_sessions:
-        return None
-    tail = history[-min_sessions:]
-    weights = [float(r.get("top_weight") or 0) for r in tail]
-    reps_at = [int(r.get("top_reps_at_top_weight") or 0) for r in tail]
-    if any(w == 0 for w in weights):
-        return None
-    # No progression = max weight in tail is not strictly greater than first.
-    if max(weights) > weights[0]:
-        return None
-    # Rep range similar.
-    if max(reps_at) - min(reps_at) > 2:
-        return None
-    return {
-        "weight": weights[-1],
-        "reps": reps_at[-1],
-        "sessions": min_sessions,
-        "since_date": tail[0]["date"],
-    }
+#
+# Pure helpers live in shared.lift_compute so workout_service can reuse them
+# for immediate PR recompute at annotate-time. This handler is the daily
+# scheduled roll-up.
 
 
 def _compute_lifts():
     """Daily lift roll-up:
-    - For every exercise that has a session in the last 7 days, recompute PR
-      flags across its full 180-day history and write back to each row.
-    - Detect stalls for every exercise with ≥3 recent sessions; store to user_config.
+    - For EVERY canonical exercise with any history (not just recent dates),
+      recompute PR flags across its full 180-day history and write back.
+      Scanning everything — not just the last-7-days session-date window —
+      is critical for retroactive annotations: if Mateo annotates a 2-week-
+      old workout today, its canonical may have a session-date outside any
+      recent window, but its PR/e1RM status needs to be re-derived in the
+      context of older sessions it now competes against.
+    - Detect stalls for every exercise with ≥3 sessions; store to user_config.
     - Roll per-muscle-group weekly volume into DAILY_SCORES_TABLE (week_start key)."""
     exercises_table = get_table("EXERCISES_TABLE")
     scores_table = get_table("DAILY_SCORES_TABLE")
     config_table = get_table("USER_CONFIG_TABLE")
 
-    # Find exercises touched in the last 7 days. We don't have a GSI, so scan
-    # the recent window via per-day queries on WORKOUTS_TABLE would be cleaner,
-    # but scanning the small ExercisesTable once a day is acceptable at this scale.
     try:
-        resp = exercises_table.scan(Limit=500)
+        resp = exercises_table.scan(Limit=2000)
         all_rows = resp.get("Items", [])
     except Exception:
         logger.exception("ExercisesTable scan failed")
         return {"status": "lifts_compute_failed"}
 
-    recent_cutoff = (local_now() - timedelta(days=7)).strftime("%Y-%m-%d")
-    recent_canonicals = sorted({r["canonical"] for r in all_rows if r.get("date", "") >= recent_cutoff and r.get("canonical")})
+    all_canonicals = sorted({r["canonical"] for r in all_rows if r.get("canonical")})
 
     stalls = []
     pr_count = 0
 
-    for canonical in recent_canonicals:
-        history = _scan_exercise_history(exercises_table, canonical, days=180)
+    for canonical in all_canonicals:
+        history = _scan_history_shared(exercises_table, canonical, days=180)
         if not history:
             continue
-        pr_flags = _detect_prs(history)
+        pr_flags = _detect_prs_shared(history)
 
         # Write PR flags and e1RM back to each session row.
         for row in history:
             flags = pr_flags.get(row["date"], {})
-            e1rm = _session_top_e1rm(row)
+            e1rm = _session_top_e1rm_shared(row)
             updated = {
                 **row,
                 "e1rm": e1rm,
@@ -599,7 +523,7 @@ def _compute_lifts():
             if any(flags.values()):
                 pr_count += 1
 
-        stall = _detect_stall(history)
+        stall = _detect_stall_shared(history)
         if stall:
             stalls.append({
                 "canonical": canonical,
@@ -644,7 +568,7 @@ def _compute_lifts():
 
     return {
         "status": "lifts_computed",
-        "exercises_touched": len(recent_canonicals),
+        "exercises_touched": len(all_canonicals),
         "prs_tagged": pr_count,
         "stalls": len(stalls),
         "volume_by_muscle_group": volume_row["volume_by_muscle_group"],

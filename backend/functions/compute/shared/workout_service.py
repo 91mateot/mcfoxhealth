@@ -21,6 +21,7 @@ from typing import Optional
 import boto3
 
 from shared.db import get_table, put_item, get_item, query_items
+from shared.lift_compute import recompute_prs_for_canonicals
 from shared.timezone import local_now, local_today_str
 
 logger = logging.getLogger("workout_service")
@@ -697,6 +698,18 @@ def annotate_workout(text: str, date: Optional[str] = None) -> dict:
 
     # Mirror to ExercisesTable.
     mirror_count = _write_exercise_rows(exercises, date)
+
+    # Recompute PR flags + e1RM for each affected canonical across its full
+    # history. Critical for retroactive annotations: if Mateo annotates an
+    # older session, existing PR flags on newer sessions may no longer be
+    # correct (e.g. an old 210lb bench beats last week's 205lb PR flag).
+    # Also means the coach debrief below sees fresh PR status.
+    affected_canonicals = sorted({e["canonical"] for e in exercises if e.get("canonical")})
+    if affected_canonicals:
+        try:
+            recompute_prs_for_canonicals(affected_canonicals)
+        except Exception:
+            logger.exception("inline PR recompute failed for %s", affected_canonicals)
 
     # Generate coach feedback against the freshly-written row + history.
     # Reload from the same dict so history reads already include this session.
