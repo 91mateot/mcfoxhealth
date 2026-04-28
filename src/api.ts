@@ -183,9 +183,22 @@ export async function annotateWorkout(date: string, workoutId: string, text: str
     cardio_count: number;
     muscle_groups: string[];
     session_notes?: string;
+    coach_feedback?: string;
   }>(`/api/workout/${date}/${workoutId}/annotate`, { text });
   mutate("/api/workouts");
   mutate("/api/progress");
+  return result;
+}
+
+export async function regenerateWorkoutFeedback(date: string, workoutId: string) {
+  const result = await post<{
+    ok: boolean;
+    date: string;
+    workout_id: string;
+    coach_feedback?: string;
+    coach_feedback_at?: string;
+  }>(`/api/workout/${date}/${workoutId}/feedback`, {});
+  mutate("/api/workouts");
   return result;
 }
 

@@ -381,6 +381,8 @@ Resources:
             TableName: !Ref WorkoutsTable
         - DynamoDBCrudPolicy:
             TableName: !Ref ExercisesTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DailyScoresTable
         - Statement:
             - Effect: Allow
               Action:
@@ -464,6 +466,12 @@ Resources:
           Properties:
             ApiId: !Ref HttpApi
             Path: /api/workout/{date}/{workout_id}/annotate
+            Method: POST
+        PostWorkoutFeedback:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/workout/{date}/{workout_id}/feedback
             Method: POST
         PostCalibration:
           Type: HttpApi

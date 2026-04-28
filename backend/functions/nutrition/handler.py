@@ -32,7 +32,10 @@ from shared.nutrition_service import (
     validate_meal as svc_validate_meal,
     sanitize_ingredients,
 )
-from shared.workout_service import annotate_workout as svc_annotate_workout
+from shared.workout_service import (
+    annotate_workout as svc_annotate_workout,
+    summarize_workout as svc_summarize_workout,
+)
 
 secrets_client = boto3.client("secretsmanager")
 _api_key_cache = {"value": None, "ts": 0}
@@ -90,6 +93,11 @@ def lambda_handler(event, context):
         # /api/workout/{date}/{workout_id}/annotate
         if len(parts) == 6 and parts[5] == "annotate":
             return _post_workout_annotate(parts[3], parts[4], event)
+    if path.startswith("/api/workout/") and path.endswith("/feedback"):
+        parts = path.split("/")
+        # /api/workout/{date}/{workout_id}/feedback
+        if len(parts) == 6 and parts[5] == "feedback":
+            return _post_workout_feedback(parts[3], parts[4])
     if path == "/api/favorites":
         if method == "GET":
             return _get_favorites()
@@ -392,6 +400,18 @@ def _post_journal(event):
         soreness=body.get("soreness"),
         date=body.get("date"),
     )
+    return _resp(200, result)
+
+
+def _post_workout_feedback(date_str: str, workout_id: str):
+    """Regenerate coach feedback for a workout. Useful for backfilled
+    workouts that were annotated before the feedback loop existed."""
+    try:
+        result = svc_summarize_workout(date_str, workout_id)
+    except Exception as e:
+        return _resp(502, {"error": f"feedback failed: {e}"})
+    if not result.get("ok"):
+        return _resp(404, result)
     return _resp(200, result)
 
 

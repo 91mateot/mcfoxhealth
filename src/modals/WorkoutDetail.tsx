@@ -5,7 +5,7 @@ import { Sheet } from "../components/Sheet";
 import { Btn } from "../components/Btn";
 import { Chip } from "../components/Chip";
 import { VoiceInput } from "../components/VoiceInput";
-import { annotateWorkout } from "../api";
+import { annotateWorkout, regenerateWorkoutFeedback } from "../api";
 
 interface WorkoutDetailProps {
   C: Palette;
@@ -33,6 +33,7 @@ export function WorkoutDetailModal({ C, open, onClose, workout }: WorkoutDetailP
   const [mode, setMode] = useState<Mode>("view");
   const [annotateText, setAnnotateText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [regenBusy, setRegenBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -40,6 +41,7 @@ export function WorkoutDetailModal({ C, open, onClose, workout }: WorkoutDetailP
     setMode("view");
     setError(null);
     setBusy(false);
+    setRegenBusy(false);
     setAnnotateText(workout?.originalText ?? "");
   }, [open, workout]);
 
@@ -69,6 +71,20 @@ export function WorkoutDetailModal({ C, open, onClose, workout }: WorkoutDetailP
     }
   };
 
+  const handleRegenerateFeedback = async () => {
+    const workoutId = workout.strava_id;
+    if (!workoutId) return;
+    setRegenBusy(true);
+    setError(null);
+    try {
+      await regenerateWorkoutFeedback(workout.date, workoutId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Regenerate failed.");
+    } finally {
+      setRegenBusy(false);
+    }
+  };
+
   return (
     <Sheet C={C} open={open} onClose={onClose} title={`${workout.day} · ${workout.title}`} height="90%">
       {mode === "view" && (
@@ -85,6 +101,51 @@ export function WorkoutDetailModal({ C, open, onClose, workout }: WorkoutDetailP
             {workout.source === "manual" && <Chip C={C} color={C.cyan}>manual</Chip>}
             {workout.annotatedAt && <Chip C={C} color={C.primary}>annotated</Chip>}
           </div>
+
+          {workout.coachFeedback && (
+            <div
+              style={{
+                background: `linear-gradient(180deg, ${C.primary}12 0%, ${C.s} 60%)`,
+                border: `1px solid ${C.primary}40`,
+                borderRadius: 14,
+                padding: 14,
+                marginBottom: 12,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+                <div style={{ fontSize: 11, color: C.primary, textTransform: "uppercase", letterSpacing: ".14em", fontWeight: 800 }}>
+                  Coach debrief
+                </div>
+                <button
+                  onClick={handleRegenerateFeedback}
+                  disabled={regenBusy}
+                  style={{
+                    background: "transparent",
+                    border: `1px solid ${C.border}`,
+                    borderRadius: 8,
+                    color: C.t3,
+                    fontSize: 10,
+                    fontFamily: MONO,
+                    fontWeight: 700,
+                    padding: "3px 8px",
+                    cursor: regenBusy ? "default" : "pointer",
+                    letterSpacing: ".06em",
+                  }}
+                  title="Regenerate with the latest history + readiness"
+                >
+                  {regenBusy ? "…" : "↻ regenerate"}
+                </button>
+              </div>
+              <div style={{ fontSize: 13, color: C.t, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>
+                {workout.coachFeedback}
+              </div>
+              {workout.coachFeedbackAt && (
+                <div style={{ fontSize: 10, color: C.t4, fontFamily: MONO, marginTop: 8 }}>
+                  generated {formatTs(workout.coachFeedbackAt)}
+                </div>
+              )}
+            </div>
+          )}
 
           {exercises.length > 0 && (
             <>
@@ -252,3 +313,18 @@ function ExerciseRow({ C, ex, last }: { C: Palette; ex: WorkoutExercise; last: b
 void MUSCLE_COLORS;
 
 void FONT;
+
+function formatTs(iso: string): string {
+  try {
+    const d = new Date(iso);
+    const now = new Date();
+    const diffMin = Math.round((now.getTime() - d.getTime()) / 60000);
+    if (diffMin < 1) return "just now";
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.round(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    return d.toLocaleDateString();
+  } catch {
+    return iso;
+  }
+}

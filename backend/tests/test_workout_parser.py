@@ -120,6 +120,10 @@ def test_annotate_workout_end_to_end(monkeypatch):
     }
     monkeypatch.setattr(ws, "_parse_lift_text", lambda text: parsed)
 
+    # Stub the coach-feedback call so the test is deterministic and doesn't
+    # hit Bedrock. Its contents are covered by direct unit tests elsewhere.
+    monkeypatch.setattr(ws, "_generate_coach_feedback", lambda _w: "Solid push session.")
+
     workouts_puts = []
     exercises_puts = []
     seed_workout = {"date": "2026-04-27", "strava_id": "12345", "title": "Workout", "type": "cardio", "source": "strava"}
@@ -133,7 +137,8 @@ def test_annotate_workout_end_to_end(monkeypatch):
             return workouts_table
         if env_var == "EXERCISES_TABLE":
             return exercises_table
-        raise ValueError(f"unexpected table {env_var}")
+        # Any other table the feedback path touches → throwaway mock
+        return MagicMock()
 
     def fake_put_item(table, item):
         if table is workouts_table:
@@ -156,9 +161,10 @@ def test_annotate_workout_end_to_end(monkeypatch):
     assert result["exercise_count"] == 2
     assert result["cardio_count"] == 1
     assert sorted(result["muscle_groups"]) == ["back", "glutes"]
+    assert result["coach_feedback"] == "Solid push session."
 
-    # Workout row was patched with structured data.
-    assert len(workouts_puts) == 1
+    # Row written once with structured data, once with coach feedback.
+    assert len(workouts_puts) == 2
     w = workouts_puts[0]
     assert len(w["exercises"]) == 2
     assert w["exercises"][0]["canonical"] == "seated_cable_row"
@@ -167,6 +173,9 @@ def test_annotate_workout_end_to_end(monkeypatch):
     assert "outer hips" in w["session_notes"].lower()
     assert w["date"] == "2026-04-27"
     assert w["strava_id"] == "12345"  # Existing Strava row preserved.
+    # Second put carries the feedback.
+    assert workouts_puts[1]["coach_feedback"] == "Solid push session."
+    assert "coach_feedback_at" in workouts_puts[1]
 
     # ExercisesTable gets one row per exercise.
     assert len(exercises_puts) == 2
@@ -194,6 +203,7 @@ def test_annotate_creates_shell_when_no_workout_exists(monkeypatch):
         "suggested_journal_tags": [],
     }
     monkeypatch.setattr(ws, "_parse_lift_text", lambda t: parsed)
+    monkeypatch.setattr(ws, "_generate_coach_feedback", lambda _w: None)  # No feedback for minimal test.
 
     workouts_puts = []
     exercises_puts = []
@@ -201,8 +211,14 @@ def test_annotate_creates_shell_when_no_workout_exists(monkeypatch):
     workouts_table = MagicMock()
     exercises_table = MagicMock()
 
-    monkeypatch.setattr(ws, "get_table",
-        lambda n: workouts_table if n == "WORKOUTS_TABLE" else exercises_table)
+    def fake_get_table(env_var):
+        if env_var == "WORKOUTS_TABLE":
+            return workouts_table
+        if env_var == "EXERCISES_TABLE":
+            return exercises_table
+        return MagicMock()
+
+    monkeypatch.setattr(ws, "get_table", fake_get_table)
     monkeypatch.setattr(ws, "put_item",
         lambda t, i: (workouts_puts if t is workouts_table else exercises_puts).append(i))
     monkeypatch.setattr(ws, "query_items", lambda *a, **k: [])  # No existing workout.
@@ -210,6 +226,7 @@ def test_annotate_creates_shell_when_no_workout_exists(monkeypatch):
     result = ws.annotate_workout("bench 5x5 @ 205", date="2026-04-28")
 
     # _find_or_create_workout put a shell, then annotate patched it → 2 puts.
+    # (With feedback stubbed to None, no third put.)
     assert len(workouts_puts) == 2
     assert workouts_puts[0]["strava_id"].startswith("manual_")
     assert workouts_puts[0]["source"] == "manual"

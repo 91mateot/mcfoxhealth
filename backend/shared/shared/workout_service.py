@@ -448,6 +448,196 @@ def _write_exercise_rows(exercises: list, date: str) -> int:
     return count
 
 
+# ── Coach feedback (summary + critique) ──────────────────────────────────
+
+_COACH_SUMMARY_SYSTEM = """You are Mateo's personal fitness coach AI, writing a brief post-workout debrief.
+
+## Who Mateo Is
+- 34, 5'8" 169lb, 13.6% body fat. Recomp goal: sub-12% BF while defending lean mass.
+- Back injury history — avoid loaded squats / heavy deadlifts. Be alert to back_flare signals.
+- Training 4-5x/week push/pull/legs with supersets.
+- On retatrutide (GLP-1 triple agonist) — appetite suppressed.
+
+## Your Task
+Given the structured session data, per-exercise history, and today's readiness
+metrics, produce a short debrief (4-6 sentences, plain prose, no bullets or
+headers). Lead with what the session was, cite the strongest signal (PR, stall,
+volume bump, or notable superset pairing), tie it to readiness if relevant
+(e.g. "solid output given recovery was only 58%"), and end with ONE specific
+forward-looking note (e.g. "next week push the top set to 145 on lat pulldown"
+or "if the hip soreness persists, back off hip abductor volume").
+
+## Voice
+- Direct, coach-reviewing-game-film.
+- Specific numbers, not "good job" / "great session".
+- No preamble, no pleasantries, no disclaimers, no "I noticed".
+- Reference the back-injury risk ONLY if something in the session plausibly triggered it.
+- Do NOT invent data. If you don't have history for an exercise, say "first time logged — baseline set at X."
+
+Return ONLY the debrief text. No JSON, no markdown.
+"""
+
+
+def _recent_history_summary(canonical: str, days: int = 60) -> str:
+    """Pull last N days of an exercise's sessions and return a short line
+    summarizing the trajectory. Used as context in the coach prompt."""
+    table = get_table("EXERCISES_TABLE")
+    rows = query_items(table, "canonical", canonical) or []
+    cutoff = (local_now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    rows = [r for r in rows if r.get("date", "") >= cutoff]
+    rows.sort(key=lambda r: r.get("date", ""))
+    if len(rows) < 2:
+        return f"{canonical}: first-ever session logged" if len(rows) == 1 else f"{canonical}: no history"
+
+    # Build a compact trajectory: "canonical: 2026-04-08 140x10 → 2026-04-15 140x10 → 2026-04-22 145x10"
+    parts = []
+    for r in rows[-5:]:
+        parts.append(f"{r.get('date')} {r.get('top_weight', 0)}x{r.get('top_reps_at_top_weight', 0)}")
+    return f"{canonical} last 5: " + " → ".join(parts)
+
+
+def _readiness_for_date(date: str) -> dict:
+    """Pull recovery/HRV/sleep/strain_target for the date. Returns {} if missing."""
+    scores_table = get_table("DAILY_SCORES_TABLE")
+    s = get_item(scores_table, {"date": date}) or {}
+    sleep = s.get("sleep") or {}
+    return {
+        "recovery": s.get("recovery"),
+        "recovery_zone": s.get("recovery_zone"),
+        "hrv": s.get("hrv"),
+        "rhr": s.get("rhr"),
+        "sleep_min": sleep.get("total_min"),
+        "sleep_efficiency": sleep.get("efficiency"),
+        "strain_target": s.get("strain_target") or {},
+    }
+
+
+def _generate_coach_feedback(workout: dict) -> Optional[str]:
+    """Call Bedrock to produce a coach-voice debrief. Returns the text, or
+    None on failure (caller should treat absence gracefully)."""
+    exercises = workout.get("exercises") or []
+    if not exercises and not workout.get("cardio_intervals"):
+        return None
+
+    # Compact session description.
+    exercise_lines = []
+    for ex in exercises:
+        sets = ex.get("sets") or []
+        working = [s for s in sets if not s.get("warmup")]
+        set_strs = []
+        for s in working:
+            if s.get("duration_sec"):
+                set_strs.append(f"{s.get('weight', 0)}x{s.get('duration_sec')}s")
+            else:
+                set_strs.append(f"{s.get('weight', 0)}x{s.get('reps', 0)}")
+        line = f"- {ex.get('name')} ({ex.get('muscle_group', 'other')}): " + ", ".join(set_strs)
+        if ex.get("superset_with"):
+            line += f" [paired with {ex['superset_with']}]"
+        if ex.get("note"):
+            line += f" — note: {ex['note']}"
+        exercise_lines.append(line)
+
+    cardio_lines = []
+    for c in workout.get("cardio_intervals") or []:
+        params_str = ", ".join(f"{k}={v}" for k, v in (c.get("params") or {}).items())
+        dur_str = f" ({c.get('duration_min')}min)" if c.get("duration_min") else ""
+        cardio_lines.append(f"- {c.get('name')}: {params_str}{dur_str}")
+
+    # Per-exercise history summaries (capped to avoid prompt bloat).
+    history_lines = []
+    for ex in exercises[:8]:
+        canonical = ex.get("canonical")
+        if canonical:
+            history_lines.append(_recent_history_summary(canonical))
+
+    readiness = _readiness_for_date(workout.get("date", ""))
+
+    session_block = f"""## Today's Session ({workout.get('date')}, {workout.get('title', 'Workout')})
+
+Duration: {workout.get('dur', 0)} min
+Strain: {workout.get('strain', 0)}
+Avg HR: {workout.get('avgHR', 0)}
+Source: {workout.get('source', 'strava')}
+
+### Lifts
+{chr(10).join(exercise_lines) if exercise_lines else '(none)'}
+
+### Cardio
+{chr(10).join(cardio_lines) if cardio_lines else '(none)'}
+
+### Session notes
+{workout.get('session_notes') or '(none)'}
+
+## Recent history (top 5 sessions per exercise)
+{chr(10).join(history_lines) if history_lines else '(no prior history)'}
+
+## Today's readiness
+Recovery: {readiness.get('recovery')}% ({readiness.get('recovery_zone') or 'unknown'})
+HRV: {readiness.get('hrv')} ms
+RHR: {readiness.get('rhr')} bpm
+Sleep: {readiness.get('sleep_min', 0)} min ({readiness.get('sleep_efficiency', 0)}% efficiency)
+Strain target today: {readiness.get('strain_target', {}).get('low', '?')}-{readiness.get('strain_target', {}).get('high', '?')} — {readiness.get('strain_target', {}).get('reason', '')}
+"""
+
+    try:
+        resp = bedrock_runtime.invoke_model(
+            modelId=ESTIMATOR_MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 400,
+                "system": _COACH_SUMMARY_SYSTEM,
+                "messages": [{"role": "user", "content": session_block}],
+            }),
+        )
+        payload = json.loads(resp["body"].read())
+        reply = ""
+        for block in payload.get("content", []):
+            if block.get("type") == "text":
+                reply += block["text"]
+        reply = reply.strip()
+        if not reply:
+            return None
+        return reply[:1500]
+    except Exception:
+        logger.exception("coach feedback generation failed")
+        return None
+
+
+def summarize_workout(date: str, workout_id: Optional[str] = None) -> dict:
+    """Generate coach feedback for an already-annotated workout row.
+    Stores result as coach_feedback + coach_feedback_at on the row."""
+    table = get_table("WORKOUTS_TABLE")
+    if workout_id:
+        workout = get_item(table, {"date": date, "strava_id": workout_id})
+    else:
+        rows = query_items(table, "date", date) or []
+        rows.sort(key=lambda r: r.get("logged_at") or r.get("ingested_at") or "", reverse=True)
+        workout = rows[0] if rows else None
+
+    if not workout:
+        return {"ok": False, "reason": "workout not found", "date": date}
+
+    feedback = _generate_coach_feedback(workout)
+    if not feedback:
+        return {"ok": False, "reason": "feedback generation failed", "date": date, "workout_id": workout.get("strava_id")}
+
+    merged = {
+        **workout,
+        "coach_feedback": feedback,
+        "coach_feedback_at": datetime.now(timezone.utc).isoformat(),
+    }
+    put_item(table, merged)
+    return {
+        "ok": True,
+        "date": date,
+        "workout_id": workout.get("strava_id"),
+        "coach_feedback": feedback,
+        "coach_feedback_at": merged["coach_feedback_at"],
+    }
+
+
 # ── Public entry point ────────────────────────────────────────────────────
 
 
@@ -508,6 +698,14 @@ def annotate_workout(text: str, date: Optional[str] = None) -> dict:
     # Mirror to ExercisesTable.
     mirror_count = _write_exercise_rows(exercises, date)
 
+    # Generate coach feedback against the freshly-written row + history.
+    # Reload from the same dict so history reads already include this session.
+    coach_feedback = _generate_coach_feedback(merged)
+    if coach_feedback:
+        merged["coach_feedback"] = coach_feedback
+        merged["coach_feedback_at"] = datetime.now(timezone.utc).isoformat()
+        put_item(workouts_table, merged)
+
     muscle_groups = sorted({e.get("muscle_group") for e in exercises if e.get("muscle_group")})
     return {
         "ok": True,
@@ -519,4 +717,5 @@ def annotate_workout(text: str, date: Optional[str] = None) -> dict:
         "muscle_groups": muscle_groups,
         "session_notes": session_notes,
         "suggested_journal_tags": suggested_tags,
+        "coach_feedback": coach_feedback,
     }

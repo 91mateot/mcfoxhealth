@@ -354,6 +354,10 @@ def _get_workouts():
             row["annotatedAt"] = w["annotated_at"]
         if w.get("original_text"):
             row["originalText"] = w["original_text"]
+        if w.get("coach_feedback"):
+            row["coachFeedback"] = w["coach_feedback"]
+        if w.get("coach_feedback_at"):
+            row["coachFeedbackAt"] = w["coach_feedback_at"]
         result.append(row)
 
     result.sort(key=lambda x: x["date"], reverse=True)

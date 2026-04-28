@@ -252,6 +252,8 @@ export interface Workout {
   annotatedAt?: string;
   originalText?: string;
   source?: "strava" | "manual";
+  coachFeedback?: string;
+  coachFeedbackAt?: string;
 }
 
 export interface WorkoutDetail {
