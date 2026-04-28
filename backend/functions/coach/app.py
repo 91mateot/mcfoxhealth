@@ -26,9 +26,11 @@ from shared.nutrition_service import (
     log_meal as svc_log_meal,
     log_water as svc_log_water,
     log_journal as svc_log_journal,
+    log_workout as svc_log_workout,
     get_recent_meals as svc_get_recent_meals,
     delete_meal as svc_delete_meal,
     delete_water as svc_delete_water,
+    delete_workout as svc_delete_workout,
 )
 
 logger = logging.getLogger("coach")
@@ -158,6 +160,43 @@ TOOLS = [
             "required": ["water_id"],
         },
     },
+    {
+        "name": "log_workout",
+        "description": (
+            "Estimate + log a free-form workout description. Use when Mateo says "
+            "he finished training — e.g. 'just did push day 45 min', 'easy Z2 run', "
+            "'mobility this morning'. Writes a manual workout row; Strava syncs "
+            "still work independently."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Free-form workout description — what he did, how long, how hard.",
+                }
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "delete_workout",
+        "description": (
+            "Delete a previously-logged workout row. Use ONLY to correct a mistake — "
+            "e.g. you logged a duplicate or the wrong type. get_recent_meals returns "
+            "workout rows with kind='workout' and workout_id — use that workout_id."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workout_id": {
+                    "type": "string",
+                    "description": "The workout_id to delete (e.g. 'manual_1777318094580' or a numeric Strava id).",
+                },
+            },
+            "required": ["workout_id"],
+        },
+    },
 ]
 
 
@@ -180,6 +219,10 @@ def _execute_tool(name: str, args: dict) -> dict:
             return svc_delete_meal(args.get("meal_id", ""))
         if name == "delete_water":
             return svc_delete_water(args.get("water_id", ""))
+        if name == "log_workout":
+            return svc_log_workout(args.get("text", ""))
+        if name == "delete_workout":
+            return svc_delete_workout(args.get("workout_id", ""))
         return {"error": f"unknown tool {name}"}
     except Exception as e:
         logger.exception("tool %s failed", name)

@@ -5,6 +5,7 @@ import type {
   WorkoutsResponse,
   NutritionResponse,
   BodyResponse,
+  ProgressResponse,
   Meal,
   MealInput,
   MealEstimate,
@@ -63,6 +64,7 @@ export function useToday(): SWRResponse<TodayResponse> {
   });
 }
 
+/** @deprecated — superseded by useProgress(). Keep one release then remove. */
 export function useTrends(): SWRResponse<TrendsResponse> {
   return useSWR<TrendsResponse>("/api/trends", fetcher);
 }
@@ -71,8 +73,13 @@ export function useWorkouts(): SWRResponse<WorkoutsResponse> {
   return useSWR<WorkoutsResponse>("/api/workouts", fetcher);
 }
 
+/** @deprecated — superseded by useProgress(). Keep one release then remove. */
 export function useBody(): SWRResponse<BodyResponse> {
   return useSWR<BodyResponse>("/api/body", fetcher);
+}
+
+export function useProgress(): SWRResponse<ProgressResponse> {
+  return useSWR<ProgressResponse>("/api/progress", fetcher);
 }
 
 export function useNutrition(date: string): SWRResponse<NutritionResponse> {

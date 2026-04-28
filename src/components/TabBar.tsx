@@ -11,9 +11,15 @@ interface TabBarProps {
   tabs: Tab[];
   active: string;
   onChange: (id: string) => void;
+  onFabClick: () => void;
 }
 
-export function TabBar({ C, tabs, active, onChange }: TabBarProps) {
+export function TabBar({ C, tabs, active, onChange, onFabClick }: TabBarProps) {
+  // Split the 4 tabs around the center FAB: first half left of FAB, second half right.
+  const mid = Math.floor(tabs.length / 2);
+  const leftTabs = tabs.slice(0, mid);
+  const rightTabs = tabs.slice(mid);
+
   return (
     <nav
       aria-label="Main sections"
@@ -30,7 +36,9 @@ export function TabBar({ C, tabs, active, onChange }: TabBarProps) {
     >
       <div
         style={{
+          position: "relative",
           display: "flex",
+          alignItems: "center",
           background: C.s,
           borderRadius: 22,
           padding: 5,
@@ -40,39 +48,73 @@ export function TabBar({ C, tabs, active, onChange }: TabBarProps) {
           margin: "0 auto",
         }}
       >
-        {tabs.map((t) => {
-          const isActive = active === t.id;
-          return (
-            <button
-              key={t.id}
-              onClick={() => onChange(t.id)}
-              aria-current={isActive ? "page" : undefined}
-              style={{
-                flex: 1,
-                background: isActive ? C.s3 : "transparent",
-                border: "none",
-                color: isActive ? C.t : C.t3,
-                padding: "9px 6px",
-                borderRadius: 18,
-                fontFamily: FONT,
-                fontSize: 11,
-                fontWeight: 700,
-                cursor: "pointer",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: 3,
-                transition: "all .2s ease",
-                letterSpacing: ".01em",
-              }}
-            >
-              <TabIcon id={t.id} color={isActive ? t.activeColor ?? C.primary : C.t3} />
-              {t.label}
-            </button>
-          );
-        })}
+        {leftTabs.map((t) => (
+          <TabButton key={t.id} C={C} tab={t} active={active === t.id} onClick={() => onChange(t.id)} />
+        ))}
+
+        {/* Center FAB spacer — the FAB is absolutely positioned so it sits above the bar. */}
+        <div style={{ flex: 1, minWidth: 56 }} aria-hidden="true" />
+
+        {rightTabs.map((t) => (
+          <TabButton key={t.id} C={C} tab={t} active={active === t.id} onClick={() => onChange(t.id)} />
+        ))}
+
+        <button
+          onClick={onFabClick}
+          aria-label="Ask coach"
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: -18,
+            transform: "translateX(-50%)",
+            width: 56,
+            height: 56,
+            borderRadius: 28,
+            border: `1px solid ${C.border}`,
+            background: C.primary,
+            color: "#0a0a0a",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+            boxShadow: "0 10px 24px rgba(0,0,0,.45)",
+            padding: 0,
+          }}
+        >
+          <ChatGlyph color="#0a0a0a" />
+        </button>
       </div>
     </nav>
+  );
+}
+
+function TabButton({ C, tab, active, onClick }: { C: Palette; tab: Tab; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      aria-current={active ? "page" : undefined}
+      style={{
+        flex: 1,
+        background: active ? C.s3 : "transparent",
+        border: "none",
+        color: active ? C.t : C.t3,
+        padding: "9px 6px",
+        borderRadius: 18,
+        fontFamily: FONT,
+        fontSize: 11,
+        fontWeight: 700,
+        cursor: "pointer",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 3,
+        transition: "all .2s ease",
+        letterSpacing: ".01em",
+      }}
+    >
+      <TabIcon id={tab.id} color={active ? tab.activeColor ?? C.primary : C.t3} />
+      {tab.label}
+    </button>
   );
 }
 
@@ -108,25 +150,20 @@ function TabIcon({ id, color }: { id: string; color: string }) {
         <path d="M9 3v4M15 3v4" />
       </svg>
     );
-  if (id === "body")
-    return (
-      <svg viewBox="0 0 24 24" {...p}>
-        <circle cx="12" cy="5" r="2.5" />
-        <path d="M12 7.5V15M9 15l-2 6M15 15l2 6M8 11h8" />
-      </svg>
-    );
-  if (id === "trends")
+  if (id === "progress")
     return (
       <svg viewBox="0 0 24 24" {...p}>
         <path d="M3 17l5-5 4 4 8-9" />
         <path d="M15 7h5v5" />
       </svg>
     );
-  if (id === "coach")
-    return (
-      <svg viewBox="0 0 24 24" {...p}>
-        <path d="M4 6a2 2 0 012-2h12a2 2 0 012 2v9a2 2 0 01-2 2H9l-4 4v-4H6a2 2 0 01-2-2V6z" />
-      </svg>
-    );
   return null;
+}
+
+function ChatGlyph({ color }: { color: string }) {
+  return (
+    <svg viewBox="0 0 24 24" width={24} height={24} fill="none" stroke={color} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 6a2 2 0 012-2h12a2 2 0 012 2v9a2 2 0 01-2 2H9l-4 4v-4H6a2 2 0 01-2-2V6z" />
+    </svg>
+  );
 }

@@ -100,6 +100,8 @@ export interface Meal {
   ingredients?: Ingredient[];
   waterOz?: number;
   caffeineMg?: number;
+  validatedAt?: string;
+  validatedSource?: "usda" | "llm_audit" | "none";
 }
 
 export interface NutritionTargets {
@@ -309,6 +311,11 @@ export interface BodyResponse {
     bodyFat: number;
     leanMass: number;
   };
+}
+
+export interface ProgressResponse {
+  now: BodyResponse;
+  trend: TrendsResponse;
 }
 
 export interface JournalTag {

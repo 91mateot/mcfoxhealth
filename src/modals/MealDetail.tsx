@@ -177,13 +177,20 @@ export function MealDetailModal({ C, open, onClose, meal, date, targets }: MealD
             {meal.name}
           </div>
 
-          {meal.confidence && (
-            <div style={{ marginBottom: 10, display: "flex", gap: 6, alignItems: "center" }}>
-              <Chip C={C} color={confidenceColor(C, meal.confidence)}>
-                {meal.confidence} confidence
-              </Chip>
+          {(meal.confidence || meal.validatedAt) && (
+            <div style={{ marginBottom: 10, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              {meal.confidence && (
+                <Chip C={C} color={confidenceColor(C, meal.confidence)}>
+                  {meal.confidence} confidence
+                </Chip>
+              )}
               {meal.source === "known_foods" && <Chip C={C}>known food</Chip>}
               {meal.source === "llm" && <Chip C={C}>AI estimate</Chip>}
+              {meal.validatedAt && meal.validatedSource !== "none" && (
+                <Chip C={C} color={C.primary}>
+                  Validated ✓{meal.validatedSource === "usda" ? " · USDA" : meal.validatedSource === "llm_audit" ? " · audit" : ""}
+                </Chip>
+              )}
             </div>
           )}
 
@@ -264,9 +271,21 @@ export function MealDetailModal({ C, open, onClose, meal, date, targets }: MealD
               </button>
               {assumptionsOpen && (
                 <ul style={{ margin: "8px 0 0", padding: "0 0 0 18px", fontSize: 12, color: C.t2, lineHeight: 1.55 }}>
-                  {meal.assumptions.map((a, i) => (
-                    <li key={i} style={{ marginBottom: 4 }}>{a}</li>
-                  ))}
+                  {meal.assumptions.map((a, i) => {
+                    const isAudit = a.startsWith("Validated");
+                    return (
+                      <li
+                        key={i}
+                        style={{
+                          marginBottom: 4,
+                          color: isAudit ? C.primary : C.t2,
+                          fontWeight: isAudit ? 700 : 400,
+                        }}
+                      >
+                        {a}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </div>

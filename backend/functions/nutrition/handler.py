@@ -29,6 +29,7 @@ from shared.nutrition_service import (
     log_water as svc_log_water,
     log_journal as svc_log_journal,
     delete_water as svc_delete_water,
+    validate_meal as svc_validate_meal,
     sanitize_ingredients,
 )
 
@@ -53,6 +54,16 @@ def _verify_api_key(event):
 
 
 def lambda_handler(event, context):
+    # Direct Lambda invoke path: payloads with {"action": "..."} skip HTTP
+    # routing. Used by save_meal's fire-and-forget validator kick-off.
+    action = event.get("action") if isinstance(event, dict) else None
+    if action == "validate_meal":
+        try:
+            result = svc_validate_meal(event.get("meal_id", ""), event.get("date"))
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return result
+
     path = event.get("rawPath", "")
     method = event.get("requestContext", {}).get("http", {}).get("method", "POST")
     params = event.get("pathParameters") or {}
@@ -283,6 +294,10 @@ def _serialize_meal(item: dict) -> dict:
         out["waterOz"] = item["water_oz"]
     if item.get("caffeine_mg") is not None:
         out["caffeineMg"] = item["caffeine_mg"]
+    if item.get("validated_at"):
+        out["validatedAt"] = item["validated_at"]
+    if item.get("validated_source"):
+        out["validatedSource"] = item["validated_source"]
     return out
 
 

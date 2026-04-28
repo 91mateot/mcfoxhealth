@@ -328,13 +328,23 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/body
             Method: GET
+        GetProgress:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/progress
+            Method: GET
 
   NutritionFunction:
     Type: AWS::Serverless::Function
     Properties:
+      FunctionName: !Sub '${AWS::StackName}-NutritionFunction'
       CodeUri: functions/nutrition/
       Handler: handler.lambda_handler
       Timeout: 30
+      Environment:
+        Variables:
+          NUTRITION_FUNCTION_NAME: !Sub '${AWS::StackName}-NutritionFunction'
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref NutritionTable
@@ -344,6 +354,8 @@ Resources:
             TableName: !Ref CalibrationTable
         - DynamoDBCrudPolicy:
             TableName: !Ref UserConfigTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkoutsTable
         - Statement:
             - Effect: Allow
               Action:
@@ -355,6 +367,12 @@ Resources:
               Action:
                 - bedrock:InvokeModel
               Resource: '*'
+        - Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource:
+                - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-NutritionFunction'
       Events:
         PostMeal:
           Type: HttpApi
@@ -443,19 +461,20 @@ Resources:
           AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
           PORT: '8080'
           AWS_LWA_INVOKE_MODE: response_stream
+          NUTRITION_FUNCTION_NAME: !Sub '${AWS::StackName}-NutritionFunction'
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref NutritionTable
         - DynamoDBCrudPolicy:
             TableName: !Ref JournalTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkoutsTable
         - DynamoDBReadPolicy:
             TableName: !Ref DailyScoresTable
         - DynamoDBReadPolicy:
             TableName: !Ref HealthMetricsTable
         - DynamoDBReadPolicy:
             TableName: !Ref UserConfigTable
-        - DynamoDBReadPolicy:
-            TableName: !Ref WorkoutsTable
         - DynamoDBReadPolicy:
             TableName: !Ref BaselinesTable
         - DynamoDBReadPolicy:
@@ -466,6 +485,12 @@ Resources:
                 - bedrock:InvokeModelWithResponseStream
                 - bedrock:InvokeModel
               Resource: '*'
+        - Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource:
+                - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-NutritionFunction'
       FunctionUrlConfig:
         AuthType: NONE
         InvokeMode: RESPONSE_STREAM

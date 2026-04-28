@@ -2,10 +2,11 @@
 API Lambda — read endpoints for the PWA frontend.
 
   GET /api/today         — Full today screen payload
-  GET /api/trends        — 30-day trends + sparklines + correlations
+  GET /api/trends        — 30-day trends + sparklines + correlations (deprecated, use /api/progress)
   GET /api/workouts      — Workout history
   GET /api/nutrition/:d  — Day's nutrition log
-  GET /api/body          — Body composition history
+  GET /api/body          — Body composition history (deprecated, use /api/progress)
+  GET /api/progress      — Union of body + trends for the Progress screen
 """
 
 import json
@@ -31,6 +32,8 @@ def lambda_handler(event, context):
         return _get_nutrition(date)
     if path == "/api/body":
         return _get_body()
+    if path == "/api/progress":
+        return _get_progress()
 
     return _resp(404, {"error": "not found"})
 
@@ -102,7 +105,7 @@ def _get_today():
         if mid.startswith("water_"):
             water_total += m.get("oz", 0)
         elif mid.startswith("meal_"):
-            meals_today.append({
+            row = {
                 "id": mid,
                 "time": m.get("time", ""),
                 "name": m.get("name", ""),
@@ -112,7 +115,12 @@ def _get_today():
                 "c": m.get("c", 0),
                 "f": m.get("f", 0),
                 "tag": m.get("tag", ""),
-            })
+            }
+            if m.get("validated_at"):
+                row["validatedAt"] = m["validated_at"]
+            if m.get("validated_source"):
+                row["validatedSource"] = m["validated_source"]
+            meals_today.append(row)
             if m.get("caffeine_mg"):
                 caffeine_total += m.get("caffeine_mg", 0)
     meals_today.sort(key=lambda x: x.get("time") or "")
@@ -210,6 +218,10 @@ def _get_today():
 
 
 def _get_trends():
+    return _resp(200, _progress_trend_body())
+
+
+def _progress_trend_body():
     scores_table = get_table("DAILY_SCORES_TABLE")
     corr_table = get_table("CORRELATIONS_TABLE")
 
@@ -286,11 +298,11 @@ def _get_trends():
         items = query_items(corr_table, "tag", tag)
         correlations.extend(items)
 
-    return _resp(200, {
+    return {
         "trends30d": trends_30d,
         "trendSeries": trend_series,
         "correlations": correlations,
-    })
+    }
 
 
 def _get_workouts():
@@ -315,10 +327,12 @@ def _get_workouts():
                 day_short = short_days[dow]
             except (ValueError, TypeError):
                 pass
+        sid = w.get("strava_id", "")
+        source = w.get("source") or ("manual" if sid.startswith("manual_") else "strava")
         result.append({
             "date": date_str,
             "day": day_short,
-            "strava_id": w.get("strava_id", ""),
+            "strava_id": sid,
             "title": w.get("title", ""),
             "type": w.get("type", ""),
             "dur": w.get("dur", 0),
@@ -331,6 +345,7 @@ def _get_workouts():
             "notes": w.get("notes", ""),
             "exercises": w.get("exercises", []),
             "sets": w.get("sets", 0),
+            "source": source,
         })
 
     result.sort(key=lambda x: x["date"], reverse=True)
@@ -391,6 +406,10 @@ def _get_nutrition(date_str):
             if m.get("caffeine_mg") is not None:
                 meal["caffeineMg"] = m["caffeine_mg"]
                 caffeine_total += m.get("caffeine_mg", 0)
+            if m.get("validated_at"):
+                meal["validatedAt"] = m["validated_at"]
+            if m.get("validated_source"):
+                meal["validatedSource"] = m["validated_source"]
             meals.append(meal)
             totals["cal"] += meal["cal"]
             totals["p"] += meal["p"]
@@ -413,6 +432,10 @@ def _get_nutrition(date_str):
 
 
 def _get_body():
+    return _resp(200, _progress_now_body())
+
+
+def _progress_now_body():
     metrics_table = get_table("HEALTH_METRICS_TABLE")
     today = local_now()
 
@@ -451,11 +474,18 @@ def _get_body():
                 lean_entries.append({"date": d, "value": v})
                 break
 
-    return _resp(200, {
+    return {
         "weight14d": weight_14d,
         "weightHistory": body_fat_history,
         "fatHistory": fat_entries,
         "leanHistory": lean_entries,
+    }
+
+
+def _get_progress():
+    return _resp(200, {
+        "now": _progress_now_body(),
+        "trend": _progress_trend_body(),
     })
 
 

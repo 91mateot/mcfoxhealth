@@ -8,6 +8,7 @@ These functions are HTTP-agnostic. They're called from:
 
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -23,9 +24,30 @@ import boto3
 from shared.db import get_table, put_item, get_item, query_items
 from shared.timezone import local_now, local_today_str
 
+logger = logging.getLogger("nutrition_service")
+
 bedrock_runtime = boto3.client("bedrock-runtime", region_name="us-west-2")
+lambda_client = boto3.client("lambda", region_name="us-west-2")
+secrets_client = boto3.client("secretsmanager", region_name="us-west-2")
 
 ESTIMATOR_MODEL_ID = os.environ.get("ESTIMATOR_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
+NUTRITION_FUNCTION_NAME = os.environ.get("NUTRITION_FUNCTION_NAME", "")
+_SECRETS_CACHE: dict = {"data": None, "ts": 0}
+
+
+def _get_secret_json() -> dict:
+    """Read and cache the `fitness-api-key` Secrets Manager JSON (5 min TTL)."""
+    now = int(time.time())
+    if _SECRETS_CACHE["data"] is None or now - _SECRETS_CACHE["ts"] > 300:
+        try:
+            resp = secrets_client.get_secret_value(SecretId="fitness-api-key")
+            _SECRETS_CACHE["data"] = json.loads(resp.get("SecretString") or "{}")
+            _SECRETS_CACHE["ts"] = now
+        except Exception:
+            logger.exception("secret read failed")
+            _SECRETS_CACHE["data"] = {}
+            _SECRETS_CACHE["ts"] = now
+    return _SECRETS_CACHE["data"] or {}
 
 
 KNOWN_FOODS = {
@@ -499,6 +521,18 @@ def save_meal(payload: dict, date: Optional[str] = None) -> dict:
             "logged_at": datetime.now(timezone.utc).isoformat(),
         })
 
+    # Fire-and-forget second-pass validator. Must never raise — a broken
+    # validator should never block a log.
+    if NUTRITION_FUNCTION_NAME:
+        try:
+            lambda_client.invoke(
+                FunctionName=NUTRITION_FUNCTION_NAME,
+                InvocationType="Event",
+                Payload=json.dumps({"action": "validate_meal", "meal_id": meal_id, "date": date}).encode(),
+            )
+        except Exception:
+            logger.exception("validator invoke failed for meal_id=%s", meal_id)
+
     all_meals = query_items(table, "date", date)
     totals = {"cal": 0, "p": 0, "c": 0, "f": 0}
     for m in all_meals:
@@ -609,10 +643,12 @@ def delete_water(water_id: str, date: Optional[str] = None) -> dict:
 
 
 def get_recent_meals(days: int = 1) -> list:
-    """Return meal AND water rows for the last `days` days (today + days-1 prior),
-    sorted by date desc then time desc. Each row has a `kind` discriminator so
-    the coach knows which delete tool to use (delete_meal vs delete_water)."""
+    """Return meal, water, AND workout rows for the last `days` days (today +
+    days-1 prior), sorted by date desc then time desc. Each row has a `kind`
+    discriminator so the coach knows which delete tool to use (delete_meal vs
+    delete_water vs delete_workout)."""
     table = get_table("NUTRITION_TABLE")
+    workouts_table = get_table("WORKOUTS_TABLE")
     today_dt = local_now()
     out = []
     for i in range(max(1, days)):
@@ -644,5 +680,384 @@ def get_recent_meals(days: int = 1) -> list:
                     "logged_at": m.get("logged_at"),
                     "source_meal_id": m.get("source_meal_id"),
                 })
+        workouts = query_items(workouts_table, "date", d) or []
+        for w in workouts:
+            out.append({
+                "kind": "workout",
+                "date": d,
+                "workout_id": w.get("strava_id", ""),
+                "title": w.get("title"),
+                "type": w.get("type"),
+                "dur": w.get("dur"),
+                "cal": w.get("cal"),
+                "strain": w.get("strain"),
+                "source": w.get("source", "strava"),
+                "logged_at": w.get("logged_at") or w.get("ingested_at"),
+            })
     out.sort(key=lambda m: (m["date"], m.get("time") or m.get("logged_at") or ""), reverse=True)
     return out
+
+
+# ── Workout logging (manual entries via coach chat) ───────────────────────
+
+_WORKOUT_ESTIMATOR_SYSTEM = """You classify free-form workout descriptions into
+structured data. Return ONLY valid JSON, no prose.
+
+User profile:
+- Mateo, 34, 5'8" 169lb. Training 4-5x/week push/pull/legs with supersets.
+- Back injury history — avoid loaded squats and heavy deadlifts.
+
+Schema:
+{
+  "title": "short title (≤40 chars) like 'Push day' or 'Easy Z2 run'",
+  "type": "push" | "pull" | "legs" | "upper" | "lower" | "full_body" | "cardio" | "mobility" | "other",
+  "duration_min": number (minutes),
+  "intensity": "low" | "moderate" | "high" | "max",
+  "cal": number (estimated calories burned based on type/duration/intensity for a 169lb male),
+  "strain_hint": number (Edwards TRIMP-style 0-21, rough guess: mobility<3, easy cardio 4-7, moderate 8-12, hard 13-17, max 18-21),
+  "notes": "≤200 char summary of what was described",
+  "exercises": [{"name": "string", "scheme": "sets x reps or duration"}, ...]  // empty array ok
+}
+
+Rules:
+- Extract duration_min from phrases like "45 min", "half hour", "quick 20 min".
+- If duration isn't stated, estimate from intensity+type (mobility 15, cardio 30, lifting 45-60).
+- type: lifting references ("bench", "pull-ups", "squat pattern") → push/pull/legs/upper/lower/full_body. Running/cycling/rowing → cardio. Yoga/stretching → mobility.
+- intensity: tune from verbs (crushed/went hard = high/max; easy/chill/recovery = low; default = moderate).
+- Cap exercises at 10. Omit if not stated.
+"""
+
+
+def _call_workout_estimator(text: str) -> dict:
+    resp = bedrock_runtime.invoke_model(
+        modelId=ESTIMATOR_MODEL_ID,
+        contentType="application/json",
+        accept="application/json",
+        body=json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 800,
+            "system": _WORKOUT_ESTIMATOR_SYSTEM,
+            "messages": [{"role": "user", "content": f"Workout description:\n{text}"}],
+        }),
+    )
+    payload = json.loads(resp["body"].read())
+    reply = ""
+    for block in payload.get("content", []):
+        if block.get("type") == "text":
+            reply += block["text"]
+    reply = reply.strip()
+    if reply.startswith("```"):
+        reply = re.sub(r"^```(?:json)?\s*|\s*```$", "", reply, flags=re.DOTALL)
+    return json.loads(reply)
+
+
+def log_workout(text: str, date: Optional[str] = None) -> dict:
+    """Estimate + persist a free-form workout description. Writes to
+    WORKOUTS_TABLE with strava_id = 'manual_<ms>' so it coexists with real
+    Strava-sourced rows."""
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("text is required")
+
+    try:
+        est = _call_workout_estimator(text)
+    except Exception as e:
+        logger.exception("workout estimator failed")
+        raise RuntimeError(f"workout estimator failed: {e}")
+
+    def _num(v, default=0):
+        try:
+            return round(float(v), 1)
+        except (TypeError, ValueError):
+            return float(default)
+
+    title = str(est.get("title") or text)[:40]
+    wtype = str(est.get("type") or "other").lower()
+    if wtype not in {"push", "pull", "legs", "upper", "lower", "full_body", "cardio", "mobility", "other"}:
+        wtype = "other"
+    intensity = str(est.get("intensity") or "moderate").lower()
+    if intensity not in {"low", "moderate", "high", "max"}:
+        intensity = "moderate"
+    dur = int(_num(est.get("duration_min"), 30))
+    cal = int(_num(est.get("cal"), 0))
+    strain = _num(est.get("strain_hint"), 0)
+    notes = str(est.get("notes") or text)[:200]
+
+    exercises = []
+    raw_ex = est.get("exercises")
+    if isinstance(raw_ex, list):
+        for ex in raw_ex[:10]:
+            if not isinstance(ex, dict):
+                continue
+            name = str(ex.get("name", "")).strip()
+            if not name:
+                continue
+            exercises.append({
+                "name": name[:60],
+                "scheme": str(ex.get("scheme", ""))[:40],
+            })
+
+    date = date or local_today_str()
+    workout_id = f"manual_{int(time.time() * 1000)}"
+    item = {
+        "date": date,
+        "strava_id": workout_id,
+        "title": title,
+        "type": wtype,
+        "dur": dur,
+        "cal": cal,
+        "strain": strain,
+        "intensity": intensity,
+        "notes": notes,
+        "exercises": exercises,
+        "original_text": text[:2000],
+        "source": "manual",
+        "logged_at": datetime.now(timezone.utc).isoformat(),
+        "ingested_at": datetime.now(timezone.utc).isoformat(),
+    }
+    put_item(get_table("WORKOUTS_TABLE"), item)
+    return {
+        "workout_id": workout_id,
+        "title": title,
+        "type": wtype,
+        "duration_min": dur,
+        "intensity": intensity,
+        "cal": cal,
+        "strain": strain,
+    }
+
+
+def delete_workout(workout_id: str, date: Optional[str] = None) -> dict:
+    """Delete a workout row. Accepts manual_* or numeric strava IDs."""
+    if not workout_id:
+        raise ValueError("invalid workout_id")
+    table = get_table("WORKOUTS_TABLE")
+    date = date or local_today_str()
+
+    existing = get_item(table, {"date": date, "strava_id": workout_id})
+    if not existing:
+        return {"ok": False, "reason": "not found", "workout_id": workout_id}
+    table.delete_item(Key={"date": date, "strava_id": workout_id})
+    return {"ok": True, "workout_id": workout_id}
+
+
+# ── Meal validation (async second-pass) ───────────────────────────────────
+
+_USDA_SEARCH_URL = "https://api.nal.usda.gov/fdc/v1/foods/search"
+_USDA_MIN_SCORE = 500.0
+
+
+def _fetch_usda_nutrients(query: str, api_key: str) -> Optional[dict]:
+    """Query USDA FoodData Central. Returns normalized macros for the top
+    result if the score clears _USDA_MIN_SCORE, else None."""
+    if not query or not api_key:
+        return None
+    try:
+        params = urllib.parse.urlencode({
+            "query": query[:200],
+            "pageSize": "1",
+            "api_key": api_key,
+            "dataType": "Branded,Survey (FNDDS),SR Legacy,Foundation",
+        })
+        url = f"{_USDA_SEARCH_URL}?{params}"
+        req = urllib.request.Request(url, headers={"User-Agent": "mcfoxhealth-validator/1.0"})
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            if resp.status != 200:
+                return None
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        logger.exception("USDA fetch failed for query=%s", query[:50])
+        return None
+
+    foods = data.get("foods") or []
+    if not foods:
+        return None
+    top = foods[0]
+    score = float(top.get("score") or 0)
+    if score < _USDA_MIN_SCORE:
+        return None
+
+    nutrients = {n.get("nutrientName", "").lower(): n.get("value") for n in top.get("foodNutrients", [])}
+
+    def _pick(*keys):
+        for k in keys:
+            for name, val in nutrients.items():
+                if k in name and val is not None:
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        continue
+        return None
+
+    cal = _pick("energy") or 0
+    p = _pick("protein") or 0
+    c = _pick("carbohydrate") or 0
+    f = _pick("total lipid", "fat") or 0
+
+    if cal == 0 and p == 0 and c == 0 and f == 0:
+        return None
+
+    return {
+        "cal": round(cal, 1),
+        "p": round(p, 1),
+        "c": round(c, 1),
+        "f": round(f, 1),
+        "description": str(top.get("description", ""))[:100],
+        "score": score,
+    }
+
+
+_VALIDATOR_SYSTEM_APPEND = """
+
+## Validator mode
+You are auditing a prior estimate for the same meal. Be conservative:
+- Prefer well-known brand/ingredient data over creative guesses.
+- If the original estimate looks reasonable, return numbers close to it.
+- Only deviate meaningfully when you're confident the prior estimate under- or over-counted.
+- The top-level `assumptions` array should explicitly list what you changed vs. the prior estimate (e.g. "reduced protein from 25g to 20g — Oikos vanilla is 20g not 25g")."""
+
+
+_VALIDATOR_DIFF_THRESHOLD_PCT = 0.05  # 5%
+_VALIDATOR_DIFF_THRESHOLD_G = 5.0
+
+
+def _macro_changed(prev: float, new: float) -> bool:
+    try:
+        prev_f = float(prev or 0)
+        new_f = float(new or 0)
+    except (TypeError, ValueError):
+        return False
+    diff = abs(new_f - prev_f)
+    if diff >= _VALIDATOR_DIFF_THRESHOLD_G:
+        return True
+    if prev_f > 0 and diff / prev_f >= _VALIDATOR_DIFF_THRESHOLD_PCT:
+        return True
+    return False
+
+
+def validate_meal(meal_id: str, date: Optional[str] = None) -> dict:
+    """Idempotent second-pass validator. Called via async Lambda invoke from
+    `save_meal`. Tries USDA first for brand/ingredient ground truth, falls
+    back to a Claude audit pass. Silently PATCHes the row when macros differ
+    meaningfully; always sets `validated_at` + `validated_source`."""
+    if not meal_id or not meal_id.startswith("meal_"):
+        return {"ok": False, "reason": "invalid meal_id", "meal_id": meal_id}
+
+    table = get_table("NUTRITION_TABLE")
+    date = date or local_today_str()
+    existing = get_item(table, {"date": date, "meal_id": meal_id})
+    if not existing:
+        return {"ok": False, "reason": "not found", "meal_id": meal_id}
+    if existing.get("validated_at"):
+        return {"ok": True, "reason": "already validated", "meal_id": meal_id}
+
+    prev = {
+        "cal": float(existing.get("cal") or 0),
+        "p": float(existing.get("p") or 0),
+        "c": float(existing.get("c") or 0),
+        "f": float(existing.get("f") or 0),
+    }
+    text = str(existing.get("original_text") or existing.get("name") or "").strip()
+
+    source = None
+    new_macros = None
+    description = None
+
+    # 1) Try USDA if we have an API key AND the description looks brandable.
+    secrets = _get_secret_json()
+    usda_key = secrets.get("usda_api_key") or os.environ.get("USDA_API_KEY", "")
+    if usda_key and text:
+        hit = _fetch_usda_nutrients(text, usda_key)
+        if hit:
+            new_macros = {"cal": hit["cal"], "p": hit["p"], "c": hit["c"], "f": hit["f"]}
+            description = hit.get("description")
+            source = "usda"
+
+    # 2) Fall back to a Claude audit pass.
+    if new_macros is None and text:
+        try:
+            audit_system = _ESTIMATOR_SYSTEM + _VALIDATOR_SYSTEM_APPEND
+            resp = bedrock_runtime.invoke_model(
+                modelId=ESTIMATOR_MODEL_ID,
+                contentType="application/json",
+                accept="application/json",
+                body=json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 1800,
+                    "system": audit_system,
+                    "messages": [{
+                        "role": "user",
+                        "content": (
+                            f"Prior estimate for this meal:\n"
+                            f"- name: {existing.get('name', '')}\n"
+                            f"- cal: {prev['cal']} | protein: {prev['p']}g | carbs: {prev['c']}g | fat: {prev['f']}g\n\n"
+                            f"Original description:\n{text}\n\n"
+                            f"Audit and return your corrected estimate in the same JSON schema."
+                        ),
+                    }],
+                }),
+            )
+            payload = json.loads(resp["body"].read())
+            reply = ""
+            for block in payload.get("content", []):
+                if block.get("type") == "text":
+                    reply += block["text"]
+            reply = reply.strip()
+            if reply.startswith("```"):
+                reply = re.sub(r"^```(?:json)?\s*|\s*```$", "", reply, flags=re.DOTALL)
+            data = json.loads(reply)
+
+            def _n(v):
+                try:
+                    return round(float(v), 1)
+                except (TypeError, ValueError):
+                    return None
+
+            new_macros = {
+                "cal": _n(data.get("cal")),
+                "p": _n(data.get("p")),
+                "c": _n(data.get("c")),
+                "f": _n(data.get("f")),
+            }
+            if any(v is None for v in new_macros.values()):
+                new_macros = None
+            else:
+                source = "llm_audit"
+        except Exception:
+            logger.exception("llm audit failed for meal_id=%s", meal_id)
+            new_macros = None
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    if new_macros is None or source is None:
+        # Couldn't validate — mark checked so we don't loop forever.
+        merged = {**existing, "validated_at": now_iso, "validated_source": "none"}
+        put_item(table, merged)
+        return {"ok": True, "meal_id": meal_id, "changed": False, "source": "none"}
+
+    changed_fields = [k for k in ("cal", "p", "c", "f") if _macro_changed(prev[k], new_macros[k])]
+    merged = {**existing, "validated_at": now_iso, "validated_source": source}
+
+    if changed_fields:
+        for k in ("cal", "p", "c", "f"):
+            merged[k] = new_macros[k]
+        diff_parts = []
+        for k in changed_fields:
+            label = {"cal": "cals", "p": "protein", "c": "carbs", "f": "fat"}[k]
+            diff_parts.append(f"{label} {int(round(prev[k]))}→{int(round(new_macros[k]))}")
+        src_label = "USDA" if source == "usda" else "LLM audit"
+        audit_line = f"Validated against {src_label}: {', '.join(diff_parts)}"
+        if description:
+            audit_line += f" (match: {description})"
+        existing_assumptions = list(existing.get("assumptions") or [])
+        existing_assumptions.append(audit_line[:200])
+        merged["assumptions"] = existing_assumptions[-10:]
+
+    put_item(table, merged)
+    return {
+        "ok": True,
+        "meal_id": meal_id,
+        "changed": bool(changed_fields),
+        "source": source,
+        "changed_fields": changed_fields,
+    }

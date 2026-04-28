@@ -4,9 +4,7 @@ import { TabBar, type Tab } from "./components/TabBar";
 import { TodayScreen } from "./screens/Today";
 import { TrainScreen } from "./screens/Train";
 import { FuelScreen } from "./screens/Fuel";
-import { BodyScreen } from "./screens/Body";
-import { TrendsScreen } from "./screens/Trends";
-import { CoachScreen } from "./screens/Coach";
+import { ProgressScreen } from "./screens/Progress";
 import { RingDetailSheet, type RingKey } from "./modals/RingDetail";
 import { LogMealModal } from "./modals/LogMeal";
 import { LogWorkoutModal } from "./modals/LogWorkout";
@@ -14,9 +12,11 @@ import { ChatModal } from "./modals/Chat";
 import { JournalSheet } from "./modals/Journal";
 import { MealDetailModal } from "./modals/MealDetail";
 import type { Meal } from "./types";
-import { useToday, useTrends, useWorkouts, useBody, useNutrition, logMeal, submitJournal, todayISO } from "./api";
+import { useToday, useWorkouts, useProgress, useNutrition, logMeal, submitJournal, todayISO } from "./api";
 
-type TabId = "today" | "train" | "fuel" | "body" | "trends" | "coach";
+type TabId = "today" | "train" | "fuel" | "progress";
+
+const VALID_TABS: readonly TabId[] = ["today", "train", "fuel", "progress"];
 
 export default function App() {
   const [palette, setPalette] = useState<PaletteKey>(() => {
@@ -24,8 +24,8 @@ export default function App() {
     return saved && saved in PALETTES ? saved : "zine";
   });
   const [tab, setTab] = useState<TabId>(() => {
-    const saved = localStorage.getItem("mateo-tab") as TabId | null;
-    return saved ?? "today";
+    const saved = localStorage.getItem("mateo-tab");
+    return saved && VALID_TABS.includes(saved as TabId) ? (saved as TabId) : "today";
   });
   const [week, setWeek] = useState(0);
   const [sheetRing, setSheetRing] = useState<RingKey | null>(null);
@@ -47,18 +47,15 @@ export default function App() {
   const C = PALETTES[palette];
 
   const today = useToday();
-  const trends = useTrends();
   const workouts = useWorkouts();
-  const body = useBody();
+  const progress = useProgress();
   const nutrition = useNutrition(todayISO());
 
   const tabs: Tab[] = [
     { id: "today", label: "Today" },
     { id: "train", label: "Train" },
     { id: "fuel", label: "Fuel" },
-    { id: "body", label: "Body" },
-    { id: "trends", label: "Trends" },
-    { id: "coach", label: "Coach" },
+    { id: "progress", label: "Progress" },
   ];
 
   const openLogMeal = (prefill?: string) => {
@@ -125,19 +122,17 @@ export default function App() {
         />
       )}
 
-      {today.data && body.data && tab === "body" && <BodyScreen C={C} today={today.data} body={body.data} />}
+      {today.data && progress.data && tab === "progress" && (
+        <ProgressScreen C={C} today={today.data} progress={progress.data} />
+      )}
 
-      {trends.data && tab === "trends" && <TrendsScreen C={C} trends={trends.data} />}
-
-      {today.data && tab === "coach" && <CoachScreen C={C} today={today.data} onOpenChat={openChat} />}
-
-      {(!today.data || isLoadingTab(tab, { today, trends, workouts, body, nutrition })) && (
+      {(!today.data || isLoadingTab(tab, { today, progress, workouts, nutrition })) && (
         <LoadingSkeleton C={C} />
       )}
 
       <PaletteSwitcher C={C} palette={palette} setPalette={setPalette} />
 
-      <TabBar C={C} tabs={tabs} active={tab} onChange={(id) => setTab(id as TabId)} />
+      <TabBar C={C} tabs={tabs} active={tab} onChange={(id) => setTab(id as TabId)} onFabClick={() => openChat()} />
 
       <RingDetailSheet C={C} open={sheetRing !== null} which={sheetRing} onClose={() => setSheetRing(null)} today={today.data ?? null} />
       <LogMealModal
@@ -183,13 +178,12 @@ export default function App() {
 
 function isLoadingTab(
   tab: TabId,
-  data: { today: { data?: unknown }; trends: { data?: unknown }; workouts: { data?: unknown }; body: { data?: unknown }; nutrition: { data?: unknown } }
+  data: { today: { data?: unknown }; progress: { data?: unknown }; workouts: { data?: unknown }; nutrition: { data?: unknown } }
 ): boolean {
-  if (tab === "today" || tab === "coach") return !data.today.data;
+  if (tab === "today") return !data.today.data;
   if (tab === "train") return !data.today.data || !data.workouts.data;
   if (tab === "fuel") return !data.today.data || !data.nutrition.data;
-  if (tab === "body") return !data.today.data || !data.body.data;
-  if (tab === "trends") return !data.trends.data;
+  if (tab === "progress") return !data.today.data || !data.progress.data;
   return false;
 }
 
