@@ -95,14 +95,16 @@ export interface Meal {
   originalText?: string;
   assumptions?: string[];
   confidence?: EstimateConfidence;
-  source?: "known_foods" | "llm";
+  source?: MealSource;
   sourceUrl?: string;
   ingredients?: Ingredient[];
   waterOz?: number;
   caffeineMg?: number;
   validatedAt?: string;
-  validatedSource?: "usda" | "llm_audit" | "none";
+  validatedSource?: "usda" | "llm_audit" | "openfoodfacts" | "none";
 }
+
+export type MealSource = "known_foods" | "llm" | "barcode";
 
 export interface NutritionTargets {
   cal: number;
@@ -436,7 +438,7 @@ export interface MealInput {
   original_text?: string;
   assumptions?: string[];
   confidence?: EstimateConfidence;
-  source?: "known_foods" | "llm";
+  source?: MealSource;
   sourceUrl?: string;
   ingredients?: Ingredient[];
   water_oz?: number;
@@ -482,7 +484,7 @@ export interface MealEstimate {
   tag: string;
   confidence: EstimateConfidence;
   assumptions: string[];
-  source?: "known_foods" | "llm";
+  source?: MealSource;
   sourceUrl?: string;
   ingredients?: Ingredient[];
   time?: string;

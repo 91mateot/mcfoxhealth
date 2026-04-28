@@ -56,6 +56,15 @@ export function FuelScreen({ C, today, nutrition, onLogMeal, onOpenMeal }: FuelS
         </div>
       </Panel>
 
+      {/* Quick entry — keep this near the top so logging a meal is a one-tap
+          action on Fuel open. A second full-width button lives further down
+          for people who've already scrolled past the hydration/timeline. */}
+      <div style={{ marginTop: 4, marginBottom: 10 }}>
+        <Btn C={C} primary full onClick={() => onLogMeal()}>
+          + Log meal
+        </Btn>
+      </div>
+
       {/* Projection */}
       {planned && (
         <Panel C={C} style={{ background: C.primaryDim, borderColor: C.primary + "40" }}>

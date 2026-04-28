@@ -5,7 +5,8 @@ import { Sheet } from "../components/Sheet";
 import { Btn } from "../components/Btn";
 import { Chip } from "../components/Chip";
 import { VoiceInput } from "../components/VoiceInput";
-import { estimateMeal, useFavorites } from "../api";
+import { BarcodeScanner } from "../components/BarcodeScanner";
+import { estimateMeal, lookupBarcode, useFavorites } from "../api";
 
 interface LogMealModalProps {
   C: Palette;
@@ -45,6 +46,9 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
   const [estimate, setEstimate] = useState<MealEstimate | null>(null);
   const [edited, setEdited] = useState<{ name: string; cal: number; p: number; c: number; f: number; tag: string; time: string } | null>(null);
   const [assumptionsOpen, setAssumptionsOpen] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanLookupBusy, setScanLookupBusy] = useState(false);
+  const [scanMissMsg, setScanMissMsg] = useState<string | null>(null);
   const favoritesResp = useFavorites();
   const favorites = favoritesResp.data?.favorites ?? [];
 
@@ -56,6 +60,9 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
       setEstimate(null);
       setEdited(null);
       setAssumptionsOpen(false);
+      setScannerOpen(false);
+      setScanLookupBusy(false);
+      setScanMissMsg(null);
       setCustom(prefill ?? "");
     } else {
       setCustom("");
@@ -92,6 +99,41 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
     }
   };
 
+  const handleScanDetected = async (code: string) => {
+    setScannerOpen(false);
+    setScanLookupBusy(true);
+    setScanMissMsg(null);
+    setError(null);
+    try {
+      const est = await lookupBarcode(code);
+      if (!est) {
+        setScanMissMsg(
+          `Barcode ${code} wasn't in OpenFoodFacts. Describe it below and I'll estimate.`,
+        );
+        // Seed the Describe textarea with a helpful placeholder if empty.
+        if (!custom.trim()) {
+          setCustom(`Scanned ${code} — `);
+        }
+        return;
+      }
+      setEstimate(est);
+      setEdited({
+        name: est.name,
+        cal: est.cal,
+        p: est.p,
+        c: est.c,
+        f: est.f,
+        tag: est.tag,
+        time: est.time ?? clientTime(),
+      });
+      setStep("review");
+    } catch (e) {
+      setScanMissMsg(e instanceof Error ? e.message : "Lookup failed.");
+    } finally {
+      setScanLookupBusy(false);
+    }
+  };
+
   const handleSave = () => {
     if (!edited) return;
     const payload: MealInput = { ...edited };
@@ -124,6 +166,56 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
     <Sheet C={C} open={open} onClose={onClose} title="Log a meal" height="82%">
       {step === "describe" && (
         <>
+          <button
+            onClick={() => {
+              setScanMissMsg(null);
+              setScannerOpen(true);
+            }}
+            disabled={scanLookupBusy}
+            style={{
+              width: "100%",
+              background: C.primaryDim,
+              border: `1px solid ${C.primary}55`,
+              borderRadius: 14,
+              padding: 14,
+              marginTop: 6,
+              marginBottom: 10,
+              textAlign: "left",
+              cursor: scanLookupBusy ? "default" : "pointer",
+              fontFamily: FONT,
+              color: C.t,
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+            }}
+          >
+            <div
+              style={{
+                width: 38,
+                height: 38,
+                borderRadius: 10,
+                background: C.primary,
+                color: "#0a0a0a",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 6v12M6 6v12M9 6v12M12 6v12M15 6v12M18 6v12M21 6v12" />
+              </svg>
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>
+                {scanLookupBusy ? "Looking up…" : "Scan barcode"}
+              </div>
+              <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO, marginTop: 2 }}>
+                exact per-serving macros from the label
+              </div>
+            </div>
+          </button>
+
           {favorites.length > 0 && (
             <>
               <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginTop: 6, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
@@ -223,6 +315,23 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
               </div>
             </button>
           ))}
+          {scanMissMsg && (
+            <div
+              style={{
+                background: C.s,
+                border: `1px solid ${C.warn}40`,
+                borderRadius: 12,
+                padding: "10px 12px",
+                marginTop: 14,
+                marginBottom: 4,
+                fontSize: 11.5,
+                color: C.t2,
+                lineHeight: 1.5,
+              }}
+            >
+              {scanMissMsg}
+            </div>
+          )}
           <div
             style={{
               fontSize: 11,
@@ -230,7 +339,7 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
               textTransform: "uppercase",
               letterSpacing: ".1em",
               fontWeight: 700,
-              marginTop: 14,
+              marginTop: scanMissMsg ? 10 : 14,
               marginBottom: 8,
               display: "flex",
               justifyContent: "space-between",
@@ -268,11 +377,14 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
 
       {step === "review" && estimate && edited && (
         <>
-          <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginTop: 6, marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>Nutrition coach estimate</span>
-            <Chip C={C} color={confidenceColor(C, estimate.confidence)}>
-              {estimate.confidence}
-            </Chip>
+          <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginTop: 6, marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <span>{estimate.source === "barcode" ? "Scanned product" : "Nutrition coach estimate"}</span>
+            <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {estimate.source === "barcode" && <Chip C={C} color={C.primary}>Scanned ✓</Chip>}
+              <Chip C={C} color={confidenceColor(C, estimate.confidence)}>
+                {estimate.confidence}
+              </Chip>
+            </span>
           </div>
 
           <div style={{ background: C.s, border: `1px solid ${C.border}`, borderRadius: 14, padding: 12, marginBottom: 10 }}>
@@ -370,6 +482,13 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
           </div>
         </>
       )}
+
+      <BarcodeScanner
+        C={C}
+        open={scannerOpen}
+        onClose={() => setScannerOpen(false)}
+        onDetected={handleScanDetected}
+      />
     </Sheet>
   );
 }

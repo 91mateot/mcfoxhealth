@@ -94,6 +94,99 @@ export function todayISO(): string {
   return `${y}-${m}-${d}`;
 }
 
+/** Local tag inference mirroring backend/shared/shared/nutrition_service.py:guess_tag.
+ * Used by the barcode path, which doesn't call the LLM estimator (which is where
+ * the backend normally picks a tag). */
+export function guessTag(hour: number): string {
+  if (hour < 10) return "breakfast";
+  if (hour < 14) return "lunch";
+  if (hour < 17) return "snack";
+  if (hour < 21) return "dinner";
+  return "snack";
+}
+
+/** Look up a UPC/EAN against OpenFoodFacts. Returns a MealEstimate ready for
+ * the LogMeal review step, or null if the product isn't in OFF or lacks
+ * nutrition data. Free, no auth. 5 second timeout. */
+export async function lookupBarcode(barcode: string): Promise<MealEstimate | null> {
+  const clean = (barcode || "").trim().replace(/\D/g, "");
+  if (!clean) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  let payload: any = null;
+  try {
+    const res = await fetch(
+      `https://world.openfoodfacts.org/api/v0/product/${encodeURIComponent(clean)}.json`,
+      { signal: controller.signal },
+    );
+    if (!res.ok) return null;
+    payload = await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!payload || payload.status !== 1 || !payload.product) return null;
+  const p = payload.product;
+
+  const name = String(
+    p.product_name ||
+      [p.brands, p.generic_name].filter(Boolean).join(" — ") ||
+      "Scanned product",
+  ).slice(0, 80);
+
+  // Prefer per-serving. Fall back to per-100g × (serving_quantity / 100) when
+  // per-serving fields are absent but we know the serving size.
+  const servingQty =
+    typeof p.serving_quantity === "number"
+      ? p.serving_quantity
+      : Number(p.serving_quantity) || null;
+
+  function pick(perServingKey: string, per100gKey: string): number | null {
+    const perServing = Number(p.nutriments?.[perServingKey]);
+    if (Number.isFinite(perServing) && perServing > 0) return perServing;
+    const per100 = Number(p.nutriments?.[per100gKey]);
+    if (Number.isFinite(per100) && per100 > 0 && servingQty && servingQty > 0) {
+      return round1((per100 * servingQty) / 100);
+    }
+    return null;
+  }
+
+  const cal = pick("energy-kcal_serving", "energy-kcal_100g");
+  const protein = pick("proteins_serving", "proteins_100g");
+  const carbs = pick("carbohydrates_serving", "carbohydrates_100g");
+  const fat = pick("fat_serving", "fat_100g");
+
+  // Must have calories AND at least one macro to be useful.
+  if (cal === null || (protein === null && carbs === null && fat === null)) {
+    return null;
+  }
+
+  const tag = guessTag(new Date().getHours());
+  const servingSize = p.serving_size || (servingQty ? `${servingQty}g` : "1 serving");
+
+  return {
+    name,
+    cal: round1(cal),
+    p: round1(protein ?? 0),
+    c: round1(carbs ?? 0),
+    f: round1(fat ?? 0),
+    tag,
+    confidence: "high",
+    source: "barcode",
+    assumptions: [
+      `Scanned UPC ${clean} → ${name}`,
+      `Per-serving (${servingSize}) from OpenFoodFacts`,
+    ],
+  };
+}
+
+function round1(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
 export function formatMealTime(t: string): string {
   const match = /^(\d{1,2}):(\d{2})$/.exec(t);
   if (!match) return t;

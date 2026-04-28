@@ -510,6 +510,15 @@ def save_meal(payload: dict, date: Optional[str] = None) -> dict:
         except (TypeError, ValueError):
             pass
 
+    # Barcode-sourced meals come from OpenFoodFacts per-serving data — already
+    # canonical. Stamp as validated at save time and skip the async validator
+    # (which would waste a Bedrock/USDA call and could even regress the
+    # accurate OFF numbers via the known USDA per-100g scaling bug).
+    is_barcode_source = body.get("source") == "barcode"
+    if is_barcode_source:
+        item["validated_at"] = datetime.now(timezone.utc).isoformat()
+        item["validated_source"] = "openfoodfacts"
+
     put_item(table, item)
 
     if water_oz is not None:
@@ -522,8 +531,9 @@ def save_meal(payload: dict, date: Optional[str] = None) -> dict:
         })
 
     # Fire-and-forget second-pass validator. Must never raise — a broken
-    # validator should never block a log.
-    if NUTRITION_FUNCTION_NAME:
+    # validator should never block a log. Skipped for barcode-sourced meals
+    # since they're already canonical (see above).
+    if NUTRITION_FUNCTION_NAME and not is_barcode_source:
         try:
             lambda_client.invoke(
                 FunctionName=NUTRITION_FUNCTION_NAME,
