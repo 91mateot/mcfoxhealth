@@ -105,8 +105,13 @@ export async function logMeal(meal: MealInput) {
   return result;
 }
 
-export async function estimateMeal(text: string): Promise<MealEstimate> {
-  return post<MealEstimate>("/api/meal/estimate", { text });
+export async function estimateMeal(
+  text: string,
+  opts?: { skipKnownFoods?: boolean },
+): Promise<MealEstimate> {
+  const body: Record<string, unknown> = { text };
+  if (opts?.skipKnownFoods) body.skip_known_foods = true;
+  return post<MealEstimate>("/api/meal/estimate", body);
 }
 
 function invalidateMealCaches() {

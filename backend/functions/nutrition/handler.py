@@ -178,7 +178,11 @@ def _post_meal_estimate(event):
         return _resp(400, {"error": "text is required"})
 
     try:
-        estimate = estimate_meal(text, body.get("known_hint", ""))
+        estimate = estimate_meal(
+            text,
+            body.get("known_hint", ""),
+            skip_known_foods=bool(body.get("skip_known_foods")),
+        )
     except Exception as e:
         return _resp(502, {"error": f"estimator error: {str(e)}"})
     return _resp(200, estimate)

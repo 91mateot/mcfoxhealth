@@ -29,7 +29,7 @@ export function MealDetailModal({ C, open, onClose, meal, date, targets }: MealD
   const [mode, setMode] = useState<Mode>("view");
   const [edited, setEdited] = useState<{ name: string; cal: number; p: number; c: number; f: number; tag: string } | null>(null);
   const [reestimateText, setReestimateText] = useState("");
-  const [busy, setBusy] = useState<"save" | "delete" | "reestimate" | "favorite" | null>(null);
+  const [busy, setBusy] = useState<"save" | "delete" | "reestimate" | "favorite" | "rematch" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [assumptionsOpen, setAssumptionsOpen] = useState(false);
   const [savedFavorite, setSavedFavorite] = useState(false);
@@ -110,6 +110,38 @@ export function MealDetailModal({ C, open, onClose, meal, date, targets }: MealD
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Re-estimate failed.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRematch = async () => {
+    // Force a fresh LLM estimate, bypassing the KNOWN_FOODS shortcut. Uses
+    // the original text if we have it; falls back to the meal name.
+    const text = (meal.originalText || meal.name || "").trim();
+    if (!text) {
+      setError("No description to re-estimate from.");
+      return;
+    }
+    setBusy("rematch");
+    setError(null);
+    try {
+      const est = await estimateMeal(text, { skipKnownFoods: true });
+      await patchMeal(date, mealId, {
+        name: est.name,
+        cal: est.cal,
+        p: est.p,
+        c: est.c,
+        f: est.f,
+        tag: est.tag,
+        original_text: text,
+        assumptions: est.assumptions,
+        confidence: est.confidence,
+        source_url: est.sourceUrl,
+      });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Re-match failed.");
     } finally {
       setBusy(null);
     }
@@ -260,6 +292,11 @@ export function MealDetailModal({ C, open, onClose, meal, date, targets }: MealD
               {busy === "delete" ? "Deleting…" : "Delete meal"}
             </Btn>
           </div>
+          {meal.source === "known_foods" && (
+            <Btn C={C} full onClick={handleRematch} disabled={busy === "rematch"}>
+              {busy === "rematch" ? "Re-estimating…" : "Not the right match — re-estimate from scratch"}
+            </Btn>
+          )}
           <Btn C={C} full onClick={onClose}>Close</Btn>
         </>
       )}

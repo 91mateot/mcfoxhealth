@@ -326,31 +326,48 @@ Known foods reference (use these exact numbers if the description matches):
     return out
 
 
-def estimate_meal(text: str, known_hint: str = "") -> dict:
+_KNOWN_FAST_PATH_MAX_LEN = 30
+
+
+def _known_foods_match(text: str) -> str:
+    """Return a KNOWN_FOODS key if the text is short enough AND the key appears
+    as the leading phrase (or the entire text is the key). Long recipe-style
+    descriptions — e.g. 'morning shake with oikos pro yogurt, whey…' —
+    bypass the fast path so the LLM estimates the real recipe."""
+    lower = text.lower().strip()
+    if not lower or len(lower) > _KNOWN_FAST_PATH_MAX_LEN:
+        return ""
+    for k in KNOWN_FOODS:
+        # Whole text equals key, or text starts with "<key>" as a leading token.
+        if lower == k or lower.startswith(k + " ") or lower.startswith(k + ","):
+            return k
+    return ""
+
+
+def estimate_meal(text: str, known_hint: str = "", skip_known_foods: bool = False) -> dict:
     """Estimate macros for free-form text. Returns estimate dict (not saved).
 
-    Fast path: known-foods dict. Slow path: Bedrock.
+    Fast path: KNOWN_FOODS dict (only for short, unambiguous inputs).
+    Slow path: Bedrock estimator. Set skip_known_foods=True to force the LLM
+    path — used by the 'not the right match' button in MealDetail.
     """
     text = (text or "").strip()
     if not text:
         raise ValueError("text is required")
 
-    known_key = (known_hint or "").lower().strip()
-    if not known_key:
-        lower = text.lower()
-        for k in KNOWN_FOODS:
-            if k in lower:
-                known_key = k
-                break
-    if known_key and known_key in KNOWN_FOODS:
-        food = KNOWN_FOODS[known_key]
-        return {
-            **food,
-            "tag": guess_tag(local_now().hour),
-            "confidence": "high",
-            "assumptions": [f"Matched known food: {food['name']}"],
-            "source": "known_foods",
-        }
+    if not skip_known_foods:
+        known_key = (known_hint or "").lower().strip()
+        if not known_key:
+            known_key = _known_foods_match(text)
+        if known_key and known_key in KNOWN_FOODS:
+            food = KNOWN_FOODS[known_key]
+            return {
+                **food,
+                "tag": guess_tag(local_now().hour),
+                "confidence": "high",
+                "assumptions": [f"Matched known food: {food['name']}"],
+                "source": "known_foods",
+            }
 
     url_text = ""
     source_url = None
