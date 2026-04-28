@@ -329,7 +329,7 @@ def _get_workouts():
                 pass
         sid = w.get("strava_id", "")
         source = w.get("source") or ("manual" if sid.startswith("manual_") else "strava")
-        result.append({
+        row = {
             "date": date_str,
             "day": day_short,
             "strava_id": sid,
@@ -344,9 +344,17 @@ def _get_workouts():
             "zones": w.get("zones", {}),
             "notes": w.get("notes", ""),
             "exercises": w.get("exercises", []),
+            "cardioIntervals": w.get("cardio_intervals", []),
             "sets": w.get("sets", 0),
             "source": source,
-        })
+        }
+        if w.get("session_notes"):
+            row["sessionNotes"] = w["session_notes"]
+        if w.get("annotated_at"):
+            row["annotatedAt"] = w["annotated_at"]
+        if w.get("original_text"):
+            row["originalText"] = w["original_text"]
+        result.append(row)
 
     result.sort(key=lambda x: x["date"], reverse=True)
     return _resp(200, {"workouts": result})
@@ -486,7 +494,96 @@ def _get_progress():
     return _resp(200, {
         "now": _progress_now_body(),
         "trend": _progress_trend_body(),
+        "lifts": _progress_lifts_body(),
     })
+
+
+def _progress_lifts_body():
+    """Recent PRs, active stalls, weekly volume per muscle group.
+    Compute job (daily) populates these."""
+    exercises_table = get_table("EXERCISES_TABLE")
+    scores_table = get_table("DAILY_SCORES_TABLE")
+    config_table = get_table("USER_CONFIG_TABLE")
+
+    today = local_now()
+    cutoff = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+
+    # Recent PRs.
+    recent_prs = []
+    try:
+        resp = exercises_table.scan(Limit=500)
+        rows = resp.get("Items", [])
+    except Exception:
+        rows = []
+
+    recent = [r for r in rows if r.get("date", "") >= cutoff]
+    recent.sort(key=lambda r: r.get("date", ""), reverse=True)
+    for r in recent:
+        pr = r.get("pr") or {}
+        kinds = []
+        if pr.get("weight"):
+            kinds.append("weight")
+        if pr.get("e1rm"):
+            kinds.append("e1rm")
+        if pr.get("volume"):
+            kinds.append("volume")
+        if not kinds:
+            continue
+        recent_prs.append({
+            "date": r.get("date"),
+            "canonical": r.get("canonical"),
+            "name": r.get("name", r.get("canonical", "?")),
+            "muscleGroup": r.get("muscle_group", "other"),
+            "topWeight": float(r.get("top_weight") or 0),
+            "topReps": int(r.get("top_reps_at_top_weight") or 0),
+            "e1rm": float(r.get("e1rm") or 0),
+            "prKinds": kinds,
+        })
+        if len(recent_prs) >= 10:
+            break
+
+    # Stalls.
+    stalls_row = get_item(config_table, {"key": "lift_stalls"}) or {}
+    stalls = []
+    for s in (stalls_row.get("stalls") or [])[:10]:
+        stalls.append({
+            "canonical": s.get("canonical"),
+            "name": s.get("name", s.get("canonical", "?")),
+            "muscleGroup": s.get("muscle_group", "other"),
+            "weight": float(s.get("weight") or 0),
+            "reps": int(s.get("reps") or 0),
+            "sessions": int(s.get("sessions") or 0),
+            "sinceDate": s.get("since_date"),
+        })
+
+    # Weekly volume (current week).
+    week_start = today - timedelta(days=today.weekday())
+    week_row = get_item(scores_table, {"date": f"week_{week_start.strftime('%Y-%m-%d')}"}) or {}
+    volume_by_mg = week_row.get("volume_by_muscle_group") or {}
+    sessions_by_mg = week_row.get("sessions_by_muscle_group") or {}
+
+    # Previous week for comparison.
+    prev_week_start = week_start - timedelta(days=7)
+    prev_week_row = get_item(scores_table, {"date": f"week_{prev_week_start.strftime('%Y-%m-%d')}"}) or {}
+    prev_volume = prev_week_row.get("volume_by_muscle_group") or {}
+
+    weekly_volume = []
+    for mg, vol in sorted(volume_by_mg.items(), key=lambda kv: float(kv[1]), reverse=True):
+        prev = float(prev_volume.get(mg, 0) or 0)
+        cur = float(vol)
+        weekly_volume.append({
+            "muscleGroup": mg,
+            "volumeLb": round(cur, 0),
+            "prevVolumeLb": round(prev, 0),
+            "sessions": int(sessions_by_mg.get(mg, 0) or 0),
+        })
+
+    return {
+        "recentPRs": recent_prs,
+        "stalls": stalls,
+        "weeklyVolume": weekly_volume,
+        "weekStart": week_start.strftime("%Y-%m-%d"),
+    }
 
 
 def _build_coach_insights(scores, baselines, targets, water_total):

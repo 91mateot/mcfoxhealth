@@ -32,6 +32,7 @@ from shared.nutrition_service import (
     delete_water as svc_delete_water,
     delete_workout as svc_delete_workout,
 )
+from shared.workout_service import annotate_workout as svc_annotate_workout
 
 logger = logging.getLogger("coach")
 logger.setLevel(logging.INFO)
@@ -197,6 +198,32 @@ TOOLS = [
             "required": ["workout_id"],
         },
     },
+    {
+        "name": "annotate_workout",
+        "description": (
+            "Attach detailed lift/cardio data (exercises, sets, reps, weight, supersets, session notes) "
+            "to an EXISTING workout row for a given date. Use this when Mateo describes the lifts he "
+            "did — e.g. 'bench 4x5 @ 205, OHP 3x8 @ 115, incline DB 3x10' or any free-form session "
+            "notes. The parser handles progressive sets, ramps, supersets, and cardio circuits. "
+            "If no workout exists for the date, one is created. Prefer this over log_workout when "
+            "there's structured lift detail to capture; log_workout is for quick 'I did a 30 min run' "
+            "cases with no lift breakdown."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Free-form lift/cardio notes exactly as Mateo wrote them.",
+                },
+                "date": {
+                    "type": "string",
+                    "description": "Date YYYY-MM-DD. Defaults to today. Set if Mateo says 'yesterday's workout' or gives a specific date.",
+                },
+            },
+            "required": ["text"],
+        },
+    },
 ]
 
 
@@ -223,6 +250,8 @@ def _execute_tool(name: str, args: dict) -> dict:
             return svc_log_workout(args.get("text", ""))
         if name == "delete_workout":
             return svc_delete_workout(args.get("workout_id", ""))
+        if name == "annotate_workout":
+            return svc_annotate_workout(args.get("text", ""), args.get("date"))
         return {"error": f"unknown tool {name}"}
     except Exception as e:
         logger.exception("tool %s failed", name)

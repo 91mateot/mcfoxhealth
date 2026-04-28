@@ -174,6 +174,21 @@ export async function submitJournal(journal: Partial<JournalToday> & { tags: str
   return result;
 }
 
+export async function annotateWorkout(date: string, workoutId: string, text: string) {
+  const result = await post<{
+    ok: boolean;
+    workout_id: string;
+    date: string;
+    exercise_count: number;
+    cardio_count: number;
+    muscle_groups: string[];
+    session_notes?: string;
+  }>(`/api/workout/${date}/${workoutId}/annotate`, { text });
+  mutate("/api/workouts");
+  mutate("/api/progress");
+  return result;
+}
+
 export async function askCoachStream(
   messages: ChatMessage[],
   snapshot: TodayResponse | undefined,

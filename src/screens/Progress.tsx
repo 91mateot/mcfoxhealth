@@ -4,6 +4,7 @@ import {
   MATEO,
   type BodyResponse,
   type Correlation,
+  type LiftsSection,
   type ProgressResponse,
   type TodayResponse,
   type TrendMetric,
@@ -27,6 +28,7 @@ export function ProgressScreen({ C, today, progress }: ProgressScreenProps) {
     <div>
       <NowSection C={C} today={today} body={progress.now} />
       <TrendSection C={C} trends={progress.trend} />
+      {progress.lifts && <LiftsSectionView C={C} lifts={progress.lifts} />}
     </div>
   );
 }
@@ -498,4 +500,139 @@ function minToHm(min: number) {
   const h = Math.floor(min / 60);
   const m = Math.round(min % 60);
   return h + "h " + (m < 10 ? "0" : "") + m + "m";
+}
+
+function LiftsSectionView({ C, lifts }: { C: Palette; lifts: LiftsSection }) {
+  const { recentPRs, stalls, weeklyVolume } = lifts;
+  const hasAnything = recentPRs.length > 0 || stalls.length > 0 || weeklyVolume.length > 0;
+
+  return (
+    <>
+      <SectionHead C={C} kicker="Strength" title="Lifts" />
+
+      {!hasAnything && (
+        <Panel C={C}>
+          <div style={{ fontSize: 12, color: C.t3, textAlign: "center", padding: "12px 0", lineHeight: 1.55 }}>
+            Paste your lift notes into the chat (FAB) to start tracking PRs, stalls, and weekly volume.
+          </div>
+        </Panel>
+      )}
+
+      {weeklyVolume.length > 0 && (
+        <Panel C={C}>
+          <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 8 }}>
+            Weekly volume by muscle group
+          </div>
+          {(() => {
+            const maxVol = Math.max(...weeklyVolume.map((v) => v.volumeLb), 1);
+            return weeklyVolume.map((v, i) => {
+              const pct = (v.volumeLb / maxVol) * 100;
+              const delta = v.prevVolumeLb > 0
+                ? Math.round(((v.volumeLb - v.prevVolumeLb) / v.prevVolumeLb) * 100)
+                : null;
+              return (
+                <div key={v.muscleGroup} style={{ marginBottom: i === weeklyVolume.length - 1 ? 0 : 10 }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 3 }}>
+                    <div style={{ fontSize: 12.5, color: C.t, fontWeight: 700, textTransform: "capitalize", flex: 1 }}>
+                      {v.muscleGroup}
+                    </div>
+                    <div style={{ fontSize: 12, fontFamily: MONO, color: C.t, fontWeight: 700 }}>
+                      {v.volumeLb.toLocaleString()} lb
+                    </div>
+                    {delta !== null && (
+                      <div style={{ fontSize: 10, fontFamily: MONO, color: delta >= 0 ? C.primary : C.warn, fontWeight: 700 }}>
+                        {delta >= 0 ? "+" : ""}{delta}%
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ height: 8, background: C.s2, borderRadius: 4, overflow: "hidden" }}>
+                    <div style={{ width: `${pct}%`, height: "100%", background: C.primary }} />
+                  </div>
+                  <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 2 }}>
+                    {v.sessions} session{v.sessions === 1 ? "" : "s"} this week
+                  </div>
+                </div>
+              );
+            });
+          })()}
+        </Panel>
+      )}
+
+      {recentPRs.length > 0 && (
+        <>
+          <SectionHead C={C} kicker="Recent" title="PRs (last 30 days)" right={<Chip C={C} color={C.primary}>{recentPRs.length}</Chip>} />
+          <Panel C={C} style={{ padding: 4 }}>
+            {recentPRs.slice(0, 8).map((pr, i) => (
+              <div
+                key={`${pr.canonical}-${pr.date}`}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "10px 10px",
+                  borderBottom: i === Math.min(recentPRs.length, 8) - 1 ? "none" : `1px solid ${C.border}`,
+                }}
+              >
+                <div style={{ width: 48, textAlign: "center" }}>
+                  <div style={{ fontSize: 10, color: C.t4, fontFamily: MONO }}>{pr.date.slice(5)}</div>
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, color: C.t, fontWeight: 700 }}>{pr.name}</div>
+                  <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 1 }}>
+                    {pr.topWeight}lb × {pr.topReps} · e1RM {pr.e1rm}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 4 }}>
+                  {pr.prKinds.map((k) => (
+                    <div
+                      key={k}
+                      style={{
+                        fontSize: 10,
+                        fontFamily: MONO,
+                        fontWeight: 700,
+                        color: C.primary,
+                        background: C.primary + "20",
+                        padding: "2px 6px",
+                        borderRadius: 4,
+                      }}
+                    >
+                      {k}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </Panel>
+        </>
+      )}
+
+      {stalls.length > 0 && (
+        <>
+          <SectionHead C={C} kicker="Stuck" title="Active stalls" right={<Chip C={C} color={C.warn}>{stalls.length}</Chip>} />
+          <Panel C={C} style={{ padding: 4 }}>
+            {stalls.map((s, i) => (
+              <div
+                key={s.canonical}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "10px 10px",
+                  borderBottom: i === stalls.length - 1 ? "none" : `1px solid ${C.border}`,
+                }}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, color: C.t, fontWeight: 700 }}>{s.name}</div>
+                  <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 1 }}>
+                    {s.weight}lb × {s.reps} · {s.sessions} sessions{s.sinceDate ? ` since ${s.sinceDate}` : ""}
+                  </div>
+                </div>
+                <Chip C={C} color={C.warn}>stuck</Chip>
+              </div>
+            ))}
+          </Panel>
+        </>
+      )}
+    </>
+  );
 }

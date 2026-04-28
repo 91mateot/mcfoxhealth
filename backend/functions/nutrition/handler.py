@@ -32,6 +32,7 @@ from shared.nutrition_service import (
     validate_meal as svc_validate_meal,
     sanitize_ingredients,
 )
+from shared.workout_service import annotate_workout as svc_annotate_workout
 
 secrets_client = boto3.client("secretsmanager")
 _api_key_cache = {"value": None, "ts": 0}
@@ -84,6 +85,11 @@ def lambda_handler(event, context):
             return _delete_water(params["date"], params["water_id"])
     if path == "/api/journal":
         return _post_journal(event)
+    if path.startswith("/api/workout/") and path.endswith("/annotate"):
+        parts = path.split("/")
+        # /api/workout/{date}/{workout_id}/annotate
+        if len(parts) == 6 and parts[5] == "annotate":
+            return _post_workout_annotate(parts[3], parts[4], event)
     if path == "/api/favorites":
         if method == "GET":
             return _get_favorites()
@@ -386,6 +392,27 @@ def _post_journal(event):
         soreness=body.get("soreness"),
         date=body.get("date"),
     )
+    return _resp(200, result)
+
+
+def _post_workout_annotate(date_str: str, workout_id: str, event):
+    """Parse free-form lift notes and attach them to the workout row for date_str.
+
+    The workout_id in the path is informational — annotate_workout finds the
+    workout for the date on its own. We pass it so a future version can target
+    a specific row when multiple sessions exist per day."""
+    body = _parse_body(event)
+    if not body:
+        return _resp(400, {"error": "invalid JSON body"})
+    text = (body.get("text") or "").strip()
+    if not text:
+        return _resp(400, {"error": "text is required"})
+    try:
+        result = svc_annotate_workout(text, date=date_str)
+    except ValueError as e:
+        return _resp(400, {"error": str(e)})
+    except Exception as e:
+        return _resp(502, {"error": f"annotator failed: {e}"})
     return _resp(200, result)
 
 

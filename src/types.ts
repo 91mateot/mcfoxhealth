@@ -189,11 +189,56 @@ export interface TodayResponse {
   journalLastNight?: JournalLastNight;
 }
 
+export type MuscleGroup =
+  | "chest"
+  | "back"
+  | "shoulders"
+  | "arms"
+  | "legs"
+  | "glutes"
+  | "core"
+  | "cardio"
+  | "mobility"
+  | "other";
+
+export interface LiftSet {
+  reps: number;
+  weight: number;
+  unit?: "lbs" | "kg";
+  warmup?: boolean;
+  ramp?: boolean;
+  dropset?: boolean;
+  duration_sec?: number;
+}
+
+export interface WorkoutExercise {
+  name: string;
+  canonical?: string;
+  muscle_group?: MuscleGroup;
+  sets: LiftSet[];
+  superset_with?: string;
+  note?: string;
+  pr?: { weight?: boolean; e1rm?: boolean; volume?: boolean };
+  e1rm?: number;
+  top_weight?: number;
+  top_reps_at_top_weight?: number;
+  // legacy fields still tolerated from older rows
+  scheme?: string;
+  hr?: number;
+}
+
+export interface CardioInterval {
+  name: string;
+  params: Record<string, number>;
+  duration_min?: number;
+}
+
 export interface Workout {
   date: string;
   day: string;
   type: string;
   title: string;
+  strava_id?: string;
   dur: number;
   avgHR: number;
   maxHR: number;
@@ -201,13 +246,12 @@ export interface Workout {
   strain: number;
   sets: number;
   notes?: string;
-}
-
-export interface WorkoutExercise {
-  name: string;
-  scheme: string;
-  note?: string;
-  hr?: number;
+  exercises?: WorkoutExercise[];
+  cardioIntervals?: CardioInterval[];
+  sessionNotes?: string;
+  annotatedAt?: string;
+  originalText?: string;
+  source?: "strava" | "manual";
 }
 
 export interface WorkoutDetail {
@@ -221,6 +265,41 @@ export interface WorkoutDetail {
 export interface WorkoutsResponse {
   workouts: Workout[];
   lastDetail?: WorkoutDetail;
+}
+
+export interface PRRecord {
+  date: string;
+  canonical: string;
+  name: string;
+  muscleGroup: MuscleGroup;
+  topWeight: number;
+  topReps: number;
+  e1rm: number;
+  prKinds: string[];
+}
+
+export interface StallRecord {
+  canonical: string;
+  name: string;
+  muscleGroup: MuscleGroup;
+  weight: number;
+  reps: number;
+  sessions: number;
+  sinceDate?: string;
+}
+
+export interface MuscleVolumeWeek {
+  muscleGroup: MuscleGroup;
+  volumeLb: number;
+  prevVolumeLb: number;
+  sessions: number;
+}
+
+export interface LiftsSection {
+  recentPRs: PRRecord[];
+  stalls: StallRecord[];
+  weeklyVolume: MuscleVolumeWeek[];
+  weekStart: string;
 }
 
 export interface WaterLog {
@@ -316,6 +395,7 @@ export interface BodyResponse {
 export interface ProgressResponse {
   now: BodyResponse;
   trend: TrendsResponse;
+  lifts?: LiftsSection;
 }
 
 export interface JournalTag {

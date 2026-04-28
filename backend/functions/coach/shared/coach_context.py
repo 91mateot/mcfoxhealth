@@ -36,6 +36,11 @@ def build_system_prompt(snapshot: Optional[dict]) -> str:
 
     body_block = _body_composition_block(metrics_table, today_str)
     week_block = _week_history_block(scores_table, workouts_table, today_str)
+    try:
+        exercises_table = get_table("EXERCISES_TABLE")
+        lift_block = _lift_block(exercises_table, scores_table, get_table("USER_CONFIG_TABLE"), today_str)
+    except Exception:
+        lift_block = ""
     journal_block = _last_night_journal_block(journal_table, today_str)
     correlations_block = _correlations_block(corr_table)
 
@@ -60,7 +65,8 @@ You have tools to take action for Mateo. Use them proactively when he mentions c
 
 - log_meal(text): Free-form meal description → estimates macros AND logs it. Use this the moment Mateo says "had a …", "just ate …", "drank a …". Includes hydration and caffeine automatically.
 - log_water(oz): Log plain water intake in ounces. Use for "drank a glass of water" / "16 oz water". Do NOT use for beverages that contain water (tea, coffee, soda, etc. — those go through log_meal).
-- log_workout(text): Free-form workout description → estimates duration/type/intensity AND logs it. Use when Mateo says "just finished a push workout", "did 45 min Z2 run", "mobility this morning". Strava sync still runs independently.
+- log_workout(text): Free-form workout description → estimates duration/type/intensity AND logs it. Use when Mateo says "just finished a push workout", "did 45 min Z2 run", "mobility this morning" WITHOUT specific lift details. Strava sync still runs independently.
+- annotate_workout(text, date?): Attach structured lift data (exercises, sets, reps, weight, supersets, session notes) to an EXISTING workout. Use when Mateo pastes lift notes — e.g. "bench 4x5 @ 205, OHP 3x8 @ 115" or a full workout log. Handles ramps, drop sets, supersets, cardio intervals. Prefer this over log_workout when there's real lift detail. Defaults to today; accepts date="yesterday's workout" style hints — convert to YYYY-MM-DD.
 - log_journal(tags, mood?, stress?, soreness?): Tag how he's feeling. Use when he mentions mood, stress, soreness, alcohol, back flare, travel, etc. Valid tags: alcohol, caffeine_late, ate_late, heavy_meal, hydrated, screens_bed, late_bedtime, meditated, stretched, sauna, cold, sunlight_am, stress, social, travel, sick, back_flare.
 - get_recent_meals(days): Look up recent rows. Returns meals (kind="meal", with meal_id), water entries (kind="water", with water_id), AND workouts (kind="workout", with workout_id). Use to find an id you need to delete.
 - delete_meal(meal_id): Remove a previously-logged meal (and its water companion). ONLY use to fix a mistake — e.g. you logged the wrong thing, or Mateo says "delete that".
@@ -85,6 +91,8 @@ Two different numbers live in your context and they are NOT the same:
 {body_block}
 
 {week_block}
+
+{lift_block}
 
 {journal_block}
 
@@ -405,6 +413,83 @@ def _last_night_journal_block(journal_table, today_str):
             return "\n".join(lines)
 
     return "## Journal\nNo recent journal entries."
+
+
+def _lift_block(exercises_table, scores_table, config_table, today_str):
+    """Recent PRs, active stalls, and weekly volume per muscle group.
+    Compute job (daily) populates PR flags on ExercisesTable rows and writes
+    stalls to user_config key=lift_stalls and weekly volume to daily_scores
+    key=week_<date>."""
+    try:
+        dt = datetime.strptime(today_str, "%Y-%m-%d")
+    except Exception:
+        return ""
+
+    # Recent PR sessions — scan last 30 days' exercise rows.
+    pr_lines = []
+    try:
+        resp = exercises_table.scan(Limit=400)
+        rows = resp.get("Items", [])
+    except Exception:
+        rows = []
+
+    cutoff = (dt - timedelta(days=30)).strftime("%Y-%m-%d")
+    recent = [r for r in rows if r.get("date", "") >= cutoff]
+    recent.sort(key=lambda r: r.get("date", ""), reverse=True)
+    for r in recent:
+        pr = r.get("pr") or {}
+        if not (pr.get("weight") or pr.get("e1rm") or pr.get("volume")):
+            continue
+        flags = []
+        if pr.get("weight"):
+            flags.append("weight")
+        if pr.get("e1rm"):
+            flags.append("e1rm")
+        if pr.get("volume"):
+            flags.append("volume")
+        pr_lines.append(
+            f"- {r.get('date')}: {r.get('name', r.get('canonical', '?'))} — "
+            f"{r.get('top_weight', 0)}lb x {r.get('top_reps_at_top_weight', 0)} "
+            f"(PR: {', '.join(flags)})"
+        )
+        if len(pr_lines) >= 5:
+            break
+
+    # Stalls from user_config.
+    stall_lines = []
+    stalls_row = get_item(config_table, {"key": "lift_stalls"}) or {}
+    for s in (stalls_row.get("stalls") or [])[:5]:
+        stall_lines.append(
+            f"- {s.get('name', s.get('canonical', '?'))} stuck at "
+            f"{s.get('weight', 0)}lb x {s.get('reps', 0)} for "
+            f"{s.get('sessions', 0)} sessions (since {s.get('since_date', '?')})"
+        )
+
+    # Weekly volume (current week).
+    week_start = dt - timedelta(days=dt.weekday())
+    week_row = get_item(scores_table, {"date": f"week_{week_start.strftime('%Y-%m-%d')}"}) or {}
+    volume = week_row.get("volume_by_muscle_group") or {}
+    sessions = week_row.get("sessions_by_muscle_group") or {}
+
+    volume_lines = []
+    if volume:
+        # Show top 5 by volume.
+        sorted_mg = sorted(volume.items(), key=lambda kv: float(kv[1]), reverse=True)[:5]
+        for mg, vol in sorted_mg:
+            sess = sessions.get(mg, 0)
+            volume_lines.append(f"- {mg.title()}: {int(float(vol)):,} lb total · {sess} sessions")
+
+    sections = []
+    if pr_lines:
+        sections.append("### Recent PRs (last 30 days)\n" + "\n".join(pr_lines))
+    if stall_lines:
+        sections.append("### Active stalls\n" + "\n".join(stall_lines))
+    if volume_lines:
+        sections.append("### Weekly volume (this week, by muscle group)\n" + "\n".join(volume_lines))
+
+    if not sections:
+        return ""
+    return "## Lifts\n" + "\n\n".join(sections)
 
 
 def _correlations_block(corr_table):

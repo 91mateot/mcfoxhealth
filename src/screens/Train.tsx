@@ -13,11 +13,12 @@ interface TrainScreenProps {
   today: TodayResponse;
   workouts: WorkoutsResponse;
   onLogWorkout: () => void;
+  onOpenWorkout: (w: Workout) => void;
   week: number;
   setWeek: (n: number) => void;
 }
 
-export function TrainScreen({ C, today, workouts, onLogWorkout, week, setWeek }: TrainScreenProps) {
+export function TrainScreen({ C, today, workouts, onLogWorkout, onOpenWorkout, week, setWeek }: TrainScreenProps) {
   const list = workouts.workouts ?? [];
   const weekStrain = today.recoveryWeek.reduce((a, d) => a + (d.strain ?? 0), 0);
   const recent = list.slice(0, 5);
@@ -101,7 +102,7 @@ export function TrainScreen({ C, today, workouts, onLogWorkout, week, setWeek }:
       ) : (
         <Panel C={C} style={{ padding: 6 }}>
           {list.slice(0, 6).map((x, i) => (
-            <WorkoutRow key={i} C={C} w={x} last={i === Math.min(list.length, 6) - 1} />
+            <WorkoutRow key={i} C={C} w={x} last={i === Math.min(list.length, 6) - 1} onTap={() => onOpenWorkout(x)} />
           ))}
         </Panel>
       )}
@@ -115,7 +116,7 @@ export function TrainScreen({ C, today, workouts, onLogWorkout, week, setWeek }:
   );
 }
 
-function WorkoutRow({ C, w, last }: { C: Palette; w: Workout; last: boolean }) {
+function WorkoutRow({ C, w, last, onTap }: { C: Palette; w: Workout; last: boolean; onTap: () => void }) {
   const typeCol = (
     {
       Push: C.primary,
@@ -125,14 +126,24 @@ function WorkoutRow({ C, w, last }: { C: Palette; w: Workout; last: boolean }) {
       HIIT: C.warn,
     } as Record<string, string>
   )[w.type] ?? C.t2;
+  const liftCount = w.exercises?.length ?? 0;
   return (
-    <div
+    <button
+      onClick={onTap}
       style={{
         display: "flex",
         alignItems: "center",
         gap: 10,
         padding: "10px 10px",
         borderBottom: last ? "none" : `1px solid ${C.border}`,
+        width: "100%",
+        background: "transparent",
+        border: "none",
+        borderRadius: 10,
+        cursor: "pointer",
+        textAlign: "left",
+        fontFamily: "inherit",
+        color: "inherit",
       }}
     >
       <div style={{ width: 40, textAlign: "center" }}>
@@ -140,7 +151,14 @@ function WorkoutRow({ C, w, last }: { C: Palette; w: Workout; last: boolean }) {
         <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO }}>{w.date}</div>
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 12.5, color: C.t, fontWeight: 600 }}>{w.title}</div>
+        <div style={{ fontSize: 12.5, color: C.t, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.title}</span>
+          {liftCount > 0 && (
+            <span style={{ fontSize: 10, color: C.primary, fontFamily: MONO, fontWeight: 700, background: C.primary + "20", padding: "2px 6px", borderRadius: 4 }}>
+              {liftCount} lift{liftCount === 1 ? "" : "s"}
+            </span>
+          )}
+        </div>
         <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 1 }}>
           {w.dur}m · avg {w.avgHR} · {w.cal} kcal
         </div>
@@ -164,7 +182,7 @@ function WorkoutRow({ C, w, last }: { C: Palette; w: Workout; last: boolean }) {
         </div>
         <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO }}>strain</div>
       </div>
-    </div>
+    </button>
   );
 }
 

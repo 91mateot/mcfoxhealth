@@ -11,7 +11,8 @@ import { LogWorkoutModal } from "./modals/LogWorkout";
 import { ChatModal } from "./modals/Chat";
 import { JournalSheet } from "./modals/Journal";
 import { MealDetailModal } from "./modals/MealDetail";
-import type { Meal } from "./types";
+import { WorkoutDetailModal } from "./modals/WorkoutDetail";
+import type { Meal, Workout } from "./types";
 import { useToday, useWorkouts, useProgress, useNutrition, logMeal, submitJournal, todayISO } from "./api";
 
 type TabId = "today" | "train" | "fuel" | "progress";
@@ -36,6 +37,7 @@ export default function App() {
   const [chatPrefill, setChatPrefill] = useState<string | undefined>();
   const [journalOpen, setJournalOpen] = useState(false);
   const [mealDetail, setMealDetail] = useState<Meal | null>(null);
+  const [workoutDetail, setWorkoutDetail] = useState<Workout | null>(null);
 
   useEffect(() => {
     localStorage.setItem("mateo-tab", tab);
@@ -107,6 +109,7 @@ export default function App() {
           today={today.data}
           workouts={workouts.data}
           onLogWorkout={() => setWorkoutOpen(true)}
+          onOpenWorkout={(w) => setWorkoutDetail(w)}
           week={week}
           setWeek={setWeek}
         />
@@ -172,6 +175,12 @@ export default function App() {
           targets={nutrition.data.targets}
         />
       )}
+      <WorkoutDetailModal
+        C={C}
+        open={workoutDetail !== null}
+        onClose={() => setWorkoutDetail(null)}
+        workout={workoutDetail}
+      />
     </div>
   );
 }

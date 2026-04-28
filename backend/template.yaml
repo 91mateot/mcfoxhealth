@@ -18,6 +18,7 @@ Globals:
         CORRELATIONS_TABLE: !Ref CorrelationsTable
         USER_CONFIG_TABLE: !Ref UserConfigTable
         CALIBRATION_TABLE: !Ref CalibrationTable
+        EXERCISES_TABLE: !Ref ExercisesTable
         SECRETS_ARN: !Ref SecretsArn
         INGEST_API_KEY: !Ref IngestApiKey
 
@@ -187,6 +188,22 @@ Resources:
         - AttributeName: date
           KeyType: HASH
 
+  ExercisesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-exercises
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: canonical
+          AttributeType: S
+        - AttributeName: date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: canonical
+          KeyType: HASH
+        - AttributeName: date
+          KeyType: RANGE
+
   # ── Lambda Functions ─────────────────────────────────────────
 
   IngestFunction:
@@ -247,7 +264,7 @@ Resources:
     Properties:
       CodeUri: functions/compute/
       Handler: handler.lambda_handler
-      Timeout: 60
+      Timeout: 120
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref HealthMetricsTable
@@ -261,8 +278,12 @@ Resources:
             TableName: !Ref CorrelationsTable
         - DynamoDBCrudPolicy:
             TableName: !Ref NutritionTable
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: !Ref WorkoutsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExercisesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserConfigTable
       Events:
         DailyBaselines:
           Type: Schedule
@@ -297,6 +318,8 @@ Resources:
             TableName: !Ref CorrelationsTable
         - DynamoDBReadPolicy:
             TableName: !Ref UserConfigTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ExercisesTable
       Events:
         GetToday:
           Type: HttpApi
@@ -356,6 +379,8 @@ Resources:
             TableName: !Ref UserConfigTable
         - DynamoDBCrudPolicy:
             TableName: !Ref WorkoutsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExercisesTable
         - Statement:
             - Effect: Allow
               Action:
@@ -434,6 +459,12 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/journal
             Method: POST
+        PostWorkoutAnnotate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/workout/{date}/{workout_id}/annotate
+            Method: POST
         PostCalibration:
           Type: HttpApi
           Properties:
@@ -469,6 +500,8 @@ Resources:
             TableName: !Ref JournalTable
         - DynamoDBCrudPolicy:
             TableName: !Ref WorkoutsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExercisesTable
         - DynamoDBReadPolicy:
             TableName: !Ref DailyScoresTable
         - DynamoDBReadPolicy:

@@ -8,10 +8,15 @@ Triggered by:
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from shared.db import get_table, put_item, get_item, query_items
+
+logger = logging.getLogger("compute")
+logger.setLevel(logging.INFO)
 from shared.scoring import (
     compute_recovery,
     compute_sleep_score,
@@ -29,7 +34,8 @@ def lambda_handler(event, context):
     if "source" in event and event["source"] == "aws.events":
         rule_arn = event.get("resources", [""])[0]
         if "DailyBaselines" in rule_arn or "daily" in rule_arn.lower():
-            return _compute_baselines()
+            _compute_baselines()
+            return _compute_lifts()
         if "WeeklyCorrelations" in rule_arn or "weekly" in rule_arn.lower() or "correlation" in rule_arn.lower():
             return _compute_correlations()
         return _compute_baselines()
@@ -46,6 +52,8 @@ def lambda_handler(event, context):
         return _compute_baselines()
     elif action == "compute_correlations":
         return _compute_correlations()
+    elif action == "compute_lifts":
+        return _compute_lifts()
 
     return {"error": f"unknown action: {action}"}
 
@@ -269,6 +277,13 @@ def _compute_baselines():
 
 
 def _compute_correlations():
+    """Compute journal tag → metric correlations + lift correlations over last 60/90 days."""
+    _compute_journal_correlations()
+    _compute_lift_correlations()
+    return {"status": "correlations_computed"}
+
+
+def _compute_journal_correlations():
     """Compute journal tag → metric correlations over last 60 days."""
     journal_table = get_table("JOURNAL_TABLE")
     scores_table = get_table("DAILY_SCORES_TABLE")
@@ -442,3 +457,322 @@ def _compute_acwr(workouts_table, date_str: str):
         total = sum(float(w.get("trimp", 0) or 0) for w in day_workouts)
         daily_trimps[d] = total
     return compute_acwr(daily_trimps)
+
+
+# ── Lift compute (PRs, stalls, e1RM, weekly volume) ──────────────────────
+
+
+def _epley_e1rm(weight: float, reps: int) -> float:
+    """Epley formula for estimated 1-rep max.
+    e1RM = weight * (1 + reps/30). Good for 2-10 reps.
+    reps=1 returns weight unchanged. reps=0 returns 0 (no work done)."""
+    if reps <= 0 or weight <= 0:
+        return 0.0
+    if reps == 1:
+        return round(float(weight), 1)
+    return round(float(weight) * (1.0 + reps / 30.0), 1)
+
+
+def _scan_exercise_history(exercises_table, canonical: str, days: int = 180) -> list:
+    """Return all sessions for a canonical exercise in the last `days`, sorted
+    by date ascending. ExercisesTable is (PK=canonical, SK=date) so this is a
+    single Query."""
+    rows = query_items(exercises_table, "canonical", canonical) or []
+    cutoff = (local_now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    rows = [r for r in rows if r.get("date", "") >= cutoff]
+    rows.sort(key=lambda r: r.get("date", ""))
+    return rows
+
+
+def _session_top_e1rm(row: dict) -> float:
+    """Best Epley-e1RM across all working sets in a session."""
+    best = 0.0
+    for s in row.get("sets") or []:
+        if s.get("warmup"):
+            continue
+        w = float(s.get("weight") or 0)
+        r = int(s.get("reps") or 0)
+        e = _epley_e1rm(w, r)
+        if e > best:
+            best = e
+    return best
+
+
+def _detect_prs(history: list) -> dict[str, dict]:
+    """For each session in history, decide whether it set a PR vs all prior
+    sessions. Returns {date: {weight: bool, e1rm: bool, volume: bool}}."""
+    out = {}
+    best_weight = 0.0
+    best_e1rm = 0.0
+    best_volume = 0.0
+    for row in history:
+        top_weight = float(row.get("top_weight") or 0)
+        top_e1rm = _session_top_e1rm(row)
+        volume = float(row.get("working_volume") or 0)
+
+        flags = {
+            "weight": top_weight > best_weight,
+            "e1rm": top_e1rm > best_e1rm,
+            "volume": volume > best_volume,
+        }
+        out[row["date"]] = flags
+
+        if top_weight > best_weight:
+            best_weight = top_weight
+        if top_e1rm > best_e1rm:
+            best_e1rm = top_e1rm
+        if volume > best_volume:
+            best_volume = volume
+    return out
+
+
+def _detect_stall(history: list, min_sessions: int = 3) -> Optional[dict]:
+    """A stall = last `min_sessions` sessions have top_weight equal or
+    decreasing with similar rep range (±2). Returns dict or None."""
+    if len(history) < min_sessions:
+        return None
+    tail = history[-min_sessions:]
+    weights = [float(r.get("top_weight") or 0) for r in tail]
+    reps_at = [int(r.get("top_reps_at_top_weight") or 0) for r in tail]
+    if any(w == 0 for w in weights):
+        return None
+    # No progression = max weight in tail is not strictly greater than first.
+    if max(weights) > weights[0]:
+        return None
+    # Rep range similar.
+    if max(reps_at) - min(reps_at) > 2:
+        return None
+    return {
+        "weight": weights[-1],
+        "reps": reps_at[-1],
+        "sessions": min_sessions,
+        "since_date": tail[0]["date"],
+    }
+
+
+def _compute_lifts():
+    """Daily lift roll-up:
+    - For every exercise that has a session in the last 7 days, recompute PR
+      flags across its full 180-day history and write back to each row.
+    - Detect stalls for every exercise with ≥3 recent sessions; store to user_config.
+    - Roll per-muscle-group weekly volume into DAILY_SCORES_TABLE (week_start key)."""
+    exercises_table = get_table("EXERCISES_TABLE")
+    scores_table = get_table("DAILY_SCORES_TABLE")
+    config_table = get_table("USER_CONFIG_TABLE")
+
+    # Find exercises touched in the last 7 days. We don't have a GSI, so scan
+    # the recent window via per-day queries on WORKOUTS_TABLE would be cleaner,
+    # but scanning the small ExercisesTable once a day is acceptable at this scale.
+    try:
+        resp = exercises_table.scan(Limit=500)
+        all_rows = resp.get("Items", [])
+    except Exception:
+        logger.exception("ExercisesTable scan failed")
+        return {"status": "lifts_compute_failed"}
+
+    recent_cutoff = (local_now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    recent_canonicals = sorted({r["canonical"] for r in all_rows if r.get("date", "") >= recent_cutoff and r.get("canonical")})
+
+    stalls = []
+    pr_count = 0
+
+    for canonical in recent_canonicals:
+        history = _scan_exercise_history(exercises_table, canonical, days=180)
+        if not history:
+            continue
+        pr_flags = _detect_prs(history)
+
+        # Write PR flags and e1RM back to each session row.
+        for row in history:
+            flags = pr_flags.get(row["date"], {})
+            e1rm = _session_top_e1rm(row)
+            updated = {
+                **row,
+                "e1rm": e1rm,
+                "pr": {
+                    "weight": bool(flags.get("weight")),
+                    "e1rm": bool(flags.get("e1rm")),
+                    "volume": bool(flags.get("volume")),
+                },
+            }
+            put_item(exercises_table, updated)
+            if any(flags.values()):
+                pr_count += 1
+
+        stall = _detect_stall(history)
+        if stall:
+            stalls.append({
+                "canonical": canonical,
+                "name": history[-1].get("name", canonical),
+                "muscle_group": history[-1].get("muscle_group", "other"),
+                **stall,
+            })
+
+    # Persist stalls list to user-config as a single row.
+    put_item(config_table, {
+        "key": "lift_stalls",
+        "stalls": stalls,
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+    # Weekly volume per muscle group (Monday-based week).
+    today_local = local_now()
+    week_start = today_local - timedelta(days=today_local.weekday())  # Monday
+    week_start_str = week_start.strftime("%Y-%m-%d")
+    week_end_str = (week_start + timedelta(days=6)).strftime("%Y-%m-%d")
+
+    volume_by_mg: dict = {}
+    sessions_by_mg: dict = {}
+    for row in all_rows:
+        d = row.get("date", "")
+        if not (week_start_str <= d <= week_end_str):
+            continue
+        mg = row.get("muscle_group", "other")
+        vol = float(row.get("working_volume") or 0)
+        volume_by_mg[mg] = volume_by_mg.get(mg, 0) + vol
+        sessions_by_mg.setdefault(mg, set()).add(d)
+
+    volume_row = {
+        "date": f"week_{week_start_str}",
+        "week_start": week_start_str,
+        "week_end": week_end_str,
+        "volume_by_muscle_group": {k: round(v, 1) for k, v in volume_by_mg.items()},
+        "sessions_by_muscle_group": {k: len(v) for k, v in sessions_by_mg.items()},
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    put_item(scores_table, volume_row)
+
+    return {
+        "status": "lifts_computed",
+        "exercises_touched": len(recent_canonicals),
+        "prs_tagged": pr_count,
+        "stalls": len(stalls),
+        "volume_by_muscle_group": volume_row["volume_by_muscle_group"],
+    }
+
+
+# ── Lift correlations (Sunday) ───────────────────────────────────────────
+
+
+def _compute_lift_correlations():
+    """Correlate lift signals with readiness metrics.
+
+    1. For each exercise with ≥10 sessions: compare HRV/sleep on PR-session
+       mornings vs non-PR mornings. Write CorrelationsTable rows tagged
+       "exercise:<canonical>".
+    2. back_flare journal tag: check whether loaded-lower-body exercises
+       (squat, deadlift, rdl, leg_press, front_squat) in the prior 3 days
+       precede the flare. Write with tag "back_flare", metric
+       "Loaded lower body 3d prior".
+    """
+    exercises_table = get_table("EXERCISES_TABLE")
+    scores_table = get_table("DAILY_SCORES_TABLE")
+    journal_table = get_table("JOURNAL_TABLE")
+    corr_table = get_table("CORRELATIONS_TABLE")
+
+    try:
+        resp = exercises_table.scan(Limit=1000)
+        all_rows = resp.get("Items", [])
+    except Exception:
+        logger.exception("ExercisesTable scan failed")
+        return
+
+    # Group by canonical.
+    by_canonical: dict = {}
+    for r in all_rows:
+        c = r.get("canonical")
+        if c:
+            by_canonical.setdefault(c, []).append(r)
+
+    for canonical, history in by_canonical.items():
+        if len(history) < 10:
+            continue
+        history.sort(key=lambda r: r.get("date", ""))
+
+        pr_dates = [r["date"] for r in history if (r.get("pr") or {}).get("e1rm")]
+        nonpr_dates = [r["date"] for r in history if not (r.get("pr") or {}).get("e1rm")]
+        if len(pr_dates) < 3 or len(nonpr_dates) < 3:
+            continue
+
+        for metric_key, metric_label, better in [
+            ("hrv", "HRV", "up"),
+            ("recovery", "Recovery", "up"),
+            ("sleep_score", "Sleep", "up"),
+        ]:
+            pr_vals = []
+            for d in pr_dates:
+                s = get_item(scores_table, {"date": d})
+                if s and s.get(metric_key) is not None:
+                    pr_vals.append(float(s[metric_key]))
+            nonpr_vals = []
+            for d in nonpr_dates:
+                s = get_item(scores_table, {"date": d})
+                if s and s.get(metric_key) is not None:
+                    nonpr_vals.append(float(s[metric_key]))
+            if len(pr_vals) < 3 or len(nonpr_vals) < 3:
+                continue
+            pr_avg = sum(pr_vals) / len(pr_vals)
+            nonpr_avg = sum(nonpr_vals) / len(nonpr_vals)
+            if nonpr_avg == 0:
+                continue
+            effect = round(((pr_avg - nonpr_avg) / nonpr_avg) * 100, 1)
+            n = len(pr_vals)
+            confidence = "high" if n >= 10 else "medium" if n >= 5 else "low"
+            direction = "positive" if (effect > 0) == (better == "up") else "negative"
+            put_item(corr_table, {
+                "tag": f"exercise:{canonical}",
+                "metric": metric_label,
+                "effect": effect,
+                "unit": "%",
+                "n": n,
+                "confidence": confidence,
+                "direction": direction,
+            })
+
+    # back_flare vs loaded lower-body prior 3 days.
+    loaded_lower = {"back_squat", "front_squat", "deadlift", "romanian_deadlift", "leg_press"}
+    today = local_now()
+    flare_dates = []
+    nonflare_dates = []
+    for i in range(90):
+        d = (today - timedelta(days=i + 1)).strftime("%Y-%m-%d")
+        j = get_item(journal_table, {"date": d})
+        if not j:
+            continue
+        tags = j.get("tags") or []
+        if "back_flare" in tags:
+            flare_dates.append(d)
+        else:
+            nonflare_dates.append(d)
+
+    if len(flare_dates) >= 3:
+        def loaded_in_prior_3(date_str: str) -> bool:
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            for delta in range(1, 4):
+                d_prior = (dt - timedelta(days=delta)).strftime("%Y-%m-%d")
+                for canonical in loaded_lower:
+                    row = get_item(exercises_table, {"canonical": canonical, "date": d_prior})
+                    if row:
+                        return True
+            return False
+
+        flare_loaded = sum(1 for d in flare_dates if loaded_in_prior_3(d))
+        nonflare_loaded = sum(1 for d in nonflare_dates if loaded_in_prior_3(d))
+        flare_rate = flare_loaded / len(flare_dates)
+        nonflare_rate = nonflare_loaded / max(1, len(nonflare_dates))
+        if nonflare_rate > 0:
+            effect = round(((flare_rate - nonflare_rate) / max(nonflare_rate, 0.01)) * 100, 1)
+        else:
+            effect = round(flare_rate * 100, 1)
+        n = len(flare_dates)
+        confidence = "high" if n >= 10 else "medium" if n >= 5 else "low"
+        direction = "negative"  # loaded-lower-body → flare is always a bad association
+        put_item(corr_table, {
+            "tag": "back_flare",
+            "metric": "Loaded lower body 3d prior",
+            "effect": effect,
+            "unit": "%",
+            "n": n,
+            "confidence": confidence,
+            "direction": direction,
+        })
