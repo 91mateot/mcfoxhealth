@@ -153,7 +153,16 @@ Return ONLY valid JSON, no prose. Schema:
   "confidence": "high"|"medium"|"low",
   "assumptions": ["string", ...],
   "ingredients": [{"name": "string", "portion": "string", "cal": number, "p": number, "c": number, "f": number}, ...]
-}"""
+}
+
+## Image input
+If the user provides an image:
+- **Nutrition facts panel visible** → read per-serving values directly. Set `confidence: "high"`, `source: "label_photo"`. Put a brief assumption like "Read directly from nutrition facts panel — per serving: N g".
+- **Product name / front of package only** → use your knowledge of that specific product. Set `confidence: "medium"`, `source: "label_photo"`. Assumption: "Inferred from product name '{X}' — verify on the package."
+- **Food photo (plate, bowl, etc.)** → estimate portions from visual cues. Set `confidence: "medium"` if portions are clear, `"low"` if ambiguous. Assumption must list portion sizes you inferred.
+- **Blurry / unreadable** → return cal=0 p=0 c=0 f=0, `confidence: "low"`, and an assumption explaining you couldn't read the image. Never fabricate.
+
+When an image is the only input (no text), pick `tag` from current context or default to "snack"."""
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -213,20 +222,48 @@ def _fetch_url_text(url: str, max_bytes: int = 150_000, timeout: float = 5.0) ->
         return ""
 
 
-def _call_estimator(text: str, url_text: str) -> dict:
+def _call_estimator(
+    text: str,
+    url_text: str,
+    image_b64: Optional[str] = None,
+    media_type: Optional[str] = None,
+) -> dict:
     known_foods_context = "\n".join(
         f"- {k}: {v['name']} — {v['cal']} cal, {v['p']}p {v['c']}c {v['f']}f"
         for k, v in KNOWN_FOODS.items()
     )
 
-    user_msg = f"""Meal description:
+    if image_b64:
+        # Image-led estimation: the user sent a photo (with optional caption).
+        # Image block first (Anthropic-recommended for better attention),
+        # then the text context with known-foods reference.
+        caption_txt = text.strip() or "(no caption — read everything you can from the image)"
+        user_text = (
+            f"User caption:\n{caption_txt}\n\n"
+            f"Known foods reference (use these exact numbers if the image matches one):\n"
+            f"{known_foods_context}"
+        )
+        content_blocks = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type or "image/jpeg",
+                    "data": image_b64,
+                },
+            },
+            {"type": "text", "text": user_text},
+        ]
+    else:
+        user_msg = f"""Meal description:
 {text}
 
 Known foods reference (use these exact numbers if the description matches):
 {known_foods_context}
 """
-    if url_text:
-        user_msg += f"\n\nRecipe page content (truncated):\n{url_text}\n"
+        if url_text:
+            user_msg += f"\n\nRecipe page content (truncated):\n{url_text}\n"
+        content_blocks = user_msg
 
     resp = bedrock_runtime.invoke_model(
         modelId=ESTIMATOR_MODEL_ID,
@@ -236,7 +273,7 @@ Known foods reference (use these exact numbers if the description matches):
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": 1800,
             "system": _ESTIMATOR_SYSTEM,
-            "messages": [{"role": "user", "content": user_msg}],
+            "messages": [{"role": "user", "content": content_blocks}],
         }),
     )
     payload = json.loads(resp["body"].read())
@@ -366,18 +403,30 @@ def _known_foods_match(text: str) -> str:
     return ""
 
 
-def estimate_meal(text: str, known_hint: str = "", skip_known_foods: bool = False) -> dict:
-    """Estimate macros for free-form text. Returns estimate dict (not saved).
+def estimate_meal(
+    text: str,
+    known_hint: str = "",
+    skip_known_foods: bool = False,
+    image_b64: Optional[str] = None,
+    media_type: Optional[str] = None,
+) -> dict:
+    """Estimate macros for free-form text and/or an image. Returns estimate
+    dict (not saved).
 
-    Fast path: KNOWN_FOODS dict (only for short, unambiguous inputs).
-    Slow path: Bedrock estimator. Set skip_known_foods=True to force the LLM
-    path — used by the 'not the right match' button in MealDetail.
+    Fast path: KNOWN_FOODS dict (text-only inputs, short & unambiguous).
+    Slow path: Bedrock estimator.
+
+    When `image_b64` is provided, the known-foods fast path is bypassed and
+    the estimator sees the image. The returned `source` defaults to
+    "label_photo" for image-driven estimates, "llm" for text-only, or
+    "known_foods" for fast-path matches.
     """
     text = (text or "").strip()
-    if not text:
-        raise ValueError("text is required")
+    if not text and not image_b64:
+        raise ValueError("text or image is required")
 
-    if not skip_known_foods:
+    # Known-foods fast path is text-only. Images force the LLM path.
+    if text and not skip_known_foods and not image_b64:
         known_key = (known_hint or "").lower().strip()
         if not known_key:
             known_key = _known_foods_match(text)
@@ -393,18 +442,22 @@ def estimate_meal(text: str, known_hint: str = "", skip_known_foods: bool = Fals
 
     url_text = ""
     source_url = None
-    for match in re.finditer(r"https?://\S+", text):
-        candidate = match.group(0).rstrip(".,;:)]\"'")
-        fetched = _fetch_url_text(candidate)
-        if fetched:
-            source_url = candidate
-            url_text = fetched
-            break
+    if text:
+        for match in re.finditer(r"https?://\S+", text):
+            candidate = match.group(0).rstrip(".,;:)]\"'")
+            fetched = _fetch_url_text(candidate)
+            if fetched:
+                source_url = candidate
+                url_text = fetched
+                break
 
-    estimate = _call_estimator(text, url_text)
+    estimate = _call_estimator(text, url_text, image_b64=image_b64, media_type=media_type)
     if source_url and "sourceUrl" not in estimate:
         estimate["sourceUrl"] = source_url
-    estimate.setdefault("source", "llm")
+    if image_b64:
+        estimate.setdefault("source", "label_photo")
+    else:
+        estimate.setdefault("source", "llm")
     return estimate
 
 
@@ -510,14 +563,19 @@ def save_meal(payload: dict, date: Optional[str] = None) -> dict:
         except (TypeError, ValueError):
             pass
 
-    # Barcode-sourced meals come from OpenFoodFacts per-serving data — already
-    # canonical. Stamp as validated at save time and skip the async validator
-    # (which would waste a Bedrock/USDA call and could even regress the
-    # accurate OFF numbers via the known USDA per-100g scaling bug).
-    is_barcode_source = body.get("source") == "barcode"
-    if is_barcode_source:
+    # Canonical-source meals are already high-confidence (read directly from
+    # OpenFoodFacts per-serving data or a photo of the nutrition panel).
+    # Stamp as validated at save time and skip the async validator: that
+    # path would waste Bedrock/USDA cycles and, via the known USDA per-100g
+    # scaling bug, can actively regress correct numbers.
+    src = body.get("source")
+    is_canonical_source = src in ("barcode", "label_photo")
+    if src == "barcode":
         item["validated_at"] = datetime.now(timezone.utc).isoformat()
         item["validated_source"] = "openfoodfacts"
+    elif src == "label_photo":
+        item["validated_at"] = datetime.now(timezone.utc).isoformat()
+        item["validated_source"] = "bedrock_vision"
 
     put_item(table, item)
 
@@ -531,9 +589,9 @@ def save_meal(payload: dict, date: Optional[str] = None) -> dict:
         })
 
     # Fire-and-forget second-pass validator. Must never raise — a broken
-    # validator should never block a log. Skipped for barcode-sourced meals
-    # since they're already canonical (see above).
-    if NUTRITION_FUNCTION_NAME and not is_barcode_source:
+    # validator should never block a log. Skipped for canonical-source meals
+    # (barcode, label_photo) since they're already validated (see above).
+    if NUTRITION_FUNCTION_NAME and not is_canonical_source:
         try:
             lambda_client.invoke(
                 FunctionName=NUTRITION_FUNCTION_NAME,

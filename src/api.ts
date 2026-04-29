@@ -214,6 +214,21 @@ export async function estimateMeal(
   return post<MealEstimate>("/api/meal/estimate", body);
 }
 
+/** Image-driven meal estimate. `base64` has NO data: prefix. Returns the
+ * same MealEstimate shape as text estimates; source is set by the server
+ * (`label_photo` when a nutrition panel or product is identifiable). */
+export async function estimateFromPhoto(
+  base64: string,
+  mediaType: string = "image/jpeg",
+  caption?: string,
+): Promise<MealEstimate> {
+  return post<MealEstimate>("/api/meal/estimate", {
+    text: (caption || "").trim(),
+    image: { data: base64, media_type: mediaType },
+    skip_known_foods: true,
+  });
+}
+
 function invalidateMealCaches() {
   mutate("/api/today");
   mutate(`/api/nutrition/${todayISO()}`);
@@ -301,10 +316,23 @@ export async function askCoachStream(
   onToken: (chunk: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  // Strip dataUrl from ChatImages — server only needs base64 + mediaType.
+  // Doubles-up bytes on the wire otherwise (dataUrl inlines the same base64).
+  const wireMessages = messages.map((m) => {
+    if (!m.images || m.images.length === 0) return m;
+    return {
+      ...m,
+      images: m.images.map((img) => ({
+        base64: img.base64,
+        mediaType: img.mediaType,
+        bytes: img.bytes,
+      })),
+    };
+  });
   const res = await fetch(COACH_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, snapshot: snapshot ?? null }),
+    body: JSON.stringify({ messages: wireMessages, snapshot: snapshot ?? null }),
     signal,
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);

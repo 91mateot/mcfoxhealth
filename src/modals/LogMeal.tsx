@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FONT, MONO, type Palette } from "../theme";
 import type { MealInput, MealEstimate, EstimateConfidence } from "../types";
 import { Sheet } from "../components/Sheet";
@@ -6,7 +6,8 @@ import { Btn } from "../components/Btn";
 import { Chip } from "../components/Chip";
 import { VoiceInput } from "../components/VoiceInput";
 import { BarcodeScanner } from "../components/BarcodeScanner";
-import { estimateMeal, lookupBarcode, useFavorites } from "../api";
+import { estimateFromPhoto, estimateMeal, lookupBarcode, useFavorites } from "../api";
+import { compressImage } from "../lib/images";
 
 interface LogMealModalProps {
   C: Palette;
@@ -49,6 +50,8 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scanLookupBusy, setScanLookupBusy] = useState(false);
   const [scanMissMsg, setScanMissMsg] = useState<string | null>(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const photoInputRef = useRef<HTMLInputElement | null>(null);
   const favoritesResp = useFavorites();
   const favorites = favoritesResp.data?.favorites ?? [];
 
@@ -63,6 +66,7 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
       setScannerOpen(false);
       setScanLookupBusy(false);
       setScanMissMsg(null);
+      setPhotoBusy(false);
       setCustom(prefill ?? "");
     } else {
       setCustom("");
@@ -131,6 +135,39 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
       setScanMissMsg(e instanceof Error ? e.message : "Lookup failed.");
     } finally {
       setScanLookupBusy(false);
+    }
+  };
+
+  const handleLabelPhotoPicked = async (file: File | null) => {
+    if (!file) return;
+    setPhotoBusy(true);
+    setScanMissMsg(null);
+    setError(null);
+    try {
+      // Labels need legibility — use a larger max edge than chat photos.
+      const img = await compressImage(file, 1280, 0.75);
+      const est = await estimateFromPhoto(img.base64, img.mediaType);
+      setEstimate(est);
+      setEdited({
+        name: est.name,
+        cal: est.cal,
+        p: est.p,
+        c: est.c,
+        f: est.f,
+        tag: est.tag,
+        time: est.time ?? clientTime(),
+      });
+      setStep("review");
+    } catch (e) {
+      setScanMissMsg(
+        e instanceof Error
+          ? `Couldn't read that photo (${e.message}). Try a clearer shot, or describe it below.`
+          : "Couldn't read that photo. Try a clearer shot, or describe it below.",
+      );
+    } finally {
+      setPhotoBusy(false);
+      // Reset the input so picking the same file twice still fires onChange.
+      if (photoInputRef.current) photoInputRef.current.value = "";
     }
   };
 
@@ -212,6 +249,62 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
               </div>
               <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO, marginTop: 2 }}>
                 exact per-serving macros from the label
+              </div>
+            </div>
+          </button>
+
+          {/* Hidden file input — the Photo of label button below triggers it. */}
+          <input
+            ref={photoInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            onChange={(e) => handleLabelPhotoPicked(e.target.files?.[0] ?? null)}
+            style={{ display: "none" }}
+          />
+          <button
+            onClick={() => photoInputRef.current?.click()}
+            disabled={photoBusy}
+            style={{
+              width: "100%",
+              background: C.primaryDim,
+              border: `1px solid ${C.primary}55`,
+              borderRadius: 14,
+              padding: 14,
+              marginBottom: 10,
+              textAlign: "left",
+              cursor: photoBusy ? "default" : "pointer",
+              fontFamily: FONT,
+              color: C.t,
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+            }}
+          >
+            <div
+              style={{
+                width: 38,
+                height: 38,
+                borderRadius: 10,
+                background: C.primary,
+                color: "#0a0a0a",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                <circle cx="12" cy="13" r="4" />
+              </svg>
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>
+                {photoBusy ? "Reading label…" : "Photo of label"}
+              </div>
+              <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO, marginTop: 2 }}>
+                snap the nutrition panel or product name
               </div>
             </div>
           </button>
@@ -378,9 +471,16 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
       {step === "review" && estimate && edited && (
         <>
           <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginTop: 6, marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-            <span>{estimate.source === "barcode" ? "Scanned product" : "Nutrition coach estimate"}</span>
+            <span>{
+              estimate.source === "barcode"
+                ? "Scanned product"
+                : estimate.source === "label_photo"
+                ? "Photo of label"
+                : "Nutrition coach estimate"
+            }</span>
             <span style={{ display: "flex", gap: 6, alignItems: "center" }}>
               {estimate.source === "barcode" && <Chip C={C} color={C.primary}>Scanned ✓</Chip>}
+              {estimate.source === "label_photo" && <Chip C={C} color={C.primary}>Photo ✓</Chip>}
               <Chip C={C} color={confidenceColor(C, estimate.confidence)}>
                 {estimate.confidence}
               </Chip>

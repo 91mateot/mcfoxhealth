@@ -105,6 +105,32 @@ def test_llm_source_fires_validator_and_omits_validated_stamp(monkeypatch):
     assert call["InvocationType"] == "Event"
 
 
+def test_label_photo_source_stamps_validated_and_skips_validator(monkeypatch):
+    ns = _load_module(monkeypatch)
+    invoke_calls: list = []
+    put_calls: list = []
+    _wire_fakes(monkeypatch, ns, invoke_calls, put_calls)
+
+    result = ns.save_meal({
+        "name": "Clif Bar — Chocolate Chip",
+        "cal": 250, "p": 10, "c": 44, "f": 5,
+        "tag": "snack",
+        "source": "label_photo",
+    }, date="2026-04-28")
+
+    meal_rows = [p for p in put_calls if p.get("meal_id", "").startswith("meal_")]
+    assert len(meal_rows) == 1
+    row = meal_rows[0]
+    assert row["source"] == "label_photo"
+    # Label-photo rows are pre-validated against the actual nutrition panel.
+    assert row["validated_source"] == "bedrock_vision"
+    assert row["validated_at"], "expected validated_at stamp"
+
+    # Validator Lambda must NOT have been invoked — the panel read is the audit.
+    assert invoke_calls == [], f"validator should be skipped; got {invoke_calls}"
+    assert result["meal"]["source"] == "label_photo"
+
+
 def test_known_foods_source_fires_validator(monkeypatch):
     """known_foods rows are fast-path matches — the validator still runs to
     cross-check against USDA / LLM audit. Behavior is same as llm source."""

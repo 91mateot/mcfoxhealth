@@ -193,20 +193,36 @@ def _post_meal(event):
     return _resp(200, save_meal(body))
 
 
+_MAX_IMAGE_B64_BYTES = 1_500_000  # ~1.1 MB raw JPEG after base64
+_ALLOWED_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+
+
 def _post_meal_estimate(event):
     body = _parse_body(event)
     if not body:
         return _resp(400, {"error": "invalid JSON body"})
 
     text = (body.get("text") or "").strip()
-    if not text:
-        return _resp(400, {"error": "text is required"})
+    img = body.get("image") or {}
+    image_b64 = str(img.get("data") or "") if isinstance(img, dict) else ""
+    media_type = str(img.get("media_type") or "image/jpeg") if isinstance(img, dict) else "image/jpeg"
+
+    if not text and not image_b64:
+        return _resp(400, {"error": "text or image is required"})
+
+    if image_b64:
+        if len(image_b64) > _MAX_IMAGE_B64_BYTES:
+            return _resp(413, {"error": "image too large; compress client-side"})
+        if media_type not in _ALLOWED_IMAGE_MEDIA_TYPES:
+            return _resp(400, {"error": f"unsupported media_type {media_type}"})
 
     try:
         estimate = estimate_meal(
             text,
             body.get("known_hint", ""),
-            skip_known_foods=bool(body.get("skip_known_foods")),
+            skip_known_foods=bool(body.get("skip_known_foods")) or bool(image_b64),
+            image_b64=image_b64 or None,
+            media_type=media_type if image_b64 else None,
         )
     except Exception as e:
         return _resp(502, {"error": f"estimator error: {str(e)}"})

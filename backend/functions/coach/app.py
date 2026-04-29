@@ -258,15 +258,71 @@ def _execute_tool(name: str, args: dict) -> dict:
         return {"error": str(e)}
 
 
+_MAX_IMAGES_PER_TURN = 5
+_MAX_IMAGE_B64_BYTES = 1_500_000  # ~1.1 MB raw after base64 → fits the 1 MB stream budget when combined
+_ALLOWED_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+
+
 def _to_bedrock_messages(messages: list) -> list:
-    """Convert the frontend ChatMessage list to Bedrock's content-block format."""
-    out = []
-    for m in messages:
+    """Convert the frontend ChatMessage list to Bedrock's content-block format.
+
+    Handles image blocks on user turns. Images from historical user turns are
+    stripped — only the *latest* user turn keeps its images — so repeated
+    Bedrock calls in the tool loop don't re-upload the same bytes each round,
+    and so earlier photos don't balloon the payload past the 1 MB streaming
+    limit over a long conversation.
+    """
+    out: list = []
+
+    # Identify the index of the latest user turn in the *input* list so we
+    # know which message gets to keep its images.
+    latest_user_idx = -1
+    for i, m in enumerate(messages):
+        if m.get("from") == "me":
+            latest_user_idx = i
+
+    for i, m in enumerate(messages):
         role = "user" if m.get("from") == "me" else "assistant"
-        text = m.get("text", "")
-        if not text:
+        text = (m.get("text") or "").strip()
+        raw_images = m.get("images") if role == "user" and i == latest_user_idx else []
+        if not isinstance(raw_images, list):
+            raw_images = []
+
+        content: list = []
+        kept = 0
+        for img in raw_images:
+            if kept >= _MAX_IMAGES_PER_TURN:
+                break
+            if not isinstance(img, dict):
+                continue
+            data = img.get("base64")
+            media_type = img.get("mediaType") or img.get("media_type")
+            if not data or not media_type:
+                continue
+            if media_type not in _ALLOWED_IMAGE_MEDIA_TYPES:
+                logger.warning("rejected image with media_type=%s", media_type)
+                continue
+            if len(data) > _MAX_IMAGE_B64_BYTES:
+                logger.warning("rejected oversized image (%d bytes base64)", len(data))
+                continue
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                },
+            })
+            kept += 1
+
+        if text:
+            content.append({"type": "text", "text": text})
+
+        # Skip entirely if the turn ended up empty (no text, no valid images).
+        if not content:
             continue
-        out.append({"role": role, "content": [{"type": "text", "text": text}]})
+        out.append({"role": role, "content": content})
+
     return out
 
 

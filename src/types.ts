@@ -101,10 +101,10 @@ export interface Meal {
   waterOz?: number;
   caffeineMg?: number;
   validatedAt?: string;
-  validatedSource?: "usda" | "llm_audit" | "openfoodfacts" | "none";
+  validatedSource?: "usda" | "llm_audit" | "openfoodfacts" | "bedrock_vision" | "none";
 }
 
-export type MealSource = "known_foods" | "llm" | "barcode";
+export type MealSource = "known_foods" | "llm" | "barcode" | "label_photo";
 
 export interface NutritionTargets {
   cal: number;
@@ -129,10 +129,22 @@ export interface CoachInsight {
   icon: string;
 }
 
+export interface ChatImage {
+  /** data:image/jpeg;base64,... — kept locally for <img src> thumbnails.
+   *  Stripped before sending to the coach Function URL. */
+  dataUrl: string;
+  /** Raw base64 body (no data: prefix) sent to Bedrock. */
+  base64: string;
+  mediaType: "image/jpeg" | "image/png" | "image/webp" | "image/gif";
+  bytes: number;
+}
+
 export interface ChatMessage {
   from: "coach" | "me";
   t: string;
   text: string;
+  /** Attached images — only user messages carry these. */
+  images?: ChatImage[];
 }
 
 export interface RecoveryComponents {
