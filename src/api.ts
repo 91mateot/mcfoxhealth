@@ -21,9 +21,12 @@ export const API_BASE =
 
 // Coach lives on a separate Lambda Function URL (RESPONSE_STREAM mode) so it
 // can stream; API Gateway HTTP API buffers. Falls back to the API Gateway
-// host for local dev before the Function URL is wired.
+// host for local dev before the Function URL is wired. We treat empty strings
+// as unset — a blank Vercel env var would otherwise win over the fallback and
+// send chat traffic to the page origin (404).
 export const COACH_URL =
-  import.meta.env.VITE_COACH_URL ?? `${API_BASE}/api/coach`;
+  (import.meta.env.VITE_COACH_URL as string | undefined)?.trim()
+    || `${API_BASE}/api/coach`;
 
 async function fetcher<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`);
