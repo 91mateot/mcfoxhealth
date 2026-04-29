@@ -381,7 +381,7 @@ Resources:
             TableName: !Ref WorkoutsTable
         - DynamoDBCrudPolicy:
             TableName: !Ref ExercisesTable
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: !Ref DailyScoresTable
         - Statement:
             - Effect: Allow
@@ -510,7 +510,7 @@ Resources:
             TableName: !Ref WorkoutsTable
         - DynamoDBCrudPolicy:
             TableName: !Ref ExercisesTable
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: !Ref DailyScoresTable
         - DynamoDBReadPolicy:
             TableName: !Ref HealthMetricsTable

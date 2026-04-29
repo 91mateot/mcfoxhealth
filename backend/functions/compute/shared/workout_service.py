@@ -21,7 +21,7 @@ from typing import Optional
 import boto3
 
 from shared.db import get_table, put_item, get_item, query_items
-from shared.lift_compute import recompute_prs_for_canonicals
+from shared.lift_compute import recompute_prs_for_canonicals, recompute_weekly_volume
 from shared.timezone import local_now, local_today_str
 
 logger = logging.getLogger("workout_service")
@@ -754,6 +754,14 @@ def annotate_workout(
             recompute_prs_for_canonicals(affected_canonicals)
         except Exception:
             logger.exception("inline PR recompute failed for %s", affected_canonicals)
+
+    # Refresh the weekly per-muscle-group volume roll-up so the Progress
+    # Strength section reflects this session immediately, without waiting
+    # for the 2am PT daily cron.
+    try:
+        recompute_weekly_volume()
+    except Exception:
+        logger.exception("inline weekly volume recompute failed")
 
     # Generate coach feedback against the freshly-written row + history.
     # Reload from the same dict so history reads already include this session.

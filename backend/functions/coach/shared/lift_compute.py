@@ -106,6 +106,57 @@ def detect_stall(history: list, min_sessions: int = 3) -> Optional[dict]:
     }
 
 
+def recompute_weekly_volume(now=None) -> dict:
+    """Roll up per-muscle-group working volume for the current week (Monday
+    through Sunday, user-local time) and write as a single row in
+    DAILY_SCORES_TABLE keyed `week_<YYYY-MM-DD>`.
+
+    Called by both:
+      - compute_lifts (daily 2am PT) — batch refresh for all users' exercises
+      - annotate_workout — inline after an annotation so the Progress tab's
+        Strength section reflects the new workout immediately (without
+        waiting for the overnight cron).
+
+    This is a full rescan of ExercisesTable, not an incremental update — the
+    table is small (hundreds of rows at most at current usage) and idempotent
+    rewrites are simpler than maintaining a running counter on every put.
+    """
+    exercises_table = get_table("EXERCISES_TABLE")
+    scores_table = get_table("DAILY_SCORES_TABLE")
+    now = now or local_now()
+    week_start = now - timedelta(days=now.weekday())  # Monday
+    week_start_str = week_start.strftime("%Y-%m-%d")
+    week_end_str = (week_start + timedelta(days=6)).strftime("%Y-%m-%d")
+
+    try:
+        resp = exercises_table.scan(Limit=2000)
+        all_rows = resp.get("Items", [])
+    except Exception:
+        return {"status": "scan_failed"}
+
+    volume_by_mg: dict = {}
+    sessions_by_mg: dict = {}
+    for row in all_rows:
+        d = row.get("date", "")
+        if not (week_start_str <= d <= week_end_str):
+            continue
+        mg = row.get("muscle_group", "other")
+        vol = float(row.get("working_volume") or 0)
+        volume_by_mg[mg] = volume_by_mg.get(mg, 0) + vol
+        sessions_by_mg.setdefault(mg, set()).add(d)
+
+    volume_row = {
+        "date": f"week_{week_start_str}",
+        "week_start": week_start_str,
+        "week_end": week_end_str,
+        "volume_by_muscle_group": {k: round(v, 1) for k, v in volume_by_mg.items()},
+        "sessions_by_muscle_group": {k: len(v) for k, v in sessions_by_mg.items()},
+        "computed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    put_item(scores_table, volume_row)
+    return volume_row
+
+
 def recompute_prs_for_canonicals(canonicals: list) -> dict:
     """For each canonical, re-scan its full history and rewrite each
     session row with refreshed e1rm + pr flags. Idempotent. Returns

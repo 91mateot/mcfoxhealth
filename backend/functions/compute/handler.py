@@ -18,6 +18,7 @@ from shared.lift_compute import (
     detect_stall as _detect_stall_shared,
     epley_e1rm as _epley_e1rm_shared,
     recompute_prs_for_canonicals,
+    recompute_weekly_volume,
     scan_exercise_history as _scan_history_shared,
     session_top_e1rm as _session_top_e1rm_shared,
 )
@@ -539,39 +540,17 @@ def _compute_lifts():
         "computed_at": datetime.now(timezone.utc).isoformat(),
     })
 
-    # Weekly volume per muscle group (Monday-based week).
-    today_local = local_now()
-    week_start = today_local - timedelta(days=today_local.weekday())  # Monday
-    week_start_str = week_start.strftime("%Y-%m-%d")
-    week_end_str = (week_start + timedelta(days=6)).strftime("%Y-%m-%d")
-
-    volume_by_mg: dict = {}
-    sessions_by_mg: dict = {}
-    for row in all_rows:
-        d = row.get("date", "")
-        if not (week_start_str <= d <= week_end_str):
-            continue
-        mg = row.get("muscle_group", "other")
-        vol = float(row.get("working_volume") or 0)
-        volume_by_mg[mg] = volume_by_mg.get(mg, 0) + vol
-        sessions_by_mg.setdefault(mg, set()).add(d)
-
-    volume_row = {
-        "date": f"week_{week_start_str}",
-        "week_start": week_start_str,
-        "week_end": week_end_str,
-        "volume_by_muscle_group": {k: round(v, 1) for k, v in volume_by_mg.items()},
-        "sessions_by_muscle_group": {k: len(v) for k, v in sessions_by_mg.items()},
-        "computed_at": datetime.now(timezone.utc).isoformat(),
-    }
-    put_item(scores_table, volume_row)
+    # Weekly per-muscle-group volume — delegated to the shared helper so
+    # annotate_workout can call the same function inline and keep Progress
+    # Strength fresh without waiting for tomorrow's cron.
+    volume_row = recompute_weekly_volume()
 
     return {
         "status": "lifts_computed",
         "exercises_touched": len(all_canonicals),
         "prs_tagged": pr_count,
         "stalls": len(stalls),
-        "volume_by_muscle_group": volume_row["volume_by_muscle_group"],
+        "volume_by_muscle_group": volume_row.get("volume_by_muscle_group", {}),
     }
 
 
