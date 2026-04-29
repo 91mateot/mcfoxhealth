@@ -14,6 +14,7 @@ import { Panel } from "../components/Panel";
 import { Chip } from "../components/Chip";
 import { BarRow } from "../components/BarRow";
 import { Sparkline } from "../components/Sparkline";
+import { WeightChart } from "../components/WeightChart";
 import { Stat } from "../components/Stat";
 import { SectionHead } from "../components/SectionHead";
 
@@ -71,7 +72,7 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
             <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO }}>goal &lt;12%</div>
           </div>
         </div>
-        {weight14d.length > 0 && <Sparkline data={weight14d} color={C.cyan} h={52} />}
+        {weight14d.length > 0 && <WeightChart C={C} data={weight14d} color={C.cyan} h={62} />}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6, marginTop: 10 }}>
           <Stat C={C} label="Muscle" value={leanMass} unit="lbs" valueC={C.primary} sub="lean mass" />
           <Stat C={C} label="Height" value={MATEO.height} sub="173 cm" />
