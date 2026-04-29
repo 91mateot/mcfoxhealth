@@ -27,8 +27,6 @@ interface TodayScreenProps {
 export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMeal, onLogWorkout, onOpenJournal }: TodayScreenProps) {
   const [hydrationOpen, setHydrationOpen] = useState(false);
   const need = data.sleepNeedTonight;
-  const needH = Math.floor(need.totalMin / 60);
-  const needM = need.totalMin % 60;
   const zone = data.recoveryZone ?? (data.recovery >= 67 ? "green" : data.recovery >= 34 ? "yellow" : "red");
   const zoneColor = zone === "green" ? C.primary : zone === "yellow" ? C.yellow : C.danger;
   const zoneLabel = zone === "green" ? "Recovered" : zone === "yellow" ? "Moderate" : "Depleted";
@@ -155,19 +153,7 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
             </div>
           </div>
           <div style={{ width: 1, height: 38, background: C.border, flexShrink: 0 }} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, whiteSpace: "nowrap" }}>
-              Sleep tonight
-            </div>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 3 }}>
-              <div style={{ fontSize: 20, fontWeight: 800, fontFamily: MONO, color: C.cyan, letterSpacing: "-.04em" }}>
-                {needH}h {needM < 10 ? "0" : ""}{needM}m
-              </div>
-            </div>
-            <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              bed by {need.bedtimeBy}
-            </div>
-          </div>
+          <StrainSoFar C={C} current={data.strain} low={data.strainTarget.low} high={data.strainTarget.high} />
         </div>
       </Panel>
 
@@ -399,6 +385,38 @@ function FreshnessIndicator({ C, updatedAt }: { C: Palette; updatedAt: string | 
 }
 
 // Strain hero ring with target band overlay
+function StrainSoFar({ C, current, low, high }: { C: Palette; current: number; low: number; high: number }) {
+  // Progress within the target band. Above the band we're "over",
+  // below we're "to go", inside we're "on pace".
+  const status: "under" | "in" | "over" = current < low ? "under" : current > high ? "over" : "in";
+  const color = status === "in" ? C.primary : status === "over" ? C.danger : C.warn;
+  const subline =
+    status === "in"
+      ? "on pace"
+      : status === "over"
+      ? `over ${high} target`
+      : `${Math.max(0, +(low - current).toFixed(1))} to target`;
+
+  return (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, whiteSpace: "nowrap" }}>
+        Strain so far
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 3, whiteSpace: "nowrap" }}>
+        <div style={{ fontSize: 20, fontWeight: 800, fontFamily: MONO, color, letterSpacing: "-.04em" }}>
+          {current.toFixed(1)}
+        </div>
+        <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO }}>
+          of {low}–{high}
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+        {subline}
+      </div>
+    </div>
+  );
+}
+
 function StrainRing({ C, data, onClick }: { C: Palette; data: TodayResponse; onClick: () => void }) {
   const max = 21;
   const val = data.strain;
