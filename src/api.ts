@@ -282,6 +282,22 @@ export async function submitJournal(journal: Partial<JournalToday> & { tags: str
   return result;
 }
 
+export async function logWorkout(text: string, date?: string) {
+  const result = await post<{
+    workout_id: string;
+    title: string;
+    type: string;
+    duration_min: number;
+    intensity: string;
+    cal: number;
+    strain: number;
+  }>("/api/workout", { text, date });
+  mutate("/api/workouts");
+  mutate("/api/today");
+  mutate("/api/progress");
+  return result;
+}
+
 export async function annotateWorkout(date: string, workoutId: string, text: string) {
   const result = await post<{
     ok: boolean;

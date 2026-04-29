@@ -151,3 +151,89 @@ def test_known_foods_source_fires_validator(monkeypatch):
     assert row["source"] == "known_foods"
     assert "validated_source" not in row
     assert len(invoke_calls) == 1
+
+
+# ── _fetch_usda_nutrients: serving-size correctness ────────────────────────
+
+
+def _patch_usda_response(monkeypatch, ns, payload):
+    """Stub urllib.request.urlopen to return `payload` as a USDA JSON body."""
+    import io
+    import json
+
+    class FakeResp:
+        status = 200
+        def __init__(self, body): self._body = body
+        def read(self): return self._body
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+
+    def fake_urlopen(req, timeout=None):
+        return FakeResp(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(ns.urllib.request, "urlopen", fake_urlopen)
+
+
+def test_usda_returns_label_nutrients_per_serving(monkeypatch):
+    """Branded foods with labelNutrients (per-serving panel values) should be
+    returned directly — these match what's on the nutrition label."""
+    ns = _load_module(monkeypatch)
+    _patch_usda_response(monkeypatch, ns, {
+        "foods": [{
+            "description": "KIRKLAND SIGNATURE, PROTEIN BAR",
+            "score": 900.0,
+            "labelNutrients": {
+                "calories": {"value": 190},
+                "protein": {"value": 21},
+                "carbohydrates": {"value": 22},
+                "fat": {"value": 7},
+            },
+            # foodNutrients is per-100g for branded foods too — must be ignored.
+            "foodNutrients": [
+                {"nutrientName": "Energy", "value": 380},
+                {"nutrientName": "Protein", "value": 42},
+                {"nutrientName": "Carbohydrate, by difference", "value": 44},
+                {"nutrientName": "Total lipid (fat)", "value": 14},
+            ],
+        }],
+    })
+    result = ns._fetch_usda_nutrients("kirkland protein bar", "fake-key")
+    assert result is not None
+    assert result["cal"] == 190
+    assert result["p"] == 21
+    assert result["c"] == 22
+    assert result["f"] == 7
+
+
+def test_usda_skips_foods_without_label_nutrients(monkeypatch):
+    """SR Legacy / Foundation / FNDDS entries report per-100g only and lack
+    labelNutrients. Returning those values as a meal total corrupts the row,
+    so the validator must skip them entirely."""
+    ns = _load_module(monkeypatch)
+    _patch_usda_response(monkeypatch, ns, {
+        "foods": [{
+            "description": "Chicken, broilers or fryers, breast, cooked, roasted",
+            "score": 900.0,
+            # No labelNutrients (typical for SR Legacy / Foundation / FNDDS).
+            "foodNutrients": [
+                {"nutrientName": "Energy", "value": 165},
+                {"nutrientName": "Protein", "value": 31},
+                {"nutrientName": "Carbohydrate, by difference", "value": 0},
+                {"nutrientName": "Total lipid (fat)", "value": 3.6},
+            ],
+        }],
+    })
+    assert ns._fetch_usda_nutrients("chicken breast", "fake-key") is None
+
+
+def test_usda_skips_low_score_matches(monkeypatch):
+    """Below _USDA_MIN_SCORE the match is too weak to trust — skip."""
+    ns = _load_module(monkeypatch)
+    _patch_usda_response(monkeypatch, ns, {
+        "foods": [{
+            "description": "Some loosely-matched food",
+            "score": 100.0,
+            "labelNutrients": {"calories": {"value": 100}},
+        }],
+    })
+    assert ns._fetch_usda_nutrients("something", "fake-key") is None

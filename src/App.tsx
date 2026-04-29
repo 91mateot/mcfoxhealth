@@ -13,7 +13,7 @@ import { JournalSheet } from "./modals/Journal";
 import { MealDetailModal } from "./modals/MealDetail";
 import { WorkoutDetailModal } from "./modals/WorkoutDetail";
 import type { Meal, Workout } from "./types";
-import { useToday, useWorkouts, useProgress, useNutrition, logMeal, submitJournal, todayISO } from "./api";
+import { useToday, useWorkouts, useProgress, useNutrition, logMeal, logWorkout, submitJournal, todayISO } from "./api";
 
 type TabId = "today" | "train" | "fuel" | "progress";
 
@@ -151,7 +151,20 @@ export default function App() {
           }
         }}
       />
-      <LogWorkoutModal C={C} open={workoutOpen} onClose={() => setWorkoutOpen(false)} onAdd={() => {}} />
+      <LogWorkoutModal
+        C={C}
+        open={workoutOpen}
+        onClose={() => setWorkoutOpen(false)}
+        onAdd={async ({ type, notes }) => {
+          const text = [type, notes].filter((s) => s && s.trim()).join(" — ");
+          if (!text) return;
+          try {
+            await logWorkout(text);
+          } catch (err) {
+            console.error("logWorkout failed", err);
+          }
+        }}
+      />
       <ChatModal C={C} open={chatOpen} onClose={() => setChatOpen(false)} initialPrompt={chatPrefill} today={today.data} />
       <JournalSheet
         C={C}

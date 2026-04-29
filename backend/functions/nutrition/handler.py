@@ -7,6 +7,7 @@ Nutrition Lambda — meal logging, water tracking, journal, and calibration.
   POST   /api/meal/estimate              — Estimate macros from free-form text (no save)
   POST   /api/water                      — Log water intake
   POST   /api/journal                    — Submit morning journal check-in
+  POST   /api/workout                    — Log a manual workout (free-form text)
   GET    /api/favorites                  — List saved quick-add favorites
   POST   /api/favorites                  — Save a meal as a favorite
   DELETE /api/favorites/{id}             — Remove a favorite
@@ -28,6 +29,7 @@ from shared.nutrition_service import (
     save_meal,
     log_water as svc_log_water,
     log_journal as svc_log_journal,
+    log_workout as svc_log_workout,
     delete_water as svc_delete_water,
     validate_meal as svc_validate_meal,
     sanitize_ingredients,
@@ -88,6 +90,8 @@ def lambda_handler(event, context):
             return _delete_water(params["date"], params["water_id"])
     if path == "/api/journal":
         return _post_journal(event)
+    if path == "/api/workout":
+        return _post_workout(event)
     if path.startswith("/api/workout/") and path.endswith("/annotate"):
         parts = path.split("/")
         # /api/workout/{date}/{workout_id}/annotate
@@ -416,6 +420,24 @@ def _post_journal(event):
         soreness=body.get("soreness"),
         date=body.get("date"),
     )
+    return _resp(200, result)
+
+
+def _post_workout(event):
+    """Log a manually-entered workout. Body: {text: str, date?: "YYYY-MM-DD"}."""
+    body = _parse_body(event)
+    if not body:
+        return _resp(400, {"error": "invalid JSON body"})
+    text = (body.get("text") or "").strip()
+    if not text:
+        return _resp(400, {"error": "text is required"})
+    date = body.get("date")
+    try:
+        result = svc_log_workout(text, date=date)
+    except ValueError as e:
+        return _resp(400, {"error": str(e)})
+    except Exception as e:
+        return _resp(502, {"error": f"workout estimator failed: {e}"})
     return _resp(200, result)
 
 

@@ -461,6 +461,12 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/journal
             Method: POST
+        PostWorkout:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/workout
+            Method: POST
         PostWorkoutAnnotate:
           Type: HttpApi
           Properties:
