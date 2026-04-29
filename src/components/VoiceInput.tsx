@@ -42,6 +42,19 @@ export function VoiceInput({ C, value, onChange, placeholder, minHeight = 72, on
     setSupported(Boolean(SR));
   }, []);
 
+  // Stop in-flight recognition and clear the level-meter interval on unmount.
+  useEffect(() => {
+    return () => {
+      if (recRef.current) {
+        try { recRef.current.stop(); } catch {}
+      }
+      if (intervalRef.current != null) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, []);
+
   const stop = () => {
     if (recRef.current) {
       try {
@@ -215,12 +228,26 @@ export function MicButton({ C, onTranscript, onAutosend }: MicButtonProps) {
   const recRef = useRef<SpeechRecognitionInstance | null>(null);
   const textRef = useRef("");
 
+  // Stop any in-flight recognition when the component unmounts (e.g. chat
+  // sheet closed mid-dictation). Without this the mic keeps listening until
+  // the user taps it again, because the browser never returns permission.
+  useEffect(() => {
+    return () => {
+      if (recRef.current) {
+        try { recRef.current.stop(); } catch {}
+      }
+    };
+  }, []);
+
   const start = () => {
     const SR = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     textRef.current = "";
     if (SR) {
       const rec = new SR();
-      rec.continuous = true;
+      // Non-continuous: the browser ends recognition on silence, which fires
+      // onend → onAutosend. Matches Wispr / iOS Dictation UX: speak, pause,
+      // message sends itself.
+      rec.continuous = false;
       rec.interimResults = true;
       rec.lang = "en-US";
       rec.onresult = (e: any) => {
@@ -228,6 +255,9 @@ export function MicButton({ C, onTranscript, onAutosend }: MicButtonProps) {
         for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
         textRef.current = t;
         onTranscript(t);
+      };
+      rec.onerror = () => {
+        setListening(false);
       };
       rec.onend = () => {
         setListening(false);
