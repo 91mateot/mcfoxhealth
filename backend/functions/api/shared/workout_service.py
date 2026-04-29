@@ -384,10 +384,45 @@ def _sanitize_cardio(c: dict) -> Optional[dict]:
 # ── Storage ───────────────────────────────────────────────────────────────
 
 
-def _find_or_create_workout(date: str) -> dict:
-    """Return the first workout row for `date`. If none exists, create a
-    manual shell row so annotation has somewhere to land."""
+def _find_or_create_workout(date: str, workout_id: Optional[str] = None) -> dict:
+    """Return the workout row for `date`.
+
+    If `workout_id` is given, fetch that specific row by PK+SK. This is
+    critical for days that have multiple workouts (e.g. Strava sync creates
+    a Morning Workout + a Lunch Walk) — otherwise the caller's intent (they
+    tapped a specific row in the UI) gets dropped and the annotation lands
+    on whichever row happens to be most-recently-logged, which is rarely
+    what the user meant.
+
+    If `workout_id` is not given, fall back to the most recently logged row
+    for the date (this matches the coach-chat path where the user says
+    "annotate my Monday workout" without specifying which of two sessions).
+
+    If no row exists at all, create a manual shell so annotation has
+    somewhere to land."""
     table = get_table("WORKOUTS_TABLE")
+    if workout_id:
+        existing = get_item(table, {"date": date, "strava_id": workout_id})
+        if existing:
+            return existing
+        # Workout_id was supplied but not found. Don't silently fall back to
+        # another row — that's the bug we're fixing. Create a new manual row
+        # with the supplied id so the annotation is addressable.
+        shell = {
+            "date": date,
+            "strava_id": workout_id,
+            "title": "Workout",
+            "type": "other",
+            "dur": 0,
+            "cal": 0,
+            "strain": 0,
+            "source": "manual",
+            "logged_at": datetime.now(timezone.utc).isoformat(),
+            "ingested_at": datetime.now(timezone.utc).isoformat(),
+        }
+        put_item(table, shell)
+        return shell
+
     rows = query_items(table, "date", date) or []
     if rows:
         # Prefer the most recently logged row (by logged_at/ingested_at desc).
@@ -642,9 +677,18 @@ def summarize_workout(date: str, workout_id: Optional[str] = None) -> dict:
 # ── Public entry point ────────────────────────────────────────────────────
 
 
-def annotate_workout(text: str, date: Optional[str] = None) -> dict:
+def annotate_workout(
+    text: str,
+    date: Optional[str] = None,
+    workout_id: Optional[str] = None,
+) -> dict:
     """Parse free-form lift notes and attach structured data to the workout
-    row for `date`. Also mirrors each exercise to ExercisesTable."""
+    row for `date`. Also mirrors each exercise to ExercisesTable.
+
+    When `workout_id` is supplied (HTTP path param from the UI), the
+    annotation targets that exact row — important for days with multiple
+    Strava sessions. When omitted (coach-chat path), falls back to the
+    most recent row for the date."""
     text = (text or "").strip()
     if not text:
         raise ValueError("text is required")
@@ -678,7 +722,7 @@ def annotate_workout(text: str, date: Optional[str] = None) -> dict:
                 suggested_tags.append(t.strip().lower()[:30])
 
     # Update the workout row (replace, not append — annotation is the record).
-    workout = _find_or_create_workout(date)
+    workout = _find_or_create_workout(date, workout_id=workout_id)
     workouts_table = get_table("WORKOUTS_TABLE")
     merged = {
         **workout,

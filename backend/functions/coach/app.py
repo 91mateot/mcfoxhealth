@@ -220,6 +220,10 @@ TOOLS = [
                     "type": "string",
                     "description": "Date YYYY-MM-DD. Defaults to today. Set if Mateo says 'yesterday's workout' or gives a specific date.",
                 },
+                "workout_id": {
+                    "type": "string",
+                    "description": "Optional. Target a specific workout row when the date has multiple sessions (e.g. Mateo did a Morning Workout AND a Lunch Walk). Use get_recent_meals first to find workout_ids — workout rows come back with kind='workout' and a workout_id field. If omitted, annotation lands on the most recent workout for the date.",
+                },
             },
             "required": ["text"],
         },
@@ -251,7 +255,11 @@ def _execute_tool(name: str, args: dict) -> dict:
         if name == "delete_workout":
             return svc_delete_workout(args.get("workout_id", ""))
         if name == "annotate_workout":
-            return svc_annotate_workout(args.get("text", ""), args.get("date"))
+            return svc_annotate_workout(
+                args.get("text", ""),
+                date=args.get("date"),
+                workout_id=args.get("workout_id"),
+            )
         return {"error": f"unknown tool {name}"}
     except Exception as e:
         logger.exception("tool %s failed", name)

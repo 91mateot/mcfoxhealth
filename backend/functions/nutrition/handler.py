@@ -432,11 +432,10 @@ def _post_workout_feedback(date_str: str, workout_id: str):
 
 
 def _post_workout_annotate(date_str: str, workout_id: str, event):
-    """Parse free-form lift notes and attach them to the workout row for date_str.
-
-    The workout_id in the path is informational — annotate_workout finds the
-    workout for the date on its own. We pass it so a future version can target
-    a specific row when multiple sessions exist per day."""
+    """Parse free-form lift notes and attach them to the workout row for
+    date_str + workout_id. The workout_id pins the exact row — necessary
+    when a date has multiple Strava sessions (Morning Workout + Lunch Walk)
+    and the user tapped a specific one."""
     body = _parse_body(event)
     if not body:
         return _resp(400, {"error": "invalid JSON body"})
@@ -444,7 +443,7 @@ def _post_workout_annotate(date_str: str, workout_id: str, event):
     if not text:
         return _resp(400, {"error": "text is required"})
     try:
-        result = svc_annotate_workout(text, date=date_str)
+        result = svc_annotate_workout(text, date=date_str, workout_id=workout_id)
     except ValueError as e:
         return _resp(400, {"error": str(e)})
     except Exception as e:
