@@ -243,12 +243,20 @@ export interface ActivationBlock {
   exercises: ActivationExercise[];
 }
 
+export interface FocusLift {
+  name: string;
+  canonical: string;
+  muscleGroup: string;
+  tag: "stalled" | "volume behind" | "anchor" | string;
+}
+
 export interface PlannedMain {
   type: WorkoutType;
   durationMin: number;
   intensity: WorkoutIntensity;
   reason: string;
   focusMuscleGroups?: string[];
+  focusLifts?: FocusLift[];
 }
 
 export interface PlannedWorkout {

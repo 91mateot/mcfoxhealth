@@ -94,6 +94,59 @@ export function PlannedWorkoutCard({ C, planned, onSwap }: Props) {
         </div>
       )}
 
+      {!matched && main.focusLifts && main.focusLifts.length > 0 && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 6 }}>
+            Focus lifts
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {main.focusLifts.map((fl, i) => {
+              const tagColor = fl.tag === "stalled" ? C.warn : fl.tag === "volume behind" ? C.cyan : C.t3;
+              return (
+                <div
+                  key={i}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "6px 10px",
+                    background: C.s2,
+                    border: `1px solid ${C.border}`,
+                    borderRadius: 10,
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: C.t, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {fl.name}
+                    </div>
+                    <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 1 }}>
+                      {fl.muscleGroup}
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: tagColor,
+                      background: tagColor + "15",
+                      border: `1px solid ${tagColor}30`,
+                      padding: "3px 7px",
+                      borderRadius: 10,
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                      letterSpacing: ".04em",
+                      whiteSpace: "nowrap",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {fl.tag}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {!matched && activation && (
         <div
           style={{

@@ -6,9 +6,9 @@ program phase. Runs in the morning compute job and on-demand from the
 coach / Refresh button.
 
 Design:
-  - Intention-level only (type, duration, intensity, reason). No
-    prescribed sets/reps for the main workout — those come through
-    annotate_workout after the session.
+  - Intention-level for the main — type, duration, intensity, plus a
+    short list of focus lifts (2-3) to point him in a direction without
+    prescribing sets/reps. Actual lifts go through annotate_workout.
   - Activation circuit is prescribed (from the PDF protocol), so the
     exercise list IS returned.
   - Adaptive cadence: no hard weekly template. Reads last 28 days to
@@ -131,6 +131,7 @@ def propose_for_date(date_str: str) -> dict:
     workouts_table = get_table("WORKOUTS_TABLE")
     journal_table = get_table("JOURNAL_TABLE")
     config_table = get_table("USER_CONFIG_TABLE")
+    exercises_table = get_table("EXERCISES_TABLE")
 
     scores = get_item(scores_table, {"date": date_str}) or {}
     recovery_zone = scores.get("recovery_zone", "yellow")
@@ -162,6 +163,7 @@ def propose_for_date(date_str: str) -> dict:
                 "intensity": "light",
                 "reason": ". ".join(reason_parts) or "Easy day.",
                 "focusMuscleGroups": ["glute_med", "adductors", "core"],
+                "focusLifts": [],
             },
             "activation": _LATERAL_CHAIN_CIRCUITS[phase]["home"],
             "reason": "Easy day. Home bands + short walk.",
@@ -173,6 +175,13 @@ def propose_for_date(date_str: str) -> dict:
 
     preferred_type = _detect_preferred_type(recent_workouts, target_dt)
     main = _build_main(preferred_type, recovery_zone, recent_workouts)
+    main["focusLifts"] = _pick_focus_lifts(
+        workout_type=preferred_type,
+        scores_table=scores_table,
+        config_table=config_table,
+        exercises_table=exercises_table,
+        target_dt=target_dt,
+    )
     main_type = main["type"]
 
     if main_type in _GYM_TYPES:
@@ -362,6 +371,147 @@ def _count_in_window(workouts: list[dict], days: int, type: str) -> int:
         if w.get("date", "") >= cutoff and _normalize_type(w.get("type", "")) == type:
             count += 1
     return count
+
+
+# Workout type → which muscle groups the focus-lifts should come from.
+_TYPE_TO_MUSCLE_GROUPS = {
+    "push": ["chest", "shoulders", "triceps"],
+    "pull": ["back", "biceps"],
+    "legs": ["legs", "glutes", "hamstrings", "quads"],
+    "hiit": ["legs", "back", "chest", "core"],
+    "pilates": ["core", "glutes"],
+}
+
+
+def _pick_focus_lifts(
+    workout_type: str,
+    scores_table,
+    config_table,
+    exercises_table,
+    target_dt: datetime,
+    max_lifts: int = 3,
+) -> list[dict]:
+    """Suggest 2-3 focus lifts with a short reason tag.
+
+    Priority:
+      1. Active stalls in relevant muscle groups ("stalled" tag).
+      2. Muscle groups behind on weekly volume ("volume behind").
+      3. Top e1RM lifts in the relevant muscle groups ("anchor").
+
+    Each item: {name, canonical, muscleGroup, tag}. No sets/reps.
+    """
+    muscle_groups = _TYPE_TO_MUSCLE_GROUPS.get(workout_type, [])
+    if not muscle_groups:
+        return []
+
+    picks: list[dict] = []
+    seen_canonicals: set[str] = set()
+
+    # 1. Stalls.
+    try:
+        stalls_row = get_item(config_table, {"key": "lift_stalls"}) or {}
+        for s in (stalls_row.get("stalls") or []):
+            if len(picks) >= max_lifts:
+                break
+            mg = (s.get("muscle_group") or "").lower()
+            if mg not in muscle_groups:
+                continue
+            canonical = s.get("canonical")
+            if not canonical or canonical in seen_canonicals:
+                continue
+            picks.append({
+                "name": s.get("name") or canonical.replace("_", " ").title(),
+                "canonical": canonical,
+                "muscleGroup": mg,
+                "tag": "stalled",
+            })
+            seen_canonicals.add(canonical)
+    except Exception:
+        pass
+
+    # 2. Volume-behind muscle groups (this week's roll-up).
+    try:
+        week_start = target_dt - timedelta(days=target_dt.weekday())
+        week_row = get_item(scores_table, {"date": f"week_{week_start.strftime('%Y-%m-%d')}"}) or {}
+        vol_by_mg = {k: float(v) for k, v in (week_row.get("volume_by_muscle_group") or {}).items()}
+        # Rank muscle groups behind — lowest volume among the relevant set.
+        relevant = [(mg, vol_by_mg.get(mg, 0)) for mg in muscle_groups]
+        relevant.sort(key=lambda t: t[1])  # lowest first
+        behind = [mg for mg, v in relevant if v < _median(list(vol_by_mg.values())) or v == 0]
+    except Exception:
+        behind = []
+
+    # 3. Top e1RM anchor lifts in relevant muscle groups. Used for both
+    #    "volume behind" picks and to round out to 2-3 items.
+    try:
+        resp = exercises_table.scan(Limit=500)
+        rows = resp.get("Items", [])
+    except Exception:
+        rows = []
+
+    # Normalize decimals (DynamoDB returns Decimal).
+    candidates: list[dict] = []
+    for r in rows:
+        mg = str(r.get("muscle_group", "")).lower()
+        if mg not in muscle_groups:
+            continue
+        canonical = r.get("canonical")
+        if not canonical:
+            continue
+        e1rm = float(r.get("e1rm") or 0)
+        top = float(r.get("top_weight") or 0)
+        candidates.append({
+            "canonical": canonical,
+            "name": r.get("name") or canonical.replace("_", " ").title(),
+            "muscleGroup": mg,
+            "e1rm": e1rm,
+            "top": top,
+        })
+
+    # Sort candidates by e1rm descending.
+    candidates.sort(key=lambda c: c["e1rm"], reverse=True)
+
+    # First pass: fill "volume behind" slots using candidates from those groups.
+    if behind:
+        for c in candidates:
+            if len(picks) >= max_lifts:
+                break
+            if c["canonical"] in seen_canonicals:
+                continue
+            if c["muscleGroup"] not in behind:
+                continue
+            picks.append({
+                "name": c["name"],
+                "canonical": c["canonical"],
+                "muscleGroup": c["muscleGroup"],
+                "tag": "volume behind",
+            })
+            seen_canonicals.add(c["canonical"])
+
+    # Second pass: top e1RM anchors to round out.
+    for c in candidates:
+        if len(picks) >= max_lifts:
+            break
+        if c["canonical"] in seen_canonicals:
+            continue
+        picks.append({
+            "name": c["name"],
+            "canonical": c["canonical"],
+            "muscleGroup": c["muscleGroup"],
+            "tag": "anchor",
+        })
+        seen_canonicals.add(c["canonical"])
+
+    return picks
+
+
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    return s[mid] if n % 2 == 1 else (s[mid - 1] + s[mid]) / 2
 
 
 def _combined_reason(main: dict, activation: Optional[dict], recovery_zone: str) -> str:

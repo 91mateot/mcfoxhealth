@@ -641,6 +641,18 @@ def _prepare_planned_workout(proposal, todays_workouts):
         first = todays_workouts[0]
         matched_id = first.get("strava_id") or first.get("workout_id")
 
+    focus_lifts_raw = main.get("focusLifts") or main.get("focus_lifts") or []
+    focus_lifts = [
+        {
+            "name": fl.get("name", ""),
+            "canonical": fl.get("canonical", ""),
+            "muscleGroup": fl.get("muscleGroup") or fl.get("muscle_group") or "",
+            "tag": fl.get("tag", ""),
+        }
+        for fl in focus_lifts_raw
+        if isinstance(fl, dict) and fl.get("name")
+    ]
+
     return {
         "main": {
             "type": main.get("type", "rest"),
@@ -648,6 +660,7 @@ def _prepare_planned_workout(proposal, todays_workouts):
             "intensity": main.get("intensity", "moderate"),
             "reason": main.get("reason", ""),
             "focusMuscleGroups": main.get("focusMuscleGroups") or main.get("focus_muscle_groups") or [],
+            "focusLifts": focus_lifts,
         },
         "activation": camel_activation,
         "reason": proposal.get("reason", ""),
