@@ -181,6 +181,11 @@ function SupplementsSection({
   // whether or not the morning entry has been submitted.
   const journalTags = today.journalTagsToday ?? [];
   const [pendingTag, setPendingTag] = useState<string | null>(null);
+  // Collapsed by default — 9 chips is a lot of real estate if most days the
+  // stack is already taken. Auto-expand when none are taken yet so the empty
+  // state isn't hidden behind a tap.
+  const takenCount = supplements.filter((s) => s.taken).length;
+  const [expanded, setExpanded] = useState(() => takenCount === 0);
   const insights = useInsights(true);
 
   const toggle = async (tag: string) => {
@@ -220,13 +225,67 @@ function SupplementsSection({
     };
   }
 
+  const total = supplements.length;
+  const takenTags = supplements
+    .filter((s) => s.taken)
+    .map((s) => s.name)
+    .join(", ");
+
   return (
     <>
       <SectionHead C={C} kicker="Stack" title="Supplements" />
       <Panel C={C} style={{ padding: 10 }}>
-        <div style={{ fontSize: 11, color: C.t3, lineHeight: 1.5, marginBottom: 8 }}>
-          Tap what you took today.
-        </div>
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          style={{
+            all: "unset",
+            cursor: "pointer",
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            marginBottom: expanded ? 10 : 0,
+          }}
+        >
+          <span
+            style={{
+              fontSize: 11,
+              color: C.t3,
+              fontFamily: MONO,
+              letterSpacing: ".05em",
+              fontWeight: 700,
+              flexShrink: 0,
+            }}
+          >
+            {takenCount}/{total} taken
+          </span>
+          <span
+            style={{
+              flex: 1,
+              fontSize: 11,
+              color: C.t4,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {takenCount === 0 ? "Tap what you took today" : takenTags}
+          </span>
+          <span
+            style={{
+              fontSize: 13,
+              color: C.t3,
+              transform: expanded ? "rotate(180deg)" : "rotate(0deg)",
+              transition: "transform .2s ease",
+              flexShrink: 0,
+            }}
+            aria-hidden
+          >
+            ⌄
+          </span>
+        </button>
+        {expanded && (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {supplements.map((s) => {
             const taken = s.taken;
@@ -296,6 +355,7 @@ function SupplementsSection({
             );
           })}
         </div>
+        )}
       </Panel>
     </>
   );
