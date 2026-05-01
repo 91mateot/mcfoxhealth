@@ -99,8 +99,13 @@ TOOLS = [
     {
         "name": "log_journal",
         "description": (
-            "Tag how Mateo is feeling or what happened. Use when he mentions mood, stress, "
-            "soreness, alcohol, sauna, back flare, etc. Overwrites the journal entry for today."
+            "Capture Mateo's reflection and/or tag how he's feeling. Use when he mentions "
+            "mood, stress, soreness, alcohol, sauna, back flare, or tells you how the day "
+            "went. Morning = check-in about last night; evening (slot='evening') = day-end "
+            "reflection. Slots write to separate fields on the same daily row — calling with "
+            "slot='evening' will NOT clobber the morning entry. Prefer slot='evening' after "
+            "6pm local when Mateo is recapping the day. If he writes a narrative, pass it as "
+            "`text`."
         ),
         "input_schema": {
             "type": "object",
@@ -111,14 +116,26 @@ TOOLS = [
                     "description": (
                         "List of tags. Valid: alcohol, caffeine_late, ate_late, heavy_meal, "
                         "hydrated, screens_bed, late_bedtime, meditated, stretched, sauna, "
-                        "cold, sunlight_am, stress, social, travel, sick, back_flare."
+                        "cold, sunlight_am, stress, social, travel, sick, back_flare. "
+                        "Optional — omit if the entry is narrative-only."
                     ),
                 },
                 "mood": {"type": "integer", "minimum": 1, "maximum": 5, "description": "1 (bad) - 5 (great)"},
                 "stress": {"type": "integer", "minimum": 1, "maximum": 5, "description": "1 (none) - 5 (extreme)"},
-                "soreness": {"type": "integer", "minimum": 1, "maximum": 5, "description": "1 (none) - 5 (very)"},
+                "soreness": {"type": "integer", "minimum": 1, "maximum": 5, "description": "1 (none) - 5 (very). Morning slot only."},
+                "slot": {
+                    "type": "string",
+                    "enum": ["morning", "evening"],
+                    "description": "Which slot this entry belongs to. Default 'morning'.",
+                },
+                "text": {
+                    "type": "string",
+                    "description": (
+                        "Free-form narrative, captured verbatim from what Mateo said. "
+                        "Keep his voice; don't summarize into third person."
+                    ),
+                },
             },
-            "required": ["tags"],
         },
     },
     {
@@ -277,6 +294,16 @@ TOOLS = [
             "required": ["phase"],
         },
     },
+    {
+        "name": "generate_weekly_summary",
+        "description": (
+            "Read the last 7 days of journal entries and daily scores and return a compact "
+            "narrative summary Mateo can reflect on. Use when he asks 'how was this week', "
+            "'what did I log this week', or on Sunday evenings when he's wrapping up. "
+            "Returns structured data; inline the highlights in your reply."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
 
 
@@ -288,11 +315,15 @@ def _execute_tool(name: str, args: dict) -> dict:
             return svc_log_water(args.get("oz", 0))
         if name == "log_journal":
             return svc_log_journal(
-                tags=args.get("tags", []),
+                tags=args.get("tags") if "tags" in args else None,
                 mood=args.get("mood"),
                 stress=args.get("stress"),
                 soreness=args.get("soreness"),
+                slot=args.get("slot"),
+                text=args.get("text"),
             )
+        if name == "generate_weekly_summary":
+            return _weekly_summary()
         if name == "get_recent_meals":
             return {"meals": svc_get_recent_meals(int(args.get("days", 1)))}
         if name == "delete_meal":
@@ -323,6 +354,90 @@ def _execute_tool(name: str, args: dict) -> dict:
     except Exception as e:
         logger.exception("tool %s failed", name)
         return {"error": str(e)}
+
+
+def _weekly_summary() -> dict:
+    """Aggregate the last 7 days of journal entries + daily scores into a
+    compact structured payload the coach inlines into its reply."""
+    from datetime import datetime, timedelta
+    from shared.db import get_table, get_item
+
+    journal_table = get_table("JOURNAL_TABLE")
+    scores_table = get_table("DAILY_SCORES_TABLE")
+    workouts_table = get_table("WORKOUTS_TABLE")
+    from shared.db import query_items
+
+    today_str = local_today_str()
+    today_dt = datetime.strptime(today_str, "%Y-%m-%d")
+
+    days = []
+    tag_counts: dict = {}
+    mood_vals = []
+    stress_vals = []
+    recovery_vals = []
+    sleep_mins = []
+    strain_vals = []
+    narratives = []
+    workouts_summary = []
+
+    for i in range(7):
+        d = (today_dt - timedelta(days=i)).strftime("%Y-%m-%d")
+        j = get_item(journal_table, {"date": d}) or {}
+        s = get_item(scores_table, {"date": d}) or {}
+        ws = query_items(workouts_table, "date", d) or []
+
+        for t in (j.get("tags") or []):
+            tag_counts[t] = tag_counts.get(t, 0) + 1
+        if j.get("mood") is not None:
+            mood_vals.append(j["mood"])
+        if j.get("stress") is not None:
+            stress_vals.append(j["stress"])
+        if s.get("recovery") is not None:
+            recovery_vals.append(s["recovery"])
+        if s.get("strain") is not None:
+            strain_vals.append(s["strain"])
+        sm = (s.get("sleep") or {}).get("total_min")
+        if sm:
+            sleep_mins.append(sm)
+        if j.get("morning_text"):
+            narratives.append({"date": d, "slot": "morning", "text": j["morning_text"][:400]})
+        if j.get("evening_text"):
+            narratives.append({"date": d, "slot": "evening", "text": j["evening_text"][:400]})
+        for w in ws:
+            workouts_summary.append({
+                "date": d,
+                "title": w.get("title") or w.get("type") or "workout",
+                "dur": w.get("dur"),
+                "strain": w.get("strain"),
+            })
+
+        days.append({
+            "date": d,
+            "recovery": s.get("recovery"),
+            "strain": s.get("strain"),
+            "sleep_hours": round(sm / 60, 1) if sm else None,
+            "mood": j.get("mood"),
+            "tags": j.get("tags") or [],
+        })
+
+    def _avg(vs):
+        return round(sum(vs) / len(vs), 1) if vs else None
+
+    top_tags = sorted(tag_counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
+
+    return {
+        "week_of": (today_dt - timedelta(days=6)).strftime("%Y-%m-%d"),
+        "through": today_str,
+        "days": days,
+        "avg_recovery": _avg(recovery_vals),
+        "avg_strain": _avg(strain_vals),
+        "avg_sleep_hours": round(sum(sleep_mins) / len(sleep_mins) / 60, 1) if sleep_mins else None,
+        "avg_mood": _avg(mood_vals),
+        "avg_stress": _avg(stress_vals),
+        "top_tags": [{"tag": t, "count": c} for t, c in top_tags],
+        "narratives": narratives,
+        "workouts": workouts_summary,
+    }
 
 
 _MAX_IMAGES_PER_TURN = 5

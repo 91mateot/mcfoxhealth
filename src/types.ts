@@ -525,20 +525,55 @@ export interface JournalTag {
   negative: boolean;
 }
 
-export interface JournalToday {
-  submitted: boolean;
+export interface JournalPrompt {
+  q: string;
+  a: string;
+}
+
+export interface MorningEntry {
+  tags: string[];
+  mood: number | null;
+  stress: number | null;
+  soreness: number | null;
+  text?: string;
+  prompts?: JournalPrompt[];
+  savedAt?: string | null;
+}
+
+export interface EveningEntry {
+  tags?: string[];
+  mood?: number | null;
+  stress?: number | null;
+  text?: string;
+  prompts?: JournalPrompt[];
+  savedAt?: string | null;
+}
+
+export interface JournalEntry {
+  date: string;
+  submitted?: boolean;
+  morning?: MorningEntry | null;
+  evening?: EveningEntry | null;
+}
+
+export type JournalSlot = "morning" | "evening";
+
+export interface JournalToday extends JournalEntry {}
+
+export interface JournalLastNight {
+  date: string;
   tags: string[];
   mood: number | null;
   stress: number | null;
   soreness: number | null;
 }
 
-export interface JournalLastNight {
-  date: string;
-  tags: string[];
-  mood: number;
-  stress: number;
-  soreness: number;
+export interface JournalHistoryResponse {
+  entries: JournalEntry[];
+}
+
+export interface JournalPromptsResponse {
+  prompts: JournalPrompt[];
 }
 
 export interface MealInput {

@@ -10,6 +10,7 @@ import { LogMealModal } from "./modals/LogMeal";
 import { LogWorkoutModal } from "./modals/LogWorkout";
 import { ChatModal } from "./modals/Chat";
 import { JournalSheet } from "./modals/Journal";
+import { JournalHistorySheet } from "./modals/JournalHistorySheet";
 import { MealDetailModal } from "./modals/MealDetail";
 import { WorkoutDetailModal } from "./modals/WorkoutDetail";
 import { InsightsModal } from "./modals/Insights";
@@ -37,6 +38,7 @@ export default function App() {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatPrefill, setChatPrefill] = useState<string | undefined>();
   const [journalOpen, setJournalOpen] = useState(false);
+  const [journalHistoryOpen, setJournalHistoryOpen] = useState(false);
   const [mealDetail, setMealDetail] = useState<Meal | null>(null);
   const [workoutDetail, setWorkoutDetail] = useState<Workout | null>(null);
   const [insightsOpen, setInsightsOpen] = useState(false);
@@ -102,6 +104,7 @@ export default function App() {
           onLogMeal={() => openLogMeal()}
           onLogWorkout={() => setWorkoutOpen(true)}
           onOpenJournal={() => setJournalOpen(true)}
+          onOpenJournalHistory={() => setJournalHistoryOpen(true)}
         />
       )}
 
@@ -177,6 +180,7 @@ export default function App() {
         C={C}
         open={journalOpen}
         onClose={() => setJournalOpen(false)}
+        todayEntry={today.data?.journal ?? null}
         onSave={async (data) => {
           try {
             await submitJournal(data);
@@ -184,6 +188,11 @@ export default function App() {
             console.error("submitJournal failed", err);
           }
         }}
+      />
+      <JournalHistorySheet
+        C={C}
+        open={journalHistoryOpen}
+        onClose={() => setJournalHistoryOpen(false)}
       />
       {nutrition.data && (
         <MealDetailModal

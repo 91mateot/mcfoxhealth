@@ -387,6 +387,12 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/conversation/latest
             Method: GET
+        GetJournalHistory:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/journal/history
+            Method: GET
         RefreshPlannedWorkout:
           Type: HttpApi
           Properties:
@@ -496,6 +502,12 @@ Resources:
           Properties:
             ApiId: !Ref HttpApi
             Path: /api/journal
+            Method: POST
+        PostJournalPrompts:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/journal/prompts
             Method: POST
         PostWorkout:
           Type: HttpApi

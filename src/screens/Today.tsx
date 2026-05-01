@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { mutate } from "swr";
 import { FONT, MONO, type Palette } from "../theme";
-import { JOURNAL_TAGS, type NutritionResponse, type TodayResponse } from "../types";
+import { JOURNAL_TAGS, type EveningEntry, type MorningEntry, type NutritionResponse, type TodayResponse } from "../types";
 import { BigRing } from "../components/BigRing";
 import { Panel } from "../components/Panel";
 import { Chip } from "../components/Chip";
@@ -23,9 +23,10 @@ interface TodayScreenProps {
   onLogMeal: () => void;
   onLogWorkout: () => void;
   onOpenJournal: () => void;
+  onOpenJournalHistory: () => void;
 }
 
-export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMeal, onLogWorkout, onOpenJournal }: TodayScreenProps) {
+export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMeal, onLogWorkout, onOpenJournal, onOpenJournalHistory }: TodayScreenProps) {
   const [hydrationOpen, setHydrationOpen] = useState(false);
   const need = data.sleepNeedTonight;
   const zone = data.recoveryZone ?? (data.recovery >= 67 ? "green" : data.recovery >= 34 ? "yellow" : "red");
@@ -57,8 +58,9 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
         </div>
       </div>
 
-      {/* Journal check-in — shown first if pending */}
-      {data.journal && !data.journal.submitted && <JournalCard C={C} data={data} onOpen={onOpenJournal} />}
+      {/* Journal check-in — pending prompt OR logged summary */}
+      <JournalCard C={C} data={data} onOpen={onOpenJournal} onOpenHistory={onOpenJournalHistory} />
+
 
       {/* Hero rings */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 7, marginBottom: 10 }}>
@@ -511,66 +513,196 @@ function StrainRing({ C, data, onClick }: { C: Palette; data: TodayResponse; onC
   );
 }
 
-function JournalCard({ C, data, onOpen }: { C: Palette; data: TodayResponse; onOpen: () => void }) {
-  const submitted = data.journal?.submitted ?? false;
-  const lastTags = (data.journalLastNight?.tags ?? [])
-    .map((id) => JOURNAL_TAGS.find((t) => t.id === id))
-    .filter(Boolean);
+function JournalCard({
+  C,
+  data,
+  onOpen,
+  onOpenHistory,
+}: {
+  C: Palette;
+  data: TodayResponse;
+  onOpen: () => void;
+  onOpenHistory: () => void;
+}) {
+  const morning = data.journal?.morning ?? null;
+  const evening = data.journal?.evening ?? null;
+  const isEveningTime = new Date().getHours() >= 18;
+
+  // State machine:
+  //   pending-morning = no morning entry AND before 6pm
+  //   pending-evening = has morning (or past 6pm) AND no evening entry
+  //   logged          = has both OR morning pending is stale (e.g., past 6pm with morning already)
+  let state: "pending-morning" | "pending-evening" | "logged";
+  if (!morning && !isEveningTime) state = "pending-morning";
+  else if (!evening && isEveningTime) state = "pending-evening";
+  else if (morning && evening) state = "logged";
+  else if (morning && !isEveningTime) state = "logged";
+  else state = "pending-morning";
+
+  const pending = state !== "logged";
+  const heading =
+    state === "pending-morning"
+      ? "Morning check-in"
+      : state === "pending-evening"
+      ? "Evening reflection"
+      : "Journal · today";
+  const subhead =
+    state === "pending-morning"
+      ? "Tag last night"
+      : state === "pending-evening"
+      ? "Close out the day"
+      : evening
+      ? "Morning + evening saved"
+      : "Morning saved";
+  const cta =
+    state === "pending-morning"
+      ? "Log last night"
+      : state === "pending-evening"
+      ? "Write reflection"
+      : null;
 
   return (
     <Panel
       C={C}
       style={{
-        background: submitted ? C.s : `linear-gradient(180deg, ${C.s}, ${C.primaryDim} 200%)`,
-        borderColor: submitted ? C.border : C.primary + "30",
+        background: pending
+          ? `linear-gradient(180deg, ${C.s}, ${C.primaryDim} 200%)`
+          : C.s,
+        borderColor: pending ? C.primary + "30" : C.border,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 10,
+          gap: 8,
+        }}
+      >
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 11, color: C.primary, textTransform: "uppercase", letterSpacing: ".12em", fontWeight: 700, whiteSpace: "nowrap" }}>
-            {submitted ? "Last night · logged" : "Morning check-in"}
+          <div
+            style={{
+              fontSize: 11,
+              color: C.primary,
+              textTransform: "uppercase",
+              letterSpacing: ".12em",
+              fontWeight: 700,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {heading}
           </div>
           <div style={{ fontSize: 14, fontWeight: 700, color: C.t, marginTop: 3, letterSpacing: "-.01em" }}>
-            {submitted ? "Nice — tags saved" : "Tag last night"}
+            {subhead}
           </div>
         </div>
-        {!submitted && <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, whiteSpace: "nowrap", flexShrink: 0 }}>~20 sec</div>}
+        {pending && (
+          <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, whiteSpace: "nowrap", flexShrink: 0 }}>
+            ~30 sec
+          </div>
+        )}
       </div>
 
-      {!submitted ? (
-        <>
-          <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.5, marginBottom: 10 }}>
-            Quick tags → after 2 weeks we'll show what actually moves your HRV.
+      {state === "pending-morning" && <PendingPreviewTags C={C} />}
+      {state === "pending-evening" && (
+        <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.5, marginBottom: 10 }}>
+          {morning
+            ? "Morning's saved. Add how the day actually went."
+            : "Jump straight to the evening reflection."}
+        </div>
+      )}
+      {state === "logged" && <LoggedSummary C={C} morning={morning} evening={evening} />}
+
+      {cta && (
+        <Btn C={C} primary full onClick={onOpen}>
+          {cta}
+        </Btn>
+      )}
+      <button
+        onClick={onOpenHistory}
+        style={{
+          all: "unset",
+          cursor: "pointer",
+          display: "block",
+          marginTop: 10,
+          fontSize: 11,
+          color: C.t4,
+          fontFamily: MONO,
+          letterSpacing: ".06em",
+        }}
+      >
+        {state === "logged" ? "Tap to edit · " : ""}View past entries →
+      </button>
+    </Panel>
+  );
+}
+
+function PendingPreviewTags({ C }: { C: Palette }) {
+  return (
+    <>
+      <div style={{ fontSize: 11, color: C.t2, lineHeight: 1.5, marginBottom: 10 }}>
+        Quick tags + 2 prompts → after 2 weeks we'll show what actually moves your HRV.
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+        {["🍷 Alcohol", "☕ Late caffeine", "📱 Screens", "🧘 Meditated", "🔥 Sauna"].map((t, i) => (
+          <div
+            key={i}
+            style={{
+              fontSize: 11,
+              color: C.t2,
+              background: C.s2,
+              border: `1px solid ${C.border}`,
+              padding: "6px 10px",
+              borderRadius: 18,
+              fontWeight: 600,
+            }}
+          >
+            {t}
           </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-            {["🍷 Alcohol", "☕ Late caffeine", "📱 Screens", "🧘 Meditated", "🔥 Sauna"].map((t, i) => (
-              <div
-                key={i}
-                style={{
-                  fontSize: 11,
-                  color: C.t2,
-                  background: C.s2,
-                  border: `1px solid ${C.border}`,
-                  padding: "6px 10px",
-                  borderRadius: 18,
-                  fontWeight: 600,
-                }}
-              >
-                {t}
-              </div>
-            ))}
-            <div style={{ fontSize: 11, color: C.t4, padding: "6px 10px", fontWeight: 600 }}>
-              +{JOURNAL_TAGS.length - 5} more
-            </div>
+        ))}
+        <div style={{ fontSize: 11, color: C.t4, padding: "6px 10px", fontWeight: 600 }}>
+          +{JOURNAL_TAGS.length - 5} more
+        </div>
+      </div>
+    </>
+  );
+}
+
+function LoggedSummary({
+  C,
+  morning,
+  evening,
+}: {
+  C: Palette;
+  morning: MorningEntry | null;
+  evening: EveningEntry | null;
+}) {
+  const morningTags = (morning?.tags ?? [])
+    .map((id) => JOURNAL_TAGS.find((t) => t.id === id))
+    .filter(Boolean);
+  const eveningTags = (evening?.tags ?? [])
+    .map((id) => JOURNAL_TAGS.find((t) => t.id === id))
+    .filter(Boolean);
+
+  return (
+    <>
+      {morning && (
+        <div style={{ marginBottom: evening ? 10 : 4 }}>
+          <div
+            style={{
+              fontSize: 10,
+              color: C.t4,
+              textTransform: "uppercase",
+              letterSpacing: ".12em",
+              fontWeight: 700,
+              marginBottom: 5,
+            }}
+          >
+            Morning
           </div>
-          <Btn C={C} primary full onClick={onOpen}>
-            Log last night
-          </Btn>
-        </>
-      ) : (
-        <>
           <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-            {lastTags.map((t) =>
+            {morningTags.map((t) =>
               t ? (
                 <div
                   key={t.id}
@@ -578,22 +710,87 @@ function JournalCard({ C, data, onOpen }: { C: Palette; data: TodayResponse; onO
                     fontSize: 11,
                     color: t.negative ? C.warn : C.primary,
                     background: (t.negative ? C.warn : C.primary) + "15",
-                    padding: "5px 9px",
-                    borderRadius: 14,
+                    padding: "4px 8px",
+                    borderRadius: 12,
                     fontWeight: 600,
-                    border: `1px solid ${(t.negative ? C.warn : C.primary)}30`,
                   }}
                 >
                   {t.icon} {t.label}
                 </div>
-              ) : null
+              ) : null,
             )}
           </div>
-          <div style={{ fontSize: 11, color: C.t4, marginTop: 10, fontFamily: MONO }}>
-            Tap to edit → {data.journalLastNight?.date}
-          </div>
-        </>
+          {morning.text && (
+            <div
+              style={{
+                fontSize: 12,
+                color: C.t2,
+                lineHeight: 1.4,
+                marginTop: 6,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                display: "-webkit-box",
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: "vertical",
+              }}
+            >
+              "{morning.text}"
+            </div>
+          )}
+        </div>
       )}
-    </Panel>
+      {evening && (
+        <div style={{ marginBottom: 4 }}>
+          <div
+            style={{
+              fontSize: 10,
+              color: C.t4,
+              textTransform: "uppercase",
+              letterSpacing: ".12em",
+              fontWeight: 700,
+              marginBottom: 5,
+            }}
+          >
+            Evening
+          </div>
+          <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+            {eveningTags.map((t) =>
+              t ? (
+                <div
+                  key={t.id}
+                  style={{
+                    fontSize: 11,
+                    color: t.negative ? C.warn : C.primary,
+                    background: (t.negative ? C.warn : C.primary) + "15",
+                    padding: "4px 8px",
+                    borderRadius: 12,
+                    fontWeight: 600,
+                  }}
+                >
+                  {t.icon} {t.label}
+                </div>
+              ) : null,
+            )}
+          </div>
+          {evening.text && (
+            <div
+              style={{
+                fontSize: 12,
+                color: C.t2,
+                lineHeight: 1.4,
+                marginTop: 6,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                display: "-webkit-box",
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: "vertical",
+              }}
+            >
+              "{evening.text}"
+            </div>
+          )}
+        </div>
+      )}
+    </>
   );
 }

@@ -11,7 +11,10 @@ import type {
   MealPatch,
   Favorite,
   ChatMessage,
-  JournalToday,
+  JournalHistoryResponse,
+  JournalPromptsResponse,
+  JournalPrompt,
+  JournalSlot,
   LatestConversationResponse,
   PlannedWorkout,
 } from "./types";
@@ -274,10 +277,30 @@ export async function deleteWater(date: string, waterId: string) {
   return result;
 }
 
-export async function submitJournal(journal: Partial<JournalToday> & { tags: string[] }) {
-  const result = await post<{ ok: boolean }>("/api/journal", journal);
+export interface JournalSubmission {
+  slot?: JournalSlot;
+  tags?: string[];
+  mood?: number | null;
+  stress?: number | null;
+  soreness?: number | null;
+  text?: string;
+  prompts?: JournalPrompt[];
+}
+
+export async function submitJournal(journal: JournalSubmission) {
+  const result = await post<{ status: string; date: string; slot: string }>("/api/journal", journal);
   mutate("/api/today");
+  mutate("/api/journal/history");
   return result;
+}
+
+export function useJournalHistory(enabled = true): SWRResponse<JournalHistoryResponse> {
+  return useSWR<JournalHistoryResponse>(enabled ? "/api/journal/history" : null, fetcher);
+}
+
+export async function fetchJournalPrompts(slot: JournalSlot): Promise<JournalPrompt[]> {
+  const result = await post<JournalPromptsResponse>("/api/journal/prompts", { slot });
+  return result.prompts || [];
 }
 
 export async function logWorkout(text: string, date?: string) {

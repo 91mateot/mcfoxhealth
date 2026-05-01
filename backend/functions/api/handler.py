@@ -38,6 +38,8 @@ def lambda_handler(event, context):
         return _get_insights()
     if path == "/api/conversation/latest":
         return _get_latest_conversation()
+    if path == "/api/journal/history":
+        return _get_journal_history(event)
     if path == "/api/planned-workout/refresh" and method == "POST":
         return _refresh_planned_workout()
 
@@ -187,6 +189,8 @@ def _get_today():
 
     planned_workout = _prepare_planned_workout(scores.get("planned_workout"), todays_workouts)
 
+    journal_today, journal_last_night = _journal_for_today(today_dt)
+
     payload = {
         "date": date_display,
         "dateFull": date_full,
@@ -231,6 +235,8 @@ def _get_today():
         "supplements": supplements,
         "coachInsights": coach_insights,
         "plannedWorkout": planned_workout,
+        "journal": journal_today,
+        "journalLastNight": journal_last_night,
         "base": {
             "hrv": baselines.get("hrv", 48),
             "rhr": baselines.get("rhr", 64),
@@ -849,6 +855,91 @@ def _get_latest_conversation():
         "messageCount": int(thread.get("message_count") or 0),
         "updatedAt": updated,
     })
+
+
+def _journal_for_today(today_dt):
+    """Return (journalToday, journalLastNight) projection for TodayResponse.
+
+    journalToday is today's row with both morning and evening slots if submitted.
+    journalLastNight is the most-recent-past row with any tag or mood for the
+    coach card's "last night logged" state. Looks back up to 3 days.
+    """
+    journal_table = get_table("JOURNAL_TABLE")
+    today_str = today_dt.strftime("%Y-%m-%d")
+
+    row = get_item(journal_table, {"date": today_str}) or {}
+    today_out = _project_entry(row) if row else None
+
+    last_night = None
+    for i in range(1, 4):
+        d = (today_dt - timedelta(days=i)).strftime("%Y-%m-%d")
+        past = get_item(journal_table, {"date": d}) or {}
+        if past and (past.get("tags") or past.get("mood") is not None or past.get("morning_text") or past.get("evening_text")):
+            last_night = {
+                "date": d,
+                "tags": past.get("tags") or [],
+                "mood": past.get("mood"),
+                "stress": past.get("stress"),
+                "soreness": past.get("soreness"),
+            }
+            break
+
+    return today_out, last_night
+
+
+def _project_entry(row: dict) -> dict:
+    """Shape a raw journal row for the frontend JournalEntry type."""
+    morning = None
+    if row.get("tags") or row.get("mood") is not None or row.get("morning_text") or row.get("morning_saved_at") or row.get("submitted_at"):
+        morning = {
+            "tags": row.get("tags") or [],
+            "mood": row.get("mood"),
+            "stress": row.get("stress"),
+            "soreness": row.get("soreness"),
+            "text": row.get("morning_text") or "",
+            "prompts": row.get("morning_prompts") or [],
+            "savedAt": row.get("morning_saved_at") or row.get("submitted_at"),
+        }
+    evening = None
+    if row.get("evening_tags") or row.get("evening_mood") is not None or row.get("evening_text") or row.get("evening_saved_at"):
+        evening = {
+            "tags": row.get("evening_tags") or [],
+            "mood": row.get("evening_mood"),
+            "stress": row.get("evening_stress"),
+            "text": row.get("evening_text") or "",
+            "prompts": row.get("evening_prompts") or [],
+            "savedAt": row.get("evening_saved_at"),
+        }
+    return {
+        "date": row.get("date", ""),
+        "submitted": morning is not None,
+        "morning": morning,
+        "evening": evening,
+    }
+
+
+def _get_journal_history(event):
+    """Return the last N days of journal entries, newest first."""
+    try:
+        limit = int((event.get("queryStringParameters") or {}).get("limit", "30"))
+    except (TypeError, ValueError):
+        limit = 30
+    limit = max(1, min(limit, 120))
+
+    journal_table = get_table("JOURNAL_TABLE")
+    today = local_now()
+
+    entries = []
+    for i in range(limit):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        row = get_item(journal_table, {"date": d})
+        if not row:
+            continue
+        entry = _project_entry(row)
+        if entry.get("morning") or entry.get("evening"):
+            entries.append(entry)
+
+    return _resp(200, {"entries": entries})
 
 
 def _resp(code, body):

@@ -33,6 +33,7 @@ from shared.nutrition_service import (
     delete_water as svc_delete_water,
     validate_meal as svc_validate_meal,
     sanitize_ingredients,
+    generate_journal_prompts as svc_generate_journal_prompts,
 )
 from shared.workout_service import (
     annotate_workout as svc_annotate_workout,
@@ -90,6 +91,8 @@ def lambda_handler(event, context):
             return _delete_water(params["date"], params["water_id"])
     if path == "/api/journal":
         return _post_journal(event)
+    if path == "/api/journal/prompts":
+        return _post_journal_prompts(event)
     if path == "/api/workout":
         return _post_workout(event)
     if path.startswith("/api/workout/") and path.endswith("/annotate"):
@@ -413,13 +416,36 @@ def _post_journal(event):
     body = _parse_body(event)
     if not body:
         return _resp(400, {"error": "invalid JSON body"})
+    slot = str(body.get("slot") or "morning").lower()
+    if slot not in ("morning", "evening"):
+        slot = "morning"
+    tags = body.get("tags")
+    if slot == "evening" and tags is None:
+        tags = body.get("evening_tags")
+    prompts = body.get("prompts")
+    text = body.get("text")
     result = svc_log_journal(
-        tags=body.get("tags", []),
+        tags=tags if tags is not None else None,
         mood=body.get("mood"),
         stress=body.get("stress"),
         soreness=body.get("soreness"),
         date=body.get("date"),
+        slot=slot,
+        text=text,
+        prompts=prompts if isinstance(prompts, list) else None,
     )
+    return _resp(200, result)
+
+
+def _post_journal_prompts(event):
+    body = _parse_body(event) or {}
+    slot = str(body.get("slot") or "morning").lower()
+    if slot not in ("morning", "evening"):
+        slot = "morning"
+    try:
+        result = svc_generate_journal_prompts(slot, date=body.get("date"))
+    except Exception as e:
+        return _resp(502, {"error": f"prompt generation failed: {e}"})
     return _resp(200, result)
 
 

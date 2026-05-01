@@ -657,20 +657,246 @@ def log_journal(
     stress: Optional[int] = None,
     soreness: Optional[int] = None,
     date: Optional[str] = None,
+    slot: Optional[str] = None,
+    text: Optional[str] = None,
+    prompts: Optional[list] = None,
 ) -> dict:
+    """Write a journal entry. One row per date, slot-aware merge so morning
+    and evening don't clobber each other.
+
+    Morning slot writes: tags, mood, stress, soreness, morning_text, morning_prompts.
+    Evening slot writes: evening_tags, evening_mood, evening_stress, evening_text, evening_prompts.
+    If slot is omitted, defaults to "morning" for backward compatibility with the
+    pre-expansion call path that passes only tags/mood/stress/soreness.
+    """
     journal_table = get_table("JOURNAL_TABLE")
     date = date or local_today_str()
+    slot = (slot or "morning").lower()
+    now_iso = datetime.now(timezone.utc).isoformat()
 
-    item = {
-        "date": date,
-        "tags": list(tags or []),
-        "mood": mood,
-        "stress": stress,
-        "soreness": soreness,
-        "submitted_at": datetime.now(timezone.utc).isoformat(),
-    }
+    existing = get_item(journal_table, {"date": date}) or {"date": date}
+    item = dict(existing)
+
+    clean_prompts = _sanitize_prompts(prompts)
+    clean_text = _clean_text(text)
+
+    if slot == "evening":
+        if tags is not None:
+            item["evening_tags"] = list(tags or [])
+        if mood is not None:
+            item["evening_mood"] = mood
+        if stress is not None:
+            item["evening_stress"] = stress
+        if clean_text is not None:
+            item["evening_text"] = clean_text
+        if clean_prompts is not None:
+            item["evening_prompts"] = clean_prompts
+        item["evening_saved_at"] = now_iso
+    else:
+        if tags is not None:
+            item["tags"] = list(tags or [])
+        if mood is not None:
+            item["mood"] = mood
+        if stress is not None:
+            item["stress"] = stress
+        if soreness is not None:
+            item["soreness"] = soreness
+        if clean_text is not None:
+            item["morning_text"] = clean_text
+        if clean_prompts is not None:
+            item["morning_prompts"] = clean_prompts
+        item["submitted_at"] = now_iso
+        item["morning_saved_at"] = now_iso
+
     put_item(journal_table, item)
-    return {"status": "saved", "date": date}
+    return {"status": "saved", "date": date, "slot": slot}
+
+
+def _clean_text(text: Optional[str]) -> Optional[str]:
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s:
+        return ""
+    return s[:2000]
+
+
+def _sanitize_prompts(prompts: Optional[list]) -> Optional[list]:
+    if prompts is None:
+        return None
+    out = []
+    for p in prompts[:6]:
+        if not isinstance(p, dict):
+            continue
+        q = str(p.get("q") or "").strip()[:300]
+        a = str(p.get("a") or "").strip()[:2000]
+        if q:
+            out.append({"q": q, "a": a})
+    return out
+
+
+# Static fallback used when Bedrock is slow/unavailable. Rotates by day-of-year
+# so consecutive mornings/evenings don't repeat.
+_MORNING_FALLBACK_PROMPTS = [
+    ("What's one thing on your mind heading into today?", "Anything you want to do differently today than yesterday?"),
+    ("How does your body feel right now — sharper or heavier than usual?", "What would make today feel like a win by 6pm?"),
+    ("What's the most important thing you want to show up for today?", "Anything you're avoiding that's worth facing?"),
+    ("Where's your energy pointed — work, body, people?", "What would 'good enough' look like today?"),
+]
+_EVENING_FALLBACK_PROMPTS = [
+    ("What actually happened today — the headline version?", "What's one thing that went better than expected?"),
+    ("Where did the day get away from you?", "What would you change about tomorrow if you could?"),
+    ("What's one thing you learned about yourself today?", "How's the body feeling now versus this morning?"),
+    ("What's still unresolved as you close the day?", "What are you grateful for, even on a rough day?"),
+]
+
+
+def _fallback_prompts(slot: str, date: str) -> list:
+    try:
+        doy = datetime.strptime(date, "%Y-%m-%d").timetuple().tm_yday
+    except Exception:
+        doy = 0
+    pool = _EVENING_FALLBACK_PROMPTS if slot == "evening" else _MORNING_FALLBACK_PROMPTS
+    q1, q2 = pool[doy % len(pool)]
+    return [{"q": q1, "a": ""}, {"q": q2, "a": ""}]
+
+
+_PROMPT_SYSTEM = (
+    "You generate short reflection prompts for a personal fitness journal. "
+    "Output ONLY a JSON array of exactly 2 objects, each with a single 'q' field: "
+    '[{"q":"..."},{"q":"..."}]. No prose, no markdown fences. '
+    "Each question must be <120 characters, plain English, specific to the user's "
+    "recent context when signal is present, and open-ended (not yes/no)."
+)
+
+
+def generate_journal_prompts(slot: str, date: Optional[str] = None) -> dict:
+    """Generate 2 reflection prompts for the given slot ('morning'|'evening').
+
+    Caches the result into today's fitness-journal row (morning_prompts /
+    evening_prompts) so refreshing the UI doesn't re-invoke Bedrock. Falls
+    back to a static rotating pair if Bedrock fails or times out.
+    """
+    slot = (slot or "morning").lower()
+    if slot not in ("morning", "evening"):
+        slot = "morning"
+    date = date or local_today_str()
+
+    journal_table = get_table("JOURNAL_TABLE")
+    cache_key = "evening_prompts" if slot == "evening" else "morning_prompts"
+
+    existing = get_item(journal_table, {"date": date}) or {}
+    cached = existing.get(cache_key)
+    if isinstance(cached, list) and cached:
+        return {"prompts": [{"q": p.get("q", ""), "a": p.get("a", "")} for p in cached]}
+
+    context_block = _build_prompt_context(date, slot)
+
+    prompts = None
+    try:
+        resp = bedrock_runtime.invoke_model(
+            modelId=ESTIMATOR_MODEL_ID,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 300,
+                "system": _PROMPT_SYSTEM,
+                "messages": [{
+                    "role": "user",
+                    "content": (
+                        f"Slot: {slot}\n\n"
+                        f"Recent context:\n{context_block}\n\n"
+                        "Produce the 2 questions now."
+                    ),
+                }],
+            }),
+        )
+        payload = json.loads(resp["body"].read())
+        reply = ""
+        for block in payload.get("content", []):
+            if block.get("type") == "text":
+                reply += block["text"]
+        reply = reply.strip()
+        if reply.startswith("```"):
+            reply = re.sub(r"^```(?:json)?\s*|\s*```$", "", reply, flags=re.DOTALL)
+        data = json.loads(reply)
+        if isinstance(data, list):
+            prompts = [
+                {"q": str(p.get("q") or "").strip()[:280], "a": ""}
+                for p in data[:2]
+                if isinstance(p, dict) and str(p.get("q") or "").strip()
+            ]
+    except Exception:
+        logger.exception("journal prompt generation failed; using fallback")
+
+    if not prompts or len(prompts) < 2:
+        prompts = _fallback_prompts(slot, date)
+
+    existing[cache_key] = prompts
+    existing["date"] = date
+    put_item(journal_table, existing)
+    return {"prompts": prompts}
+
+
+def _build_prompt_context(date: str, slot: str) -> str:
+    """Compact recent-context block fed to the prompt generator. Pulls last 3
+    days of scores, yesterday's journal, and most-recent workout."""
+    scores_table = get_table("DAILY_SCORES_TABLE")
+    workouts_table = get_table("WORKOUTS_TABLE")
+    journal_table = get_table("JOURNAL_TABLE")
+
+    try:
+        dt = datetime.strptime(date, "%Y-%m-%d")
+    except Exception:
+        dt = datetime.now()
+
+    lines = []
+    for i in range(3):
+        d = (dt - timedelta(days=i)).strftime("%Y-%m-%d")
+        s = get_item(scores_table, {"date": d}) or {}
+        if not s:
+            continue
+        sleep_min = (s.get("sleep") or {}).get("total_min", 0)
+        sleep_hours = round(sleep_min / 60, 1) if sleep_min else None
+        parts = []
+        if s.get("recovery") is not None:
+            parts.append(f"recovery {s.get('recovery')}%")
+        if s.get("strain") is not None:
+            parts.append(f"strain {s.get('strain')}")
+        if sleep_hours is not None:
+            parts.append(f"sleep {sleep_hours}h")
+        if s.get("hrv") is not None:
+            parts.append(f"HRV {s.get('hrv')}ms")
+        if parts:
+            label = "today" if i == 0 else ("yesterday" if i == 1 else f"{i}d ago")
+            lines.append(f"- {label}: {', '.join(parts)}")
+
+    yest = (dt - timedelta(days=1)).strftime("%Y-%m-%d")
+    yest_journal = get_item(journal_table, {"date": yest}) or {}
+    if yest_journal.get("tags"):
+        lines.append(f"- yesterday's journal tags: {', '.join(yest_journal['tags'])}")
+    if slot == "evening":
+        today_journal = get_item(journal_table, {"date": date}) or {}
+        if today_journal.get("tags"):
+            lines.append(f"- this morning's tags: {', '.join(today_journal['tags'])}")
+        if today_journal.get("morning_text"):
+            snippet = str(today_journal["morning_text"])[:240]
+            lines.append(f"- this morning wrote: {snippet}")
+
+    for i in range(3):
+        d = (dt - timedelta(days=i)).strftime("%Y-%m-%d")
+        workouts = query_items(workouts_table, "date", d) or []
+        if workouts:
+            w = workouts[-1]
+            title = w.get("title") or w.get("type") or "workout"
+            dur = w.get("dur")
+            label = "today" if i == 0 else ("yesterday" if i == 1 else f"{i}d ago")
+            dur_str = f" ({dur}min)" if dur else ""
+            lines.append(f"- {label} workout: {title}{dur_str}")
+            break
+
+    return "\n".join(lines) if lines else "(no recent data)"
 
 
 def delete_meal(meal_id: str, date: Optional[str] = None) -> dict:

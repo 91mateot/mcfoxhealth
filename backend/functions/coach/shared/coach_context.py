@@ -69,7 +69,8 @@ You have tools to take action for Mateo. Use them proactively when he mentions c
 - log_water(oz): Log plain water intake in ounces. Use for "drank a glass of water" / "16 oz water". Do NOT use for beverages that contain water (tea, coffee, soda, etc. — those go through log_meal).
 - log_workout(text): Free-form workout description → estimates duration/type/intensity AND logs it. Use when Mateo says "just finished a push workout", "did 45 min Z2 run", "mobility this morning" WITHOUT specific lift details. Strava sync still runs independently.
 - annotate_workout(text, date?): Attach structured lift data (exercises, sets, reps, weight, supersets, session notes) to an EXISTING workout. Use when Mateo pastes lift notes — e.g. "bench 4x5 @ 205, OHP 3x8 @ 115" or a full workout log. Handles ramps, drop sets, supersets, cardio intervals. Prefer this over log_workout when there's real lift detail. Defaults to today; accepts date="yesterday's workout" style hints — convert to YYYY-MM-DD.
-- log_journal(tags, mood?, stress?, soreness?): Tag how he's feeling. Use when he mentions mood, stress, soreness, alcohol, back flare, travel, etc. Valid tags: alcohol, caffeine_late, ate_late, heavy_meal, hydrated, screens_bed, late_bedtime, meditated, stretched, sauna, cold, sunlight_am, stress, social, travel, sick, back_flare.
+- log_journal(tags?, mood?, stress?, soreness?, slot?, text?): Capture a reflection. Morning slot = check-in about last night (default). Evening slot (slot="evening") = end-of-day reflection; use after 6pm local when Mateo is recapping his day. Slots write to separate fields on the same daily row — evening will NOT overwrite morning. Tags optional; pass `text` to save a verbatim narrative. Valid tags: alcohol, caffeine_late, ate_late, heavy_meal, hydrated, screens_bed, late_bedtime, meditated, stretched, sauna, cold, sunlight_am, stress, social, travel, sick, back_flare.
+- generate_weekly_summary(): Pulls last 7 days of journal + scores + workouts into a structured summary. Use when Mateo asks how the week went or on Sunday evenings for a weekly debrief.
 - get_recent_meals(days): Look up recent rows. Returns meals (kind="meal", with meal_id), water entries (kind="water", with water_id), AND workouts (kind="workout", with workout_id). Use to find an id you need to delete.
 - delete_meal(meal_id): Remove a previously-logged meal (and its water companion). ONLY use to fix a mistake — e.g. you logged the wrong thing, or Mateo says "delete that".
 - delete_water(water_id): Remove a previously-logged standalone water entry. Same rule — only to fix a mistake.
@@ -412,12 +413,29 @@ def _last_night_journal_block(journal_table, today_str):
     for i in range(3):
         d = (dt - timedelta(days=i)).strftime("%Y-%m-%d")
         j = get_item(journal_table, {"date": d})
-        if j and (j.get("tags") or j.get("mood") is not None):
-            tags = j.get("tags") or []
-            mood = j.get("mood")
-            stress = j.get("stress")
-            soreness = j.get("soreness")
-            lines = [f"## Most Recent Journal ({d})"]
+        if not j:
+            continue
+        has_any = bool(
+            j.get("tags")
+            or j.get("mood") is not None
+            or j.get("morning_text")
+            or j.get("evening_text")
+            or j.get("evening_tags")
+        )
+        if not has_any:
+            continue
+
+        label = "Today" if i == 0 else ("Last Night" if i == 1 else d)
+        lines = [f"## Most Recent Journal ({label} — {d})"]
+
+        tags = j.get("tags") or []
+        mood = j.get("mood")
+        stress = j.get("stress")
+        soreness = j.get("soreness")
+        morning_text = j.get("morning_text")
+        morning_prompts = j.get("morning_prompts") or []
+        if tags or mood is not None or stress is not None or soreness is not None or morning_text or morning_prompts:
+            lines.append("### Morning")
             if tags:
                 lines.append(f"- Tags: {', '.join(tags)}")
             if mood is not None:
@@ -426,7 +444,38 @@ def _last_night_journal_block(journal_table, today_str):
                 lines.append(f"- Stress: {stress}/5")
             if soreness is not None:
                 lines.append(f"- Soreness: {soreness}/5")
-            return "\n".join(lines)
+            if morning_text:
+                lines.append(f"- Wrote: \"{str(morning_text)[:500]}\"")
+            for p in morning_prompts:
+                q = str(p.get("q") or "").strip()
+                a = str(p.get("a") or "").strip()
+                if q and a:
+                    lines.append(f"- Q: {q}")
+                    lines.append(f"  A: {a[:400]}")
+
+        evening_tags = j.get("evening_tags") or []
+        evening_mood = j.get("evening_mood")
+        evening_stress = j.get("evening_stress")
+        evening_text = j.get("evening_text")
+        evening_prompts = j.get("evening_prompts") or []
+        if evening_tags or evening_mood is not None or evening_stress is not None or evening_text or evening_prompts:
+            lines.append("### Evening")
+            if evening_tags:
+                lines.append(f"- Tags: {', '.join(evening_tags)}")
+            if evening_mood is not None:
+                lines.append(f"- Mood: {evening_mood}/5")
+            if evening_stress is not None:
+                lines.append(f"- Stress: {evening_stress}/5")
+            if evening_text:
+                lines.append(f"- Wrote: \"{str(evening_text)[:500]}\"")
+            for p in evening_prompts:
+                q = str(p.get("q") or "").strip()
+                a = str(p.get("a") or "").strip()
+                if q and a:
+                    lines.append(f"- Q: {q}")
+                    lines.append(f"  A: {a[:400]}")
+
+        return "\n".join(lines)
 
     return "## Journal\nNo recent journal entries."
 
