@@ -65,8 +65,39 @@ def lambda_handler(event, context):
         return _compute_correlations()
     elif action == "compute_lifts":
         return _compute_lifts()
+    elif action == "backfill_caffeine":
+        return _backfill_caffeine_totals(int(event.get("days", 90)))
 
     return {"error": f"unknown action: {action}"}
+
+
+def _backfill_caffeine_totals(days: int):
+    """Walk the last N days of NutritionTable and populate DailyScoresTable.caffeine_total.
+
+    One-shot migration: before this change, caffeine wasn't aggregated daily, so
+    existing daily-score rows lack the field that numeric correlations read.
+    Safe to rerun (upserts).
+    """
+    nutrition_table = get_table("NUTRITION_TABLE")
+    scores_table = get_table("DAILY_SCORES_TABLE")
+    today = local_now()
+
+    updated = 0
+    for i in range(days):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        meals = query_items(nutrition_table, "date", d)
+        caffeine = sum(
+            m.get("caffeine_mg", 0) or 0
+            for m in meals
+            if m.get("meal_id", "").startswith("meal_")
+        )
+        if caffeine <= 0:
+            continue
+        existing = get_item(scores_table, {"date": d}) or {"date": d}
+        existing["caffeine_total"] = caffeine
+        put_item(scores_table, existing)
+        updated += 1
+    return {"status": "caffeine_backfilled", "days_updated": updated}
 
 
 def _compute_day(date_str):
@@ -523,7 +554,7 @@ def _compute_numeric_correlations():
             "r": round(r, 4),
             "slope": round(slope, 6),
             "intercept": round(intercept, 4),
-            "confidence": confidence_tier(n),
+            "confidence": confidence_tier(n, abs(r)),
             "insight": insight,
             "points": points,
             "window_days": _NUMERIC_WINDOW_DAYS,

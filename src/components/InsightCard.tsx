@@ -15,8 +15,9 @@ interface InsightCardProps {
  * caffeine→deep_sleep has better="down", so a negative slope is expected and
  * drawn in the palette's primary color. */
 export function InsightCard({ C, c, onClick }: InsightCardProps) {
+  const noSignal = c.confidence === "none";
   const expected = c.better === "up" ? c.r > 0 : c.r < 0;
-  const col = expected ? C.primary : C.warn;
+  const col = noSignal ? C.t4 : expected ? C.primary : C.warn;
   const confCol = c.confidence === "high" ? C.primary : c.confidence === "medium" ? C.yellow : C.t4;
 
   return (

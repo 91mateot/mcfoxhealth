@@ -444,7 +444,8 @@ export interface NumericCorrelation {
   r: number;
   slope: number;
   intercept: number;
-  confidence: "high" | "medium" | "low";
+  /** "none" means |r| is too weak to claim a pattern; UI should deprioritize. */
+  confidence: "high" | "medium" | "low" | "none";
   insight: string;
   points: CorrelationPoint[];
   windowDays: number;

@@ -147,28 +147,37 @@ def render_insight(
     """
     input_key = pair["input"]
     step, unit_phrase = _STEP_BY_INPUT.get(input_key, (1, f"{pair['input_units']}"))
+
+    # Below |r|=0.1 the relationship is indistinguishable from noise — don't
+    # make a directional claim the data doesn't support.
+    outcome_phrase = _phrase_outcome(pair["outcome_label"])
+
+    if abs(r) < 0.1:
+        return f"No clear link between {pair['input_label'].lower()} and {outcome_phrase} yet."
+
     direction = "raises" if slope > 0 else "lowers"
     effect = abs(slope) * step
-
     outcome_units = pair["outcome_units"]
     effect_str = _fmt_effect(effect, outcome_units)
 
-    # Same-day vs. next-day phrasing — next-day reads more naturally as
-    # "the morning after" than as "next-day X".
-    if pair["lag_days"] >= 1:
-        subject = f"each extra {unit_phrase}"
-        verb_phrase = f"{direction} your {pair['outcome_label'].lower()}"
-    else:
-        subject = f"each extra {unit_phrase}"
-        verb_phrase = f"{direction} your {pair['outcome_label'].lower()}"
+    base = f"Each extra {unit_phrase} {direction} your {outcome_phrase} by about {effect_str}"
 
-    base = f"{subject.capitalize()} {verb_phrase} by about {effect_str}"
-
-    # Append a soft confidence qualifier so the reader can weight the claim.
     qualifier = _confidence_phrase(n, abs(r))
     if qualifier:
         base += f" ({qualifier})"
     return base + "."
+
+
+def _phrase_outcome(label: str) -> str:
+    """Lowercase outcome labels while preserving acronyms like HRV/REM."""
+    parts = label.split()
+    out = []
+    for p in parts:
+        if p.isupper() and len(p) <= 4:
+            out.append(p)  # HRV, REM
+        else:
+            out.append(p.lower())
+    return " ".join(out)
 
 
 _STEP_BY_INPUT: dict[str, tuple[float, str]] = {
@@ -202,9 +211,17 @@ def _confidence_phrase(n: int, abs_r: float) -> Optional[str]:
     return None
 
 
-def confidence_tier(n: int) -> str:
-    if n >= 30:
+def confidence_tier(n: int, abs_r: float = 0.0) -> str:
+    """Confidence requires BOTH enough samples AND meaningful effect size.
+
+    A strong r on only a few days is anecdotal; a weak r on many days is noise.
+    Mirrors the qualifier thresholds so the card's confidence chip and the
+    in-sentence "strong/moderate/early" phrase stay consistent.
+    """
+    if n >= 30 and abs_r >= 0.4:
         return "high"
-    if n >= 15:
+    if n >= 15 and abs_r >= 0.3:
         return "medium"
-    return "low"
+    if n >= 10 and abs_r >= 0.2:
+        return "low"
+    return "none"

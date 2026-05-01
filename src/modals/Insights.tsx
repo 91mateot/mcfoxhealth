@@ -26,7 +26,8 @@ export function InsightsModal({ C, open, onClose }: InsightsModalProps) {
 
   const numeric = data?.numeric ?? [];
   const journal = data?.journal ?? [];
-  const top3 = numeric.slice(0, 3);
+  // Top cards: skip "none"-confidence pairs — they have no actionable signal.
+  const top3 = numeric.filter((c) => c.confidence !== "none").slice(0, 3);
 
   return (
     <>
@@ -131,8 +132,9 @@ function ScatterTile({
   c: NumericCorrelation;
   onOpen: () => void;
 }) {
+  const noSignal = c.confidence === "none";
   const expected = c.better === "up" ? c.r > 0 : c.r < 0;
-  const col = expected ? C.primary : C.warn;
+  const col = noSignal ? C.t4 : expected ? C.primary : C.warn;
 
   return (
     <div
@@ -151,6 +153,7 @@ function ScatterTile({
         borderRadius: 16,
         padding: 10,
         cursor: "pointer",
+        opacity: noSignal ? 0.55 : 1,
       }}
     >
       <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".08em", fontWeight: 700 }}>
