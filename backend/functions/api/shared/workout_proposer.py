@@ -18,11 +18,10 @@ Design:
 
 from __future__ import annotations
 
-from collections import Counter
 from datetime import datetime, timedelta
 from typing import Optional
 
-from shared.db import get_table, get_item, query_items
+from shared.db import get_table, get_item
 from shared.timezone import local_now
 
 
@@ -128,7 +127,6 @@ _DEFAULT_DURATION = {
 def propose_for_date(date_str: str) -> dict:
     """Return the planned_workout payload for `date_str` (YYYY-MM-DD)."""
     scores_table = get_table("DAILY_SCORES_TABLE")
-    workouts_table = get_table("WORKOUTS_TABLE")
     journal_table = get_table("JOURNAL_TABLE")
     config_table = get_table("USER_CONFIG_TABLE")
     exercises_table = get_table("EXERCISES_TABLE")
@@ -137,7 +135,6 @@ def propose_for_date(date_str: str) -> dict:
     recovery_zone = scores.get("recovery_zone", "yellow")
 
     target_dt = datetime.strptime(date_str, "%Y-%m-%d")
-    recent_workouts = _recent_workouts(workouts_table, target_dt, days=28)
     recent_journal = _recent_journal(journal_table, target_dt, days=2)
 
     config = get_item(config_table, {"key": "mateo"}) or {}
@@ -173,8 +170,12 @@ def propose_for_date(date_str: str) -> dict:
             "matchedWorkoutId": None,
         }
 
-    preferred_type = _detect_preferred_type(recent_workouts, target_dt)
-    main = _build_main(preferred_type, recovery_zone, recent_workouts)
+    # Build the muscle-group history from the exercises table — ground truth.
+    # The workouts table stores `type="Workout"` from Strava, which is useless
+    # for classifying push/pull/legs; exercises rows carry the real signal.
+    session_splits = _session_splits_from_exercises(exercises_table, target_dt, days=28)
+    preferred_type = _detect_preferred_type(session_splits, target_dt)
+    main = _build_main(preferred_type, recovery_zone, session_splits, target_dt)
     main["focusLifts"] = _pick_focus_lifts(
         workout_type=preferred_type,
         scores_table=scores_table,
@@ -211,14 +212,6 @@ def write_proposal(date_str: str, proposal: dict) -> None:
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
-def _recent_workouts(workouts_table, target_dt: datetime, days: int) -> list[dict]:
-    out: list[dict] = []
-    for i in range(1, days + 1):
-        d = (target_dt - timedelta(days=i)).strftime("%Y-%m-%d")
-        out.extend(query_items(workouts_table, "date", d))
-    return out
-
-
 def _recent_journal(journal_table, target_dt: datetime, days: int) -> list[dict]:
     out: list[dict] = []
     for i in range(days + 1):  # includes target day
@@ -237,90 +230,151 @@ def _should_regress(recent_journal: list[dict]) -> bool:
     return False
 
 
-def _normalize_type(workout_type: str) -> Optional[str]:
-    """Map free-form workout types from Strava/annotate into our vocabulary."""
-    t = (workout_type or "").strip().lower()
-    if not t:
-        return None
-    # Direct matches first.
-    if t in {"push", "pull", "legs", "run", "hiit", "pilates", "pickleball", "walk", "mobility", "sport_prep", "rest"}:
-        return t
-    # Heuristic mapping.
-    if "push" in t or "chest" in t or "shoulders" in t:
-        return "push"
-    if "pull" in t or "back" in t or "biceps" in t:
-        return "pull"
-    if "leg" in t or "squat" in t or "lower" in t:
-        return "legs"
-    if "run" in t or "jog" in t:
-        return "run"
-    if "hiit" in t or "circuit" in t or "metcon" in t:
-        return "hiit"
-    if "pilates" in t or "reformer" in t:
-        return "pilates"
-    if "pickle" in t:
-        return "pickleball"
-    if "walk" in t:
-        return "walk"
-    if "mobility" in t or "stretch" in t or "yoga" in t:
-        return "mobility"
+# Muscle-group → split classification. Used to tag each training session
+# as push/pull/legs based on the dominant groups worked, since the
+# workouts table's `type` field from Strava is unreliable.
+_MG_TO_SPLIT = {
+    "chest": "push",
+    "shoulders": "push",
+    "triceps": "push",
+    "arms": "push",       # only triceps live in `arms` currently
+    "back": "pull",
+    "biceps": "pull",
+    "lats": "pull",
+    "legs": "legs",
+    "quads": "legs",
+    "hamstrings": "legs",
+    "glutes": "legs",
+    "calves": "legs",
+}
+
+
+def _session_splits_from_exercises(exercises_table, target_dt: datetime, days: int = 28) -> list[dict]:
+    """Read the exercises table and classify each session's split.
+
+    Returns a list of {date, daysAgo, split, mgCounts} where split is
+    "push" | "pull" | "legs" | "mixed" | "other" based on which muscle
+    groups dominated that day.
+
+    ExercisesTable schema: PK=canonical, SK=date. We don't have a date
+    index, so we scan and filter by date range. Table is small (<500
+    rows typical) so this is fine.
+    """
+    try:
+        resp = exercises_table.scan(Limit=2000)
+        rows = resp.get("Items", [])
+    except Exception:
+        return []
+
+    cutoff = (target_dt - timedelta(days=days)).strftime("%Y-%m-%d")
+    today_str = target_dt.strftime("%Y-%m-%d")
+
+    # Group by date → list of muscle_groups.
+    by_date: dict[str, list[str]] = {}
+    for r in rows:
+        d = r.get("date", "")
+        if not d or d < cutoff or d >= today_str:
+            continue
+        mg = str(r.get("muscle_group", "")).lower()
+        by_date.setdefault(d, []).append(mg)
+
+    sessions: list[dict] = []
+    for d, mgs in by_date.items():
+        counts: dict[str, int] = {}
+        for mg in mgs:
+            counts[mg] = counts.get(mg, 0) + 1
+
+        # Map each muscle group to its split, then tally.
+        split_counts: dict[str, int] = {}
+        for mg, n in counts.items():
+            split = _MG_TO_SPLIT.get(mg)
+            if split:
+                split_counts[split] = split_counts.get(split, 0) + n
+
+        if not split_counts:
+            split = "other"
+        else:
+            top_split = max(split_counts, key=lambda s: split_counts[s])
+            total = sum(split_counts.values())
+            # If the top split is ≥60% of classifiable lifts, call it that
+            # split. Otherwise "mixed" (e.g. a true full-body session).
+            split = top_split if split_counts[top_split] / total >= 0.6 else "mixed"
+
+        try:
+            d_dt = datetime.strptime(d, "%Y-%m-%d")
+            days_ago = (target_dt - d_dt).days
+        except ValueError:
+            continue
+
+        sessions.append({
+            "date": d,
+            "daysAgo": days_ago,
+            "split": split,
+            "mgCounts": counts,
+            "splitCounts": split_counts,
+        })
+
+    sessions.sort(key=lambda s: s["date"], reverse=True)
+    return sessions
+
+
+def _last_seen_split(session_splits: list[dict], split: str) -> Optional[dict]:
+    """Most recent session where split matches (or mixed containing split).
+
+    Returns the session dict, or None.
+    """
+    for s in session_splits:
+        if s["split"] == split:
+            return s
+        if s["split"] == "mixed" and s["splitCounts"].get(split, 0) > 0:
+            return s
     return None
 
 
-def _detect_preferred_type(recent_workouts: list[dict], target_dt: datetime) -> str:
-    """Choose the 'due' workout type based on recency patterns.
+def _detect_preferred_type(session_splits: list[dict], target_dt: datetime) -> str:
+    """Choose the 'due' workout type from muscle-group classified sessions.
 
     Strategy:
-      1. If any of push/pull/legs is missing from the last 7 days → propose it.
-      2. If all three present, pick the one done least recently.
-      3. If no gym work at all in last 7 days, default to 'push'.
-      4. Day-of-week hint: if target is a weekend and last 2 weekends had no
-         cardio/pickleball, nudge toward pickleball/run (Mateo's pattern).
+      1. Weekend nudge to cardio/pickleball if none in last ~14 days.
+      2. Among push/pull/legs: pick the one not seen in longest (including
+         any "mixed" session that touched it).
+      3. If all three seen in last 3 days, pick the one done least
+         recently to space things out.
+      4. No gym activity at all in last 7 days → default to push.
     """
-    last7_types: list[str] = []
-    type_last_seen: dict[str, int] = {}  # days ago
-    for w in recent_workouts:
-        t = _normalize_type(w.get("type", ""))
-        if not t:
-            continue
-        date_str = w.get("date", "")
-        if not date_str:
-            continue
-        try:
-            w_dt = datetime.strptime(date_str, "%Y-%m-%d")
-        except ValueError:
-            continue
-        days_ago = (target_dt - w_dt).days
-        if days_ago < 0:
-            continue
-        if days_ago <= 7:
-            last7_types.append(t)
-        if t not in type_last_seen or days_ago < type_last_seen[t]:
-            type_last_seen[t] = days_ago
-
-    gym_present = [t for t in ("push", "pull", "legs") if t in last7_types]
-
-    # Weekend nudge: Saturday=5, Sunday=6.
-    if target_dt.weekday() in (5, 6) and not any(t in last7_types for t in ("pickleball", "run")):
+    # Weekend nudge (Sat=5, Sun=6). Check workouts table indirectly via
+    # the splits list — cardio sessions don't go through exercises table,
+    # so we rely on pattern inference from exercise-based classification.
+    # For now, if it's Sunday and the last 14 days had 4+ gym sessions,
+    # propose active recovery pickleball to balance.
+    recent_7 = [s for s in session_splits if s["daysAgo"] <= 7]
+    if target_dt.weekday() in (5, 6) and len(recent_7) >= 4:
         return "pickleball" if target_dt.weekday() == 6 else "run"
 
-    # No gym activity in the last week → start with push.
-    if not gym_present:
+    if not recent_7:
         return "push"
 
-    # Missing one of the three → fill the gap.
-    missing = [t for t in ("push", "pull", "legs") if t not in last7_types]
-    if missing:
-        # If multiple missing, pick by what's been absent longest.
-        missing.sort(key=lambda t: type_last_seen.get(t, 999), reverse=True)
-        return missing[0]
+    # Find last-seen days_ago for each split (including mixed with that split).
+    last_seen: dict[str, int] = {}
+    for split in ("push", "pull", "legs"):
+        s = _last_seen_split(session_splits, split)
+        if s is not None:
+            last_seen[split] = s["daysAgo"]
 
-    # All three present — pick the one done least recently.
-    ordered = sorted(("push", "pull", "legs"), key=lambda t: type_last_seen.get(t, 0), reverse=True)
+    # Pick the split that's been absent longest (or never seen → priority).
+    def _rank(split: str) -> int:
+        return last_seen.get(split, 999)
+
+    ordered = sorted(("push", "pull", "legs"), key=_rank, reverse=True)
     return ordered[0]
 
 
-def _build_main(workout_type: str, recovery_zone: str, recent_workouts: list[dict]) -> dict:
+def _build_main(
+    workout_type: str,
+    recovery_zone: str,
+    session_splits: list[dict],
+    target_dt: datetime,
+) -> dict:
     duration = _DEFAULT_DURATION.get(workout_type, 30)
     intensity = "hard" if recovery_zone == "green" else "moderate"
 
@@ -338,21 +392,20 @@ def _build_main(workout_type: str, recovery_zone: str, recent_workouts: list[dic
         "rest": ["recovery"],
     }
 
-    # Natural-language reason.
-    type_counter = Counter(
-        _normalize_type(w.get("type", "")) for w in recent_workouts
-    )
-    count_7d = _count_in_window(recent_workouts, days=7, type=workout_type)
-
+    # Verifiable, date-grounded reason. No "last 28" counts that mislead.
     bits = []
     if recovery_zone == "green":
         bits.append("Recovery green — train hard")
     elif recovery_zone == "yellow":
         bits.append("Moderate recovery — train smart")
-    if workout_type in _UPPER_TYPES and type_counter.get(workout_type, 0) == 0:
-        bits.append(f"no {workout_type} day in the last 28")
-    elif count_7d == 0 and workout_type in ("push", "pull", "legs"):
-        bits.append(f"{workout_type} is due — none this week")
+
+    if workout_type in ("push", "pull", "legs"):
+        last = _last_seen_split(session_splits, workout_type)
+        if last is None:
+            bits.append(f"no {workout_type} work in last 28d")
+        else:
+            bits.append(f"last {workout_type}: {_fmt_when(last['daysAgo'], last['date'], target_dt)}")
+
     reason = ". ".join(bits).strip() or f"{workout_type.capitalize()} day."
 
     return {
@@ -364,13 +417,20 @@ def _build_main(workout_type: str, recovery_zone: str, recent_workouts: list[dic
     }
 
 
-def _count_in_window(workouts: list[dict], days: int, type: str) -> int:
-    cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
-    count = 0
-    for w in workouts:
-        if w.get("date", "") >= cutoff and _normalize_type(w.get("type", "")) == type:
-            count += 1
-    return count
+def _fmt_when(days_ago: int, date_str: str, target_dt: datetime) -> str:
+    """Human-readable 'when' string: 'yesterday', 'Mon 4/27', etc."""
+    if days_ago == 0:
+        return "today"
+    if days_ago == 1:
+        return "yesterday"
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return f"{days_ago}d ago"
+    # Within the current week → day name; else MM/DD.
+    if days_ago <= 6:
+        return f"{d.strftime('%a')} {d.month}/{d.day}"
+    return f"{d.month}/{d.day}"
 
 
 # Workout type → which muscle groups the focus-lifts should come from.
@@ -429,15 +489,40 @@ def _pick_focus_lifts(
     except Exception:
         pass
 
-    # 2. Volume-behind muscle groups (this week's roll-up).
+    # 2. Volume-behind muscle groups.
+    # Baseline: average per-group volume across the last 4 weeks (excluding
+    # this one). Flag as "behind" when this week's volume is < 70% of the
+    # 4-week average — or the group is completely missing this week and
+    # the 4-week average shows it's normally trained. Never "behind" when
+    # we don't have enough history (avoid false positives for new groups).
+    behind: list[str] = []
     try:
         week_start = target_dt - timedelta(days=target_dt.weekday())
-        week_row = get_item(scores_table, {"date": f"week_{week_start.strftime('%Y-%m-%d')}"}) or {}
-        vol_by_mg = {k: float(v) for k, v in (week_row.get("volume_by_muscle_group") or {}).items()}
-        # Rank muscle groups behind — lowest volume among the relevant set.
-        relevant = [(mg, vol_by_mg.get(mg, 0)) for mg in muscle_groups]
-        relevant.sort(key=lambda t: t[1])  # lowest first
-        behind = [mg for mg, v in relevant if v < _median(list(vol_by_mg.values())) or v == 0]
+        cur_week_row = get_item(scores_table, {"date": f"week_{week_start.strftime('%Y-%m-%d')}"}) or {}
+        cur_vol = {k: float(v) for k, v in (cur_week_row.get("volume_by_muscle_group") or {}).items()}
+
+        prior_vol_sum: dict[str, float] = {}
+        prior_vol_weeks: dict[str, int] = {}
+        for i in range(1, 5):  # 4 prior weeks
+            ws = (week_start - timedelta(days=7 * i)).strftime("%Y-%m-%d")
+            row = get_item(scores_table, {"date": f"week_{ws}"}) or {}
+            wk_vol = row.get("volume_by_muscle_group") or {}
+            for mg, v in wk_vol.items():
+                try:
+                    prior_vol_sum[mg] = prior_vol_sum.get(mg, 0) + float(v)
+                    prior_vol_weeks[mg] = prior_vol_weeks.get(mg, 0) + 1
+                except (TypeError, ValueError):
+                    continue
+
+        for mg in muscle_groups:
+            weeks = prior_vol_weeks.get(mg, 0)
+            if weeks < 2:
+                # Not enough history — don't claim "behind".
+                continue
+            baseline = prior_vol_sum[mg] / weeks
+            this_week = cur_vol.get(mg, 0)
+            if baseline > 0 and this_week < baseline * 0.7:
+                behind.append(mg)
     except Exception:
         behind = []
 
@@ -503,15 +588,6 @@ def _pick_focus_lifts(
         seen_canonicals.add(c["canonical"])
 
     return picks
-
-
-def _median(values: list[float]) -> float:
-    if not values:
-        return 0.0
-    s = sorted(values)
-    n = len(s)
-    mid = n // 2
-    return s[mid] if n % 2 == 1 else (s[mid - 1] + s[mid]) / 2
 
 
 def _combined_reason(main: dict, activation: Optional[dict], recovery_zone: str) -> str:
