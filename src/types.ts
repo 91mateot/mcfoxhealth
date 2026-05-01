@@ -421,6 +421,42 @@ export interface Correlation {
   direction: "positive" | "negative";
 }
 
+export interface CorrelationPoint {
+  x: number;
+  y: number;
+  date: string;
+}
+
+export interface NumericCorrelation {
+  /** e.g. "numeric:caffeine_mg" — the CorrelationsTable row key. */
+  tag: string;
+  /** Input key without the `numeric:` prefix, e.g. "caffeine_mg". */
+  input: string;
+  inputLabel: string;
+  inputUnits: string;
+  /** Outcome metric column, e.g. "sleep_score". */
+  outcome: string;
+  outcomeLabel: string;
+  outcomeUnits: string;
+  lagDays: number;
+  better: "up" | "down";
+  n: number;
+  r: number;
+  slope: number;
+  intercept: number;
+  confidence: "high" | "medium" | "low";
+  insight: string;
+  points: CorrelationPoint[];
+  windowDays: number;
+  computedAt?: string;
+}
+
+export interface InsightsResponse {
+  numeric: NumericCorrelation[];
+  journal: Correlation[];
+  computedAt?: string | null;
+}
+
 export interface TrendsResponse {
   trends30d: {
     hrv: TrendMetric;

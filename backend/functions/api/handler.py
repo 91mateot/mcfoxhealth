@@ -5,6 +5,7 @@ API Lambda — read endpoints for the PWA frontend.
   GET  /api/workouts                    — Workout history
   GET  /api/nutrition/:d                — Day's nutrition log
   GET  /api/progress                    — Body composition + 30-day trends + lifts
+  GET  /api/insights                    — Numeric + journal-tag correlations for the Insights modal
   GET  /api/conversation/latest         — Most recent coach thread (if active within 6h)
   POST /api/planned-workout/refresh     — Re-run the proposer for today
 """
@@ -33,6 +34,8 @@ def lambda_handler(event, context):
         return _get_nutrition(date)
     if path == "/api/progress":
         return _get_progress()
+    if path == "/api/insights":
+        return _get_insights()
     if path == "/api/conversation/latest":
         return _get_latest_conversation()
     if path == "/api/planned-workout/refresh" and method == "POST":
@@ -721,6 +724,92 @@ def _build_coach_insights(scores, baselines, targets, water_total):
         })
 
     return insights
+
+
+def _get_insights():
+    """Return both numeric and journal-tag correlations for the Insights modal.
+
+    Numeric rows carry `kind="numeric"` and `tag="numeric:<input>"`; journal
+    rows are everything else. We keep the coach's `/api/progress` payload
+    free of scatterplot points to hold that endpoint's size down.
+    """
+    corr_table = get_table("CORRELATIONS_TABLE")
+
+    try:
+        resp = corr_table.scan(Limit=500)
+        items = resp.get("Items", [])
+    except Exception:
+        items = []
+
+    def _num(v):
+        if v is None:
+            return None
+        try:
+            f = float(v)
+            return int(f) if f == int(f) else f
+        except (TypeError, ValueError):
+            return None
+
+    numeric = []
+    journal = []
+    computed_at = None
+    for it in items:
+        kind = it.get("kind")
+        if kind == "numeric":
+            numeric.append({
+                "tag": it.get("tag"),
+                "input": (it.get("tag") or "").removeprefix("numeric:"),
+                "inputLabel": it.get("input_label"),
+                "inputUnits": it.get("input_units"),
+                "outcome": it.get("metric"),
+                "outcomeLabel": it.get("outcome_label"),
+                "outcomeUnits": it.get("outcome_units"),
+                "lagDays": _num(it.get("lag_days")) or 0,
+                "better": it.get("better"),
+                "n": _num(it.get("n")),
+                "r": _num(it.get("r")),
+                "slope": _num(it.get("slope")),
+                "intercept": _num(it.get("intercept")),
+                "confidence": it.get("confidence"),
+                "insight": it.get("insight"),
+                "points": [
+                    {"x": _num(p.get("x")), "y": _num(p.get("y")), "date": p.get("date")}
+                    for p in (it.get("points") or [])
+                    if p.get("x") is not None and p.get("y") is not None
+                ],
+                "windowDays": _num(it.get("window_days")),
+                "computedAt": it.get("computed_at"),
+            })
+            ca = it.get("computed_at")
+            if ca and (computed_at is None or ca > computed_at):
+                computed_at = ca
+        else:
+            journal.append({
+                "tag": it.get("tag"),
+                "metric": it.get("metric"),
+                "effect": _num(it.get("effect")),
+                "unit": it.get("unit"),
+                "n": _num(it.get("n")),
+                "confidence": it.get("confidence"),
+                "direction": it.get("direction"),
+            })
+
+    # Sort numeric by |r| × confidence rank so the UI can "take the top N".
+    conf_rank = {"high": 3, "medium": 2, "low": 1}
+    numeric.sort(
+        key=lambda c: (conf_rank.get(c.get("confidence"), 0), abs(c.get("r") or 0)),
+        reverse=True,
+    )
+    journal.sort(
+        key=lambda c: (conf_rank.get(c.get("confidence"), 0), abs(c.get("effect") or 0)),
+        reverse=True,
+    )
+
+    return _resp(200, {
+        "numeric": numeric,
+        "journal": journal,
+        "computedAt": computed_at,
+    })
 
 
 _CONVERSATION_IDLE_HOURS = 6

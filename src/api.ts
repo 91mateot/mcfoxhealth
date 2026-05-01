@@ -4,6 +4,7 @@ import type {
   WorkoutsResponse,
   NutritionResponse,
   ProgressResponse,
+  InsightsResponse,
   Meal,
   MealInput,
   MealEstimate,
@@ -73,6 +74,10 @@ export function useWorkouts(): SWRResponse<WorkoutsResponse> {
 
 export function useProgress(): SWRResponse<ProgressResponse> {
   return useSWR<ProgressResponse>("/api/progress", fetcher);
+}
+
+export function useInsights(enabled = true): SWRResponse<InsightsResponse> {
+  return useSWR<InsightsResponse>(enabled ? "/api/insights" : null, fetcher);
 }
 
 export function useNutrition(date: string): SWRResponse<NutritionResponse> {

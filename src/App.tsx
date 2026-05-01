@@ -12,6 +12,7 @@ import { ChatModal } from "./modals/Chat";
 import { JournalSheet } from "./modals/Journal";
 import { MealDetailModal } from "./modals/MealDetail";
 import { WorkoutDetailModal } from "./modals/WorkoutDetail";
+import { InsightsModal } from "./modals/Insights";
 import type { Meal, Workout } from "./types";
 import { useToday, useWorkouts, useProgress, useNutrition, logMeal, logWorkout, submitJournal, todayISO } from "./api";
 
@@ -38,6 +39,7 @@ export default function App() {
   const [journalOpen, setJournalOpen] = useState(false);
   const [mealDetail, setMealDetail] = useState<Meal | null>(null);
   const [workoutDetail, setWorkoutDetail] = useState<Workout | null>(null);
+  const [insightsOpen, setInsightsOpen] = useState(false);
 
   useEffect(() => {
     localStorage.setItem("mateo-tab", tab);
@@ -126,7 +128,12 @@ export default function App() {
       )}
 
       {today.data && progress.data && tab === "progress" && (
-        <ProgressScreen C={C} today={today.data} progress={progress.data} />
+        <ProgressScreen
+          C={C}
+          today={today.data}
+          progress={progress.data}
+          onOpenInsights={() => setInsightsOpen(true)}
+        />
       )}
 
       {(!today.data || isLoadingTab(tab, { today, progress, workouts, nutrition })) && (
@@ -194,6 +201,7 @@ export default function App() {
         onClose={() => setWorkoutDetail(null)}
         workout={workoutDetail}
       />
+      <InsightsModal C={C} open={insightsOpen} onClose={() => setInsightsOpen(false)} />
     </div>
   );
 }

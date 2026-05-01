@@ -22,13 +22,14 @@ interface ProgressScreenProps {
   C: Palette;
   today: TodayResponse;
   progress: ProgressResponse;
+  onOpenInsights?: () => void;
 }
 
-export function ProgressScreen({ C, today, progress }: ProgressScreenProps) {
+export function ProgressScreen({ C, today, progress, onOpenInsights }: ProgressScreenProps) {
   return (
     <div>
       <NowSection C={C} today={today} body={progress.now} />
-      <TrendSection C={C} trends={progress.trend} />
+      <TrendSection C={C} trends={progress.trend} onOpenInsights={onOpenInsights} />
       {progress.lifts && <LiftsSectionView C={C} lifts={progress.lifts} />}
     </div>
   );
@@ -132,7 +133,7 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
   );
 }
 
-function TrendSection({ C, trends }: { C: Palette; trends: TrendsResponse }) {
+function TrendSection({ C, trends, onOpenInsights }: { C: Palette; trends: TrendsResponse; onOpenInsights?: () => void }) {
   const T = trends.trends30d;
   const S = trends.trendSeries;
 
@@ -228,6 +229,31 @@ function TrendSection({ C, trends }: { C: Palette; trends: TrendsResponse }) {
           Correlations update nightly. Higher <span style={{ color: C.t2, fontWeight: 700 }}>n</span> = more confidence.
         </div>
       </div>
+
+      {onOpenInsights && (
+        <button
+          onClick={onOpenInsights}
+          style={{
+            width: "100%",
+            background: C.s,
+            color: C.t,
+            border: `1px solid ${C.border}`,
+            borderRadius: 14,
+            padding: "13px 14px",
+            fontFamily: "inherit",
+            fontSize: 13,
+            fontWeight: 700,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: 10,
+          }}
+        >
+          <span>See all insights</span>
+          <span style={{ color: C.t3, fontFamily: MONO, fontSize: 16 }}>→</span>
+        </button>
+      )}
 
       {T.weight && S.weight && (
         <>

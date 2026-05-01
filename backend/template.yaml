@@ -375,6 +375,12 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/progress
             Method: GET
+        GetInsights:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/insights
+            Method: GET
         GetLatestConversation:
           Type: HttpApi
           Properties:

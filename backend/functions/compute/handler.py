@@ -13,6 +13,8 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from shared.db import get_table, put_item, get_item, query_items
+from shared.insight_templates import PAIRS as NUMERIC_PAIRS, confidence_tier, render_insight
+from shared.pearson import linreg, pearson_r
 from shared.lift_compute import (
     detect_prs as _detect_prs_shared,
     detect_stall as _detect_stall_shared,
@@ -162,6 +164,7 @@ def _compute_day(date_str):
     nutrition_items = query_items(nutrition_table, "date", date_str)
     protein_total = sum(m.get("p", 0) for m in nutrition_items if m.get("meal_id", "").startswith("meal_"))
     cal_total = sum(m.get("cal", 0) for m in nutrition_items if m.get("meal_id", "").startswith("meal_"))
+    caffeine_total = sum(m.get("caffeine_mg", 0) or 0 for m in nutrition_items if m.get("meal_id", "").startswith("meal_"))
     water_total = 0
     for n in nutrition_items:
         if n.get("meal_id", "").startswith("water_"):
@@ -197,6 +200,7 @@ def _compute_day(date_str):
     score_item["protein_total"] = protein_total
     score_item["cal_total"] = cal_total
     score_item["water_oz"] = water_total
+    score_item["caffeine_total"] = caffeine_total
 
     if sleep_item:
         score_item["sleep"] = {
@@ -303,9 +307,10 @@ def _compute_baselines():
 
 
 def _compute_correlations():
-    """Compute journal tag → metric correlations + lift correlations over last 60/90 days."""
+    """Compute journal tag → metric correlations + lift correlations + numeric correlations."""
     _compute_journal_correlations()
     _compute_lift_correlations()
+    _compute_numeric_correlations()
     return {"status": "correlations_computed"}
 
 
@@ -411,6 +416,134 @@ def _compute_journal_correlations():
             results.append(corr_item)
 
     return {"status": "correlations_computed", "count": len(results)}
+
+
+_NUMERIC_WINDOW_DAYS = 60
+_NUMERIC_MIN_N = 10
+
+
+def _compute_numeric_correlations():
+    """Regress numeric daily inputs against outcomes (Pearson r + linear fit).
+
+    Writes one row per pair to CorrelationsTable with `kind="numeric"` and a
+    `tag` prefixed `numeric:` so existing journal-tag consumers (coach prompt,
+    `/api/progress`) skip these rows cleanly.
+    """
+    scores_table = get_table("DAILY_SCORES_TABLE")
+    corr_table = get_table("CORRELATIONS_TABLE")
+
+    today = local_now()
+    # Need one extra day so next-day (lag=1) pairs at the edge can resolve.
+    dates = [(today - timedelta(days=i + 1)).strftime("%Y-%m-%d") for i in range(_NUMERIC_WINDOW_DAYS + 1)]
+
+    by_date: dict[str, dict] = {}
+    for d in dates:
+        s = get_item(scores_table, {"date": d})
+        if not s:
+            continue
+        sleep = s.get("sleep") or {}
+        total_min = float(sleep.get("total_min") or 0)
+        entry = {
+            "caffeine_mg": _num(s.get("caffeine_total")),
+            "protein_total": _num(s.get("protein_total")),
+            "water_oz": _num(s.get("water_oz")),
+            "strain": _num(s.get("strain")),
+            "sleep_hours": total_min / 60 if total_min > 0 else None,
+            "sleep_score": _num(s.get("sleep_score")),
+            "deep_pct": (float(sleep.get("deep_min") or 0) / total_min * 100) if total_min > 0 else None,
+            "rem_pct": (float(sleep.get("rem_min") or 0) / total_min * 100) if total_min > 0 else None,
+            "hrv": _num(s.get("hrv")),
+            "recovery": _num(s.get("recovery")),
+        }
+        by_date[d] = entry
+
+    computed_at = utc_now().replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    results: list[dict] = []
+
+    for pair in NUMERIC_PAIRS:
+        input_key = pair["input"]
+        outcome_key = pair["outcome"]
+        lag = int(pair.get("lag_days", 0))
+
+        points: list[dict] = []
+        for d in sorted(by_date.keys()):
+            input_row = by_date.get(d)
+            if not input_row:
+                continue
+            x = input_row.get(input_key)
+            if x is None:
+                continue
+
+            # Resolve the outcome date based on lag.
+            out_date = d
+            if lag:
+                try:
+                    dt = datetime.strptime(d, "%Y-%m-%d") + timedelta(days=lag)
+                    out_date = dt.strftime("%Y-%m-%d")
+                except Exception:
+                    continue
+            out_row = by_date.get(out_date)
+            if not out_row:
+                continue
+            y = out_row.get(outcome_key)
+            if y is None:
+                continue
+
+            points.append({"x": round(float(x), 3), "y": round(float(y), 3), "date": d})
+
+        if len(points) < _NUMERIC_MIN_N:
+            continue
+
+        xs = [p["x"] for p in points]
+        ys = [p["y"] for p in points]
+        r = pearson_r(xs, ys)
+        fit = linreg(xs, ys)
+        if r is None or fit is None:
+            continue
+        slope, intercept = fit
+
+        n = len(points)
+        x_mean = sum(xs) / n
+        x_var = sum((x - x_mean) ** 2 for x in xs) / n
+        x_std = x_var**0.5
+
+        insight = render_insight(pair, r=r, slope=slope, n=n, x_mean=x_mean, x_std=x_std)
+
+        corr_item = {
+            "tag": f"numeric:{input_key}",
+            "metric": outcome_key,
+            "kind": "numeric",
+            "input_label": pair["input_label"],
+            "input_units": pair["input_units"],
+            "outcome_label": pair["outcome_label"],
+            "outcome_units": pair["outcome_units"],
+            "lag_days": lag,
+            "better": pair["better"],
+            "n": n,
+            "r": round(r, 4),
+            "slope": round(slope, 6),
+            "intercept": round(intercept, 4),
+            "confidence": confidence_tier(n),
+            "insight": insight,
+            "points": points,
+            "window_days": _NUMERIC_WINDOW_DAYS,
+            "computed_at": computed_at,
+        }
+        put_item(corr_table, corr_item)
+        results.append(corr_item)
+
+    return {"status": "numeric_correlations_computed", "count": len(results)}
+
+
+def _num(v):
+    """Coerce DynamoDB numeric (int/Decimal/float) to float, skip None/0-like None."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f
 
 
 def _get_baselines():
