@@ -39,6 +39,12 @@ from shared.nutrition_service import (
     delete_workout as svc_delete_workout,
 )
 from shared.workout_service import annotate_workout as svc_annotate_workout
+from shared.workout_proposer import (
+    propose_for_date as svc_propose_workout,
+    write_proposal as svc_write_proposal,
+    update_lateral_chain_phase as svc_update_lateral_chain_phase,
+)
+from shared.timezone import local_today_str
 
 logger = logging.getLogger("coach")
 logger.setLevel(logging.INFO)
@@ -234,6 +240,43 @@ TOOLS = [
             "required": ["text"],
         },
     },
+    {
+        "name": "propose_workout",
+        "description": (
+            "Generate today's workout proposal (main workout type + the "
+            "phase-appropriate Lateral Chain activation circuit). Use when "
+            "Mateo asks 'what should I train?', 'what's the plan today?', "
+            "or wants to refresh an existing proposal. Also writes the "
+            "proposal so the Today card picks it up. No input required."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "set_lateral_chain_phase",
+        "description": (
+            "Update Mateo's current Lateral Chain Rebuild program phase "
+            "(1=Activation, 2=Strength, 3=Power). Use when Mateo confirms "
+            "he's advancing OR says he's already past the current phase — "
+            "e.g. 'I can do bent-knee Copenhagens fine, bump me to phase 2'. "
+            "Subsequent workout proposals will use the new phase's circuit."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "phase": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3,
+                    "description": "New phase (1, 2, or 3).",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Short note on why — what Mateo said that confirmed the advance.",
+                },
+            },
+            "required": ["phase"],
+        },
+    },
 ]
 
 
@@ -265,6 +308,16 @@ def _execute_tool(name: str, args: dict) -> dict:
                 args.get("text", ""),
                 date=args.get("date"),
                 workout_id=args.get("workout_id"),
+            )
+        if name == "propose_workout":
+            today_str = local_today_str()
+            proposal = svc_propose_workout(today_str)
+            svc_write_proposal(today_str, proposal)
+            return proposal
+        if name == "set_lateral_chain_phase":
+            return svc_update_lateral_chain_phase(
+                int(args.get("phase", 1)),
+                reason=args.get("reason"),
             )
         return {"error": f"unknown tool {name}"}
     except Exception as e:

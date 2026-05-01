@@ -36,6 +36,7 @@ from shared.scoring import (
     DEFAULT_BASELINES,
 )
 from shared.timezone import local_now, local_today_str, utc_now
+from shared.workout_proposer import propose_for_date as _propose_workout_for_date
 
 
 def lambda_handler(event, context):
@@ -201,6 +202,16 @@ def _compute_day(date_str):
         }
 
     put_item(scores_table, score_item)
+
+    # Planned workout for the day. Runs after the score write so the
+    # proposer sees fresh recovery_zone. Isolated try/except so a
+    # proposer bug never breaks the daily compute.
+    try:
+        proposal = _propose_workout_for_date(date_str)
+        score_item["planned_workout"] = proposal
+        put_item(scores_table, score_item)
+    except Exception:
+        logger.exception("propose_for_date failed for %s", date_str)
 
     return {
         "date": date_str,

@@ -96,7 +96,7 @@ export default function App() {
           data={today.data}
           nutrition={nutrition.data}
           onRingTap={(k) => setSheetRing(k)}
-          onOpenChat={() => openChat()}
+          onOpenChat={openChat}
           onLogMeal={() => openLogMeal()}
           onLogWorkout={() => setWorkoutOpen(true)}
           onOpenJournal={() => setJournalOpen(true)}

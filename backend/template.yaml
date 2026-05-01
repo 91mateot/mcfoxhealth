@@ -332,7 +332,7 @@ Resources:
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref HealthMetricsTable
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: !Ref DailyScoresTable
         - DynamoDBReadPolicy:
             TableName: !Ref WorkoutsTable
@@ -381,6 +381,12 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/conversation/latest
             Method: GET
+        RefreshPlannedWorkout:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/planned-workout/refresh
+            Method: POST
 
   NutritionFunction:
     Type: AWS::Serverless::Function

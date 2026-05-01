@@ -12,6 +12,7 @@ import type {
   ChatMessage,
   JournalToday,
   LatestConversationResponse,
+  PlannedWorkout,
 } from "./types";
 
 export const API_BASE =
@@ -316,6 +317,12 @@ export async function regenerateWorkoutFeedback(date: string, workoutId: string)
   }>(`/api/workout/${date}/${workoutId}/feedback`, {});
   mutate("/api/workouts");
   return result;
+}
+
+export async function refreshPlannedWorkout(): Promise<PlannedWorkout | null> {
+  const result = await post<{ plannedWorkout: PlannedWorkout | null }>("/api/planned-workout/refresh", {});
+  mutate("/api/today");
+  return result.plannedWorkout;
 }
 
 export async function fetchLatestConversation(): Promise<LatestConversationResponse> {

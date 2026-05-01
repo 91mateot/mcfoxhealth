@@ -208,9 +208,57 @@ export interface TodayResponse {
   proteinWeek: ProteinDay[];
   supplements: Supplement[];
   coachInsights: CoachInsight[];
+  plannedWorkout?: PlannedWorkout | null;
   base: Baselines;
   journal?: JournalToday;
   journalLastNight?: JournalLastNight;
+}
+
+export type WorkoutType =
+  | "push"
+  | "pull"
+  | "legs"
+  | "run"
+  | "hiit"
+  | "pilates"
+  | "pickleball"
+  | "walk"
+  | "mobility"
+  | "sport_prep"
+  | "rest";
+
+export type WorkoutIntensity = "light" | "moderate" | "hard";
+
+export interface ActivationExercise {
+  name: string;
+  sets?: number;
+  reps?: string;
+  cue?: string;
+}
+
+export interface ActivationBlock {
+  name: string;
+  durationMin: number;
+  location: "gym" | "home";
+  exercises: ActivationExercise[];
+}
+
+export interface PlannedMain {
+  type: WorkoutType;
+  durationMin: number;
+  intensity: WorkoutIntensity;
+  reason: string;
+  focusMuscleGroups?: string[];
+}
+
+export interface PlannedWorkout {
+  main: PlannedMain;
+  activation?: ActivationBlock | null;
+  reason: string;
+  phase?: number;
+  generatedAt: string;
+  matched: boolean;
+  matchedWorkoutId?: string | null;
 }
 
 export type MuscleGroup =

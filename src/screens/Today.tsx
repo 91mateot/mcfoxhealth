@@ -10,6 +10,7 @@ import { ProgressBar } from "../components/ProgressBar";
 import { Btn } from "../components/Btn";
 import { HydrationPanel } from "../components/HydrationPanel";
 import { CaffeinePanel } from "../components/CaffeinePanel";
+import { PlannedWorkoutCard } from "../components/PlannedWorkoutCard";
 import { HydrationDetail } from "../modals/HydrationDetail";
 import { todayISO } from "../api";
 
@@ -18,7 +19,7 @@ interface TodayScreenProps {
   data: TodayResponse;
   nutrition?: NutritionResponse;
   onRingTap: (which: "recovery" | "strain" | "sleep" | "primer") => void;
-  onOpenChat: () => void;
+  onOpenChat: (prompt?: string) => void;
   onLogMeal: () => void;
   onLogWorkout: () => void;
   onOpenJournal: () => void;
@@ -87,6 +88,11 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
           onClick={() => onRingTap("sleep")}
         />
       </div>
+
+      {/* Today's workout card */}
+      {data.plannedWorkout && (
+        <PlannedWorkoutCard C={C} planned={data.plannedWorkout} onSwap={onOpenChat} />
+      )}
 
       {/* Plain-English summary */}
       <Panel C={C} style={{ background: C.s, padding: "12px 14px" }}>
@@ -160,7 +166,7 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
       {/* Coach banner */}
       {data.coachInsights.length > 0 && (
         <button
-          onClick={onOpenChat}
+          onClick={() => onOpenChat()}
           style={{
             width: "100%",
             background: C.s,

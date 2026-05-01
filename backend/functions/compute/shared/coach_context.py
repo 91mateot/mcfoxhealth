@@ -43,6 +43,7 @@ def build_system_prompt(snapshot: Optional[dict]) -> str:
         lift_block = ""
     journal_block = _last_night_journal_block(journal_table, today_str)
     correlations_block = _correlations_block(corr_table)
+    program_block = _lateral_chain_program_block(get_table("USER_CONFIG_TABLE"))
 
     return f"""You are Mateo's personal fitness coach AI. You live inside his fitness dashboard app.
 
@@ -72,6 +73,8 @@ You have tools to take action for Mateo. Use them proactively when he mentions c
 - delete_meal(meal_id): Remove a previously-logged meal (and its water companion). ONLY use to fix a mistake — e.g. you logged the wrong thing, or Mateo says "delete that".
 - delete_water(water_id): Remove a previously-logged standalone water entry. Same rule — only to fix a mistake.
 - delete_workout(workout_id): Remove a previously-logged workout. Same rule — only to fix a mistake or duplicate.
+- propose_workout(): Generate today's workout plan (main + Lateral Chain activation circuit). Use when Mateo asks "what should I train?", "what's on deck?", or wants a fresh proposal. Writes to the Today card automatically.
+- set_lateral_chain_phase(phase, reason?): Update Mateo's Lateral Chain Rebuild phase (1-3). Use when he confirms advancing, e.g. "I can do bent-knee Copenhagens fine — bump me to 2". Subsequent proposals use the new phase's circuit.
 
 ## CRITICAL: logging rules
 - **log_meal, log_water, AND log_workout are append-only** — each call creates a NEW row. Never call any of them twice for the same consumption or session. If Mateo corrects or clarifies (e.g. "had tea" then "I meant green tea", "34 oz water" then "wait, 24 oz", or "push day" then "that was actually legs"), you MUST:
@@ -105,6 +108,8 @@ When Mateo sends a photo (one or more, up to 5 per turn):
 {lift_block}
 
 {journal_block}
+
+{program_block}
 
 {correlations_block}
 
@@ -524,4 +529,35 @@ def _correlations_block(corr_table):
             f"- {c.get('tag')} → {c.get('metric')}: {sign}{effect}{c.get('unit', '')} "
             f"(n={c.get('n')}, {c.get('confidence')} confidence)"
         )
+    return "\n".join(lines)
+
+
+def _lateral_chain_program_block(config_table):
+    """Surface Mateo's current Lateral Chain Rebuild phase."""
+    try:
+        config = get_item(config_table, {"key": "mateo"}) or {}
+    except Exception:
+        return ""
+
+    program = config.get("lateral_chain_program") or {}
+    phase = int(program.get("phase", 1)) if program else None
+    if not phase:
+        return ""
+
+    phase_names = {1: "Activation & Endurance", 2: "Strength & Integration", 3: "Power & Reactivity"}
+    name = phase_names.get(phase, f"Phase {phase}")
+
+    lines = [
+        "## Lateral Chain Rebuild Program",
+        f"- Current phase: **{phase} — {name}**",
+        f"- Started: {program.get('started_at', 'unknown')}",
+        f"- Last phase change: {program.get('last_phase_change', 'n/a')}",
+    ]
+    if program.get("notes"):
+        lines.append(f"- Notes: {program['notes']}")
+    lines.append(
+        "- Program context: post-L4/L5 discectomy rehab focused on right-sided lateral chain. "
+        "Activation circuit is paired with every workout. Use set_lateral_chain_phase(phase) "
+        "only when Mateo explicitly confirms readiness to advance."
+    )
     return "\n".join(lines)

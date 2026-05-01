@@ -1,24 +1,27 @@
 """
 API Lambda — read endpoints for the PWA frontend.
 
-  GET /api/today                 — Full today screen payload
-  GET /api/workouts              — Workout history
-  GET /api/nutrition/:d          — Day's nutrition log
-  GET /api/progress              — Body composition + 30-day trends + lifts
-  GET /api/conversation/latest   — Most recent coach thread (if active within 6h)
+  GET  /api/today                       — Full today screen payload
+  GET  /api/workouts                    — Workout history
+  GET  /api/nutrition/:d                — Day's nutrition log
+  GET  /api/progress                    — Body composition + 30-day trends + lifts
+  GET  /api/conversation/latest         — Most recent coach thread (if active within 6h)
+  POST /api/planned-workout/refresh     — Re-run the proposer for today
 """
 
 import json
 import os
 from datetime import datetime, timedelta, timezone
 
-from shared.db import get_table, get_item, query_items
+from shared.db import get_table, get_item, put_item, query_items
 from shared.timezone import local_now, local_today_str
 from shared.conversation_service import get_latest as get_latest_conversation
+from shared.workout_proposer import propose_for_date as _propose_workout_for_date
 
 
 def lambda_handler(event, context):
     path = event.get("rawPath", "")
+    method = (event.get("requestContext", {}).get("http", {}) or {}).get("method", "GET")
     params = event.get("pathParameters", {}) or {}
 
     if path == "/api/today":
@@ -32,8 +35,27 @@ def lambda_handler(event, context):
         return _get_progress()
     if path == "/api/conversation/latest":
         return _get_latest_conversation()
+    if path == "/api/planned-workout/refresh" and method == "POST":
+        return _refresh_planned_workout()
 
     return _resp(404, {"error": "not found"})
+
+
+def _refresh_planned_workout():
+    """Re-run the proposer for today and persist."""
+    today_str = local_today_str()
+    try:
+        proposal = _propose_workout_for_date(today_str)
+    except Exception as e:
+        return _resp(500, {"error": f"propose failed: {e}"})
+
+    scores_table = get_table("DAILY_SCORES_TABLE")
+    existing = get_item(scores_table, {"date": today_str}) or {"date": today_str}
+    existing["planned_workout"] = proposal
+    put_item(scores_table, existing)
+
+    todays_workouts = query_items(get_table("WORKOUTS_TABLE"), "date", today_str)
+    return _resp(200, {"plannedWorkout": _prepare_planned_workout(proposal, todays_workouts)})
 
 
 def _get_today():
@@ -160,6 +182,8 @@ def _get_today():
 
     coach_insights = _build_coach_insights(scores, baselines, targets, water_total)
 
+    planned_workout = _prepare_planned_workout(scores.get("planned_workout"), todays_workouts)
+
     payload = {
         "date": date_display,
         "dateFull": date_full,
@@ -203,6 +227,7 @@ def _get_today():
         "proteinWeek": protein_week,
         "supplements": supplements,
         "coachInsights": coach_insights,
+        "plannedWorkout": planned_workout,
         "base": {
             "hrv": baselines.get("hrv", 48),
             "rhr": baselines.get("rhr", 64),
@@ -576,6 +601,60 @@ def _progress_lifts_body():
         "stalls": stalls,
         "weeklyVolume": weekly_volume,
         "weekStart": week_start.strftime("%Y-%m-%d"),
+    }
+
+
+def _prepare_planned_workout(proposal, todays_workouts):
+    """Camel-case the proposal + flip `matched` if today has a logged workout.
+
+    The proposer writes a dict of the shape described in workout_proposer.
+    We transform it into the camelCase payload the frontend expects and
+    overlay match status from actual workouts logged today.
+    """
+    if not proposal or not isinstance(proposal, dict):
+        return None
+
+    main = proposal.get("main") or {}
+    activation = proposal.get("activation")
+
+    def _camel_exercise(e: dict) -> dict:
+        return {
+            "name": e.get("name", ""),
+            "sets": e.get("sets"),
+            "reps": e.get("reps"),
+            "cue": e.get("cue"),
+        }
+
+    camel_activation = None
+    if activation:
+        camel_activation = {
+            "name": activation.get("name", ""),
+            "durationMin": activation.get("durationMin") or activation.get("duration_min"),
+            "location": activation.get("location", "gym"),
+            "exercises": [_camel_exercise(e) for e in (activation.get("exercises") or [])],
+        }
+
+    matched = False
+    matched_id = None
+    if todays_workouts:
+        matched = True
+        first = todays_workouts[0]
+        matched_id = first.get("strava_id") or first.get("workout_id")
+
+    return {
+        "main": {
+            "type": main.get("type", "rest"),
+            "durationMin": main.get("durationMin") or main.get("duration_min"),
+            "intensity": main.get("intensity", "moderate"),
+            "reason": main.get("reason", ""),
+            "focusMuscleGroups": main.get("focusMuscleGroups") or main.get("focus_muscle_groups") or [],
+        },
+        "activation": camel_activation,
+        "reason": proposal.get("reason", ""),
+        "phase": proposal.get("phase"),
+        "generatedAt": proposal.get("generatedAt") or proposal.get("generated_at"),
+        "matched": matched,
+        "matchedWorkoutId": matched_id,
     }
 
 
