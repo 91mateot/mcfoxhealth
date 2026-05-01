@@ -203,6 +203,49 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
     <Sheet C={C} open={open} onClose={onClose} title="Log a meal" height="82%">
       {step === "describe" && (
         <>
+          {/* Describe-a-meal is the primary path — up top so tapping the FAB
+              puts the input within thumb reach. Scan/photo/favorites follow. */}
+          <div
+            style={{
+              fontSize: 11,
+              color: C.t3,
+              textTransform: "uppercase",
+              letterSpacing: ".1em",
+              fontWeight: 700,
+              marginTop: 6,
+              marginBottom: 8,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
+            <span style={{ whiteSpace: "nowrap" }}>Describe a meal</span>
+            <span style={{ fontSize: 11, color: C.primary, fontFamily: MONO, letterSpacing: ".06em", whiteSpace: "nowrap" }}>
+              ● TAP MIC
+            </span>
+          </div>
+          <VoiceInput
+            C={C}
+            value={custom}
+            onChange={setCustom}
+            placeholder='"8 oz chicken, 1/3 cup mashed potatoes… or paste a recipe link"'
+            minHeight={80}
+          />
+          {error && (
+            <div style={{ fontSize: 11, color: C.warn, marginTop: 8, fontFamily: MONO }}>
+              {error}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8, marginTop: 10, marginBottom: 14 }}>
+            <Btn C={C} full onClick={onClose}>
+              Cancel
+            </Btn>
+            <Btn C={C} primary full onClick={handleEstimate}>
+              {loading ? "Estimating…" : "Send to nutrition coach →"}
+            </Btn>
+          </div>
+
           <button
             onClick={() => {
               setScanMissMsg(null);
@@ -215,7 +258,6 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
               border: `1px solid ${C.primary}55`,
               borderRadius: 14,
               padding: 14,
-              marginTop: 6,
               marginBottom: 10,
               textAlign: "left",
               cursor: scanLookupBusy ? "default" : "pointer",
@@ -308,6 +350,24 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
               </div>
             </div>
           </button>
+
+          {scanMissMsg && (
+            <div
+              style={{
+                background: C.s,
+                border: `1px solid ${C.warn}40`,
+                borderRadius: 12,
+                padding: "10px 12px",
+                marginTop: 4,
+                marginBottom: 10,
+                fontSize: 11.5,
+                color: C.t2,
+                lineHeight: 1.5,
+              }}
+            >
+              {scanMissMsg}
+            </div>
+          )}
 
           {favorites.length > 0 && (
             <>
@@ -408,63 +468,6 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
               </div>
             </button>
           ))}
-          {scanMissMsg && (
-            <div
-              style={{
-                background: C.s,
-                border: `1px solid ${C.warn}40`,
-                borderRadius: 12,
-                padding: "10px 12px",
-                marginTop: 14,
-                marginBottom: 4,
-                fontSize: 11.5,
-                color: C.t2,
-                lineHeight: 1.5,
-              }}
-            >
-              {scanMissMsg}
-            </div>
-          )}
-          <div
-            style={{
-              fontSize: 11,
-              color: C.t3,
-              textTransform: "uppercase",
-              letterSpacing: ".1em",
-              fontWeight: 700,
-              marginTop: scanMissMsg ? 10 : 14,
-              marginBottom: 8,
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
-            <span style={{ whiteSpace: "nowrap" }}>Describe a meal</span>
-            <span style={{ fontSize: 11, color: C.primary, fontFamily: MONO, letterSpacing: ".06em", whiteSpace: "nowrap" }}>
-              ● TAP MIC
-            </span>
-          </div>
-          <VoiceInput
-            C={C}
-            value={custom}
-            onChange={setCustom}
-            placeholder='"8 oz chicken, 1/3 cup mashed potatoes… or paste a recipe link"'
-            minHeight={80}
-          />
-          {error && (
-            <div style={{ fontSize: 11, color: C.warn, marginTop: 8, fontFamily: MONO }}>
-              {error}
-            </div>
-          )}
-          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-            <Btn C={C} full onClick={onClose}>
-              Cancel
-            </Btn>
-            <Btn C={C} primary full onClick={handleEstimate}>
-              {loading ? "Estimating…" : "Send to nutrition coach →"}
-            </Btn>
-          </div>
         </>
       )}
 
