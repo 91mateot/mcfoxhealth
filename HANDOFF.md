@@ -24,7 +24,7 @@ src/
   api.ts                 SWR hooks + POST helpers
   theme.ts               palette tokens (lime/zine/graphite)
   types.ts               TypeScript data models
-  screens/               Today, Train, Fuel, Body, Trends, Coach
+  screens/               Today, Train, Fuel, Progress
   modals/                Chat, Journal, LogMeal, LogWorkout, RingDetail
   components/            Ring, Panel, Stat, Sheet, TabBar, etc.
 ```
@@ -32,8 +32,9 @@ src/
 ### Backend (`backend/`)
 - AWS SAM (`template.yaml`), Python 3.13 Lambdas
 - 5 functions: `ingest`, `compute`, `api`, `nutrition`, `coach`
-- 8 DynamoDB tables: health-metrics, daily-scores, workouts, nutrition,
-  journal, baselines, correlations, user-config, calibration
+- 11 DynamoDB tables: health-metrics, daily-scores, workouts, nutrition,
+  journal, baselines, correlations, user-config, calibration, exercises,
+  conversations
 - EventBridge schedules: compute daily 2am PT, correlations Sunday 6am PT
 - Secrets in AWS Secrets Manager (strava-oauth, withings-oauth, fitness-api-key)
 
@@ -58,14 +59,14 @@ Tested in `backend/tests/test_scoring.py` (Whoop-proxy calibration + sanity).
 | Endpoint                   | Method | Purpose                                   |
 | :------------------------- | :----- | :---------------------------------------- |
 | `/api/today`               | GET    | Today dashboard (recovery/strain/sleep…) |
-| `/api/trends`              | GET    | 30-day metrics + learned correlations     |
+| `/api/progress`            | GET    | Body comp + 30-day trends + lifts         |
 | `/api/workouts`            | GET    | Recent sessions                           |
-| `/api/body`                | GET    | Weight/BF/lean mass/steps                 |
 | `/api/nutrition/{date}`    | GET    | Per-day macros + meals                    |
 | `/api/meal`                | POST   | Log a meal                                |
 | `/api/water`               | POST   | Log water intake                          |
 | `/api/journal`             | POST   | Morning check-in                          |
-| `/api/coach`               | POST   | Chat (streaming via `stream: true`)       |
+| `/api/coach`               | POST   | Chat (streaming, resumes last thread)     |
+| `/api/conversation/latest` | GET    | Most recent coach thread (6h TTL)         |
 
 ## Deploy
 
@@ -76,16 +77,12 @@ Tested in `backend/tests/test_scoring.py` (Whoop-proxy calibration + sanity).
 
 ## Known gaps
 
-1. **Chat is non-streaming.** `askCoachStream()` exists in `src/api.ts:100` but
-   `src/modals/Chat.tsx:6` imports `askCoach` instead.
-2. **LogWorkout doesn't persist.** `src/modals/LogWorkout.tsx` — `onAdd` is
-   currently a no-op callback. Needs a POST endpoint or Strava auto-match.
-3. **No auth on the API.** CORS is `*`, no API key enforcement. Non-guessable
-   URL is the only moat.
-4. **PWA icons missing.** `public/` only has `favicon.svg`. Need
-   `icon-192.png`, `icon-512.png`, and `apple-touch-icon.png` for the
-   home-screen icon to look right.
-5. **Prototype folder.** `prototype/` holds the original Babel Standalone
+1. **No auth on the API.** CORS is `*`, no API key enforcement on the read
+   endpoints (`/api/today`, `/api/progress`, `/api/workouts`,
+   `/api/nutrition/{date}`). Write endpoints (`/api/meal`, `/api/water`) check
+   `x-api-key` via `_verify_api_key()` in `backend/functions/nutrition/handler.py`.
+   Non-guessable URL is the only moat on reads.
+2. **Prototype folder.** `prototype/` holds the original Babel Standalone
    export (Apr 2026). Archived — do not touch.
 
 ## Context

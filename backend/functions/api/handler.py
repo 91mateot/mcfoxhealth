@@ -1,12 +1,11 @@
 """
 API Lambda — read endpoints for the PWA frontend.
 
-  GET /api/today         — Full today screen payload
-  GET /api/trends        — 30-day trends + sparklines + correlations (deprecated, use /api/progress)
-  GET /api/workouts      — Workout history
-  GET /api/nutrition/:d  — Day's nutrition log
-  GET /api/body          — Body composition history (deprecated, use /api/progress)
-  GET /api/progress      — Union of body + trends for the Progress screen
+  GET /api/today                 — Full today screen payload
+  GET /api/workouts              — Workout history
+  GET /api/nutrition/:d          — Day's nutrition log
+  GET /api/progress              — Body composition + 30-day trends + lifts
+  GET /api/conversation/latest   — Most recent coach thread (if active within 6h)
 """
 
 import json
@@ -15,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from shared.db import get_table, get_item, query_items
 from shared.timezone import local_now, local_today_str
+from shared.conversation_service import get_latest as get_latest_conversation
 
 
 def lambda_handler(event, context):
@@ -23,17 +23,15 @@ def lambda_handler(event, context):
 
     if path == "/api/today":
         return _get_today()
-    if path == "/api/trends":
-        return _get_trends()
     if path == "/api/workouts":
         return _get_workouts()
     if path.startswith("/api/nutrition/"):
         date = params.get("date") or path.split("/")[-1]
         return _get_nutrition(date)
-    if path == "/api/body":
-        return _get_body()
     if path == "/api/progress":
         return _get_progress()
+    if path == "/api/conversation/latest":
+        return _get_latest_conversation()
 
     return _resp(404, {"error": "not found"})
 
@@ -217,10 +215,6 @@ def _get_today():
     return _resp(200, payload)
 
 
-def _get_trends():
-    return _resp(200, _progress_trend_body())
-
-
 def _progress_trend_body():
     scores_table = get_table("DAILY_SCORES_TABLE")
     corr_table = get_table("CORRELATIONS_TABLE")
@@ -250,7 +244,6 @@ def _progress_trend_body():
         "strain": {"key": "strain", "unit": "", "better": "up"},
         "steps": {"key": "steps", "unit": "", "better": "up"},
         "protein": {"key": "protein_total", "unit": "g", "better": "up"},
-        # Signals surfaced alongside the new HAE metrics on the Trends tab.
         # "better" is down for resp/temp (elevated = stressed/ill) and up
         # for spo2 (higher = better oxygenation).
         "resp": {"key": "resp", "unit": "/min", "better": "down"},
@@ -441,10 +434,6 @@ def _get_nutrition(date_str):
         "caffeineGoal": targets.get("caffeine", 400),
         "targets": targets,
     })
-
-
-def _get_body():
-    return _resp(200, _progress_now_body())
 
 
 def _progress_now_body():
@@ -640,6 +629,45 @@ def _build_coach_insights(scores, baselines, targets, water_total):
         })
 
     return insights
+
+
+_CONVERSATION_IDLE_HOURS = 6
+
+
+def _get_latest_conversation():
+    """Return the resumable thread, or a null conversationId if none/stale."""
+    thread = get_latest_conversation()
+    if not thread:
+        return _resp(200, {"conversationId": None})
+
+    updated = thread.get("updated_at", "")
+    try:
+        updated_dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+    except Exception:
+        updated_dt = None
+
+    now = datetime.now(timezone.utc)
+    if updated_dt and (now - updated_dt) > timedelta(hours=_CONVERSATION_IDLE_HOURS):
+        return _resp(200, {"conversationId": None})
+
+    messages = []
+    for m in thread.get("messages") or []:
+        row = {
+            "from": m.get("from"),
+            "t": m.get("t", ""),
+            "text": m.get("text", ""),
+        }
+        if m.get("imgCount"):
+            row["imgCount"] = int(m["imgCount"])
+        messages.append(row)
+
+    return _resp(200, {
+        "conversationId": thread.get("conversation_id"),
+        "messages": messages,
+        "summary": thread.get("summary"),
+        "messageCount": int(thread.get("message_count") or 0),
+        "updatedAt": updated,
+    })
 
 
 def _resp(code, body):

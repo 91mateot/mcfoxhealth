@@ -1,10 +1,8 @@
 import useSWR, { type SWRResponse, mutate } from "swr";
 import type {
   TodayResponse,
-  TrendsResponse,
   WorkoutsResponse,
   NutritionResponse,
-  BodyResponse,
   ProgressResponse,
   Meal,
   MealInput,
@@ -13,6 +11,7 @@ import type {
   Favorite,
   ChatMessage,
   JournalToday,
+  LatestConversationResponse,
 } from "./types";
 
 export const API_BASE =
@@ -67,18 +66,8 @@ export function useToday(): SWRResponse<TodayResponse> {
   });
 }
 
-/** @deprecated — superseded by useProgress(). Keep one release then remove. */
-export function useTrends(): SWRResponse<TrendsResponse> {
-  return useSWR<TrendsResponse>("/api/trends", fetcher);
-}
-
 export function useWorkouts(): SWRResponse<WorkoutsResponse> {
   return useSWR<WorkoutsResponse>("/api/workouts", fetcher);
-}
-
-/** @deprecated — superseded by useProgress(). Keep one release then remove. */
-export function useBody(): SWRResponse<BodyResponse> {
-  return useSWR<BodyResponse>("/api/body", fetcher);
 }
 
 export function useProgress(): SWRResponse<ProgressResponse> {
@@ -329,11 +318,23 @@ export async function regenerateWorkoutFeedback(date: string, workoutId: string)
   return result;
 }
 
+export async function fetchLatestConversation(): Promise<LatestConversationResponse> {
+  const res = await fetch(`${API_BASE}/api/conversation/latest`);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+export interface AskCoachOptions {
+  conversationId?: string | null;
+  onConversationId?: (id: string) => void;
+  signal?: AbortSignal;
+}
+
 export async function askCoachStream(
   messages: ChatMessage[],
   snapshot: TodayResponse | undefined,
   onToken: (chunk: string) => void,
-  signal?: AbortSignal,
+  opts?: AskCoachOptions,
 ): Promise<void> {
   // Strip dataUrl from ChatImages — server only needs base64 + mediaType.
   // Doubles-up bytes on the wire otherwise (dataUrl inlines the same base64).
@@ -348,13 +349,23 @@ export async function askCoachStream(
       })),
     };
   });
+  const body: Record<string, unknown> = {
+    messages: wireMessages,
+    snapshot: snapshot ?? null,
+  };
+  if (opts?.conversationId) body.conversation_id = opts.conversationId;
+
   const res = await fetch(COACH_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages: wireMessages, snapshot: snapshot ?? null }),
-    signal,
+    body: JSON.stringify(body),
+    signal: opts?.signal,
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+
+  const returnedId = res.headers.get("X-Conversation-Id") || res.headers.get("x-conversation-id");
+  if (returnedId && opts?.onConversationId) opts.onConversationId(returnedId);
+
   if (!res.body) {
     const text = await res.text();
     if (text) onToken(text);

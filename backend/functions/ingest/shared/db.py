@@ -65,6 +65,7 @@ def query_items(
     sk_between: Optional[tuple] = None,
     limit: Optional[int] = None,
     reverse: bool = False,
+    index_name: Optional[str] = None,
 ) -> list[dict]:
     kwargs: dict[str, Any] = {
         "KeyConditionExpression": Key(pk_name).eq(pk_value),
@@ -78,6 +79,9 @@ def query_items(
 
     if limit:
         kwargs["Limit"] = limit
+
+    if index_name:
+        kwargs["IndexName"] = index_name
 
     resp = table.query(**kwargs)
     return [_from_decimal(i) for i in resp.get("Items", [])]

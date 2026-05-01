@@ -22,6 +22,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from shared.coach_context import build_system_prompt
+from shared.conversation_service import (
+    resolve_thread,
+    messages_for_bedrock,
+    append_turn,
+    maybe_summarize,
+)
 from shared.nutrition_service import (
     log_meal as svc_log_meal,
     log_water as svc_log_water,
@@ -346,14 +352,30 @@ async def coach_endpoint(request: Request):
         return JSONResponse({"error": "no messages provided"}, status_code=400)
 
     snapshot = body.get("snapshot")
+    conversation_id = body.get("conversation_id") or body.get("conversationId")
     system_prompt = build_system_prompt(snapshot if isinstance(snapshot, dict) else None)
-    messages = _to_bedrock_messages(raw_messages)
 
-    if not messages or messages[-1]["role"] != "user":
+    # Client sends the full visible chat log; we only care about the latest
+    # user turn (with images). Everything prior comes from persisted history.
+    latest_user_raw = None
+    for m in reversed(raw_messages):
+        if m.get("from") == "me":
+            latest_user_raw = m
+            break
+    if latest_user_raw is None:
         return JSONResponse({"error": "last message must be from user"}, status_code=400)
 
+    latest_user_bedrock = _to_bedrock_messages([latest_user_raw])
+    if not latest_user_bedrock:
+        return JSONResponse({"error": "latest user turn is empty"}, status_code=400)
+
+    thread = resolve_thread(conversation_id)
+    persisted_history = messages_for_bedrock(thread)
+    initial_history = persisted_history + latest_user_bedrock
+
     def stream():
-        history = list(messages)
+        history = list(initial_history)
+        assistant_text_accum: list[str] = []
         for _ in range(MAX_TOOL_ROUNDS):
             request_body = {
                 "anthropic_version": "bedrock-2023-05-31",
@@ -428,7 +450,10 @@ async def coach_endpoint(request: Request):
                             "input": block.get("input", {}),
                         })
                     elif block.get("type") == "text":
-                        assistant_content.append({"type": "text", "text": block.get("text", "")})
+                        text_out = block.get("text", "")
+                        assistant_content.append({"type": "text", "text": text_out})
+                        if text_out:
+                            assistant_text_accum.append(text_out)
 
                 elif etype == "message_delta":
                     delta = data.get("delta") or {}
@@ -439,6 +464,7 @@ async def coach_endpoint(request: Request):
                     pass
 
             if stop_reason != "tool_use":
+                _persist_turn(thread, latest_user_raw, assistant_text_accum)
                 return
 
             history.append({"role": "assistant", "content": assistant_content})
@@ -453,12 +479,46 @@ async def coach_endpoint(request: Request):
                     "content": json.dumps(result, default=str),
                 })
             if not tool_results:
+                _persist_turn(thread, latest_user_raw, assistant_text_accum)
                 return
             history.append({"role": "user", "content": tool_results})
 
+        _persist_turn(thread, latest_user_raw, assistant_text_accum)
         yield "\n[coach: tool loop depth exceeded]"
 
-    return StreamingResponse(stream(), media_type="text/plain")
+    headers = {"X-Conversation-Id": thread.get("conversation_id", "")}
+    return StreamingResponse(stream(), media_type="text/plain", headers=headers)
+
+
+def _persist_turn(thread: dict, user_raw: dict, assistant_text_accum: list) -> None:
+    assistant_text = "".join(assistant_text_accum).strip()
+    if not assistant_text and not (user_raw.get("text") or user_raw.get("images")):
+        return
+    user_msg = {
+        "from": "me",
+        "t": user_raw.get("t", ""),
+        "text": user_raw.get("text", ""),
+        "images": user_raw.get("images") or [],
+    }
+    assistant_msg = {
+        "from": "coach",
+        "t": _stamp_now(),
+        "text": assistant_text,
+    }
+    append_turn(thread, user_msg, assistant_msg)
+    try:
+        maybe_summarize(thread, bedrock, MODEL_ID)
+    except Exception:
+        logger.exception("maybe_summarize failed")
+
+
+def _stamp_now() -> str:
+    import datetime as _dt
+    # Keep the same "h:mmam/pm" format the frontend uses.
+    now = _dt.datetime.now()
+    hour = now.hour % 12 or 12
+    suffix = "am" if now.hour < 12 else "pm"
+    return f"{hour}:{now.minute:02d}{suffix}"
 
 
 @app.get("/health")

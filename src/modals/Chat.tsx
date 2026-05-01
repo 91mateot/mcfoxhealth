@@ -4,10 +4,16 @@ import { FONT, MONO, type Palette } from "../theme";
 import type { ChatImage, ChatMessage, TodayResponse } from "../types";
 import { Sheet } from "../components/Sheet";
 import { MicButton } from "../components/VoiceInput";
-import { askCoachStream, todayISO } from "../api";
+import { askCoachStream, fetchLatestConversation, todayISO } from "../api";
 import { compressImage } from "../lib/images";
 
 const MAX_IMAGES_PER_TURN = 5;
+
+const DEFAULT_GREETING = (): ChatMessage => ({
+  from: "coach",
+  t: nowStamp(),
+  text: "Morning. I read your recovery, strain, sleep, and nutrition data. Ask me anything.",
+});
 
 interface ChatModalProps {
   C: Palette;
@@ -22,13 +28,9 @@ function nowStamp(): string {
 }
 
 export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalProps) {
-  const [msgs, setMsgs] = useState<ChatMessage[]>([
-    {
-      from: "coach",
-      t: nowStamp(),
-      text: "Morning. I read your recovery, strain, sleep, and nutrition data. Ask me anything.",
-    },
-  ]);
+  const [msgs, setMsgs] = useState<ChatMessage[]>(() => [DEFAULT_GREETING()]);
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [resumed, setResumed] = useState(false);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const [pendingImages, setPendingImages] = useState<ChatImage[]>([]);
@@ -37,6 +39,7 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const hasLoadedRef = useRef(false);
 
   useEffect(() => {
     if (open && initialPrompt) setInput(initialPrompt);
@@ -45,7 +48,44 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
       setAttachBusy(false);
       setAttachError(null);
     }
+    if (!open) {
+      // Reset so reopening re-fetches latest (captures any new thread created
+      // mid-session by a background tool-use).
+      hasLoadedRef.current = false;
+    }
   }, [open, initialPrompt]);
+
+  useEffect(() => {
+    if (!open || hasLoadedRef.current) return;
+    hasLoadedRef.current = true;
+    fetchLatestConversation()
+      .then((data) => {
+        if (data.conversationId && data.messages && data.messages.length > 0) {
+          setMsgs(data.messages);
+          setConversationId(data.conversationId);
+          setResumed(true);
+        } else {
+          setMsgs([DEFAULT_GREETING()]);
+          setConversationId(null);
+          setResumed(false);
+        }
+      })
+      .catch(() => {
+        setMsgs([DEFAULT_GREETING()]);
+        setConversationId(null);
+        setResumed(false);
+      });
+  }, [open]);
+
+  const startNewChat = () => {
+    abortRef.current?.abort();
+    setMsgs([DEFAULT_GREETING()]);
+    setConversationId(null);
+    setResumed(false);
+    setInput("");
+    setPendingImages([]);
+    setAttachError(null);
+  };
 
   const handlePickImage = async (file: File | null) => {
     if (!file) return;
@@ -125,7 +165,11 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
             setMsgs([...next, { from: "coach", t: replyStamp, text: streamed }]);
           }
         },
-        controller.signal,
+        {
+          conversationId,
+          onConversationId: (id) => setConversationId(id),
+          signal: controller.signal,
+        },
       );
       if (!streamed) {
         setMsgs([...next, { from: "coach", t: replyStamp, text: "(no response)" }]);
@@ -174,9 +218,31 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
             <div style={{ fontSize: 14, fontWeight: 700, color: C.t }}>Coach</div>
             <div style={{ fontSize: 11, color: C.primary, fontFamily: MONO, fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
               <span style={{ width: 6, height: 6, borderRadius: 3, background: C.primary, display: "inline-block" }} />
-              ONLINE · reads all your data
+              {resumed ? "RESUMING · prior thread" : "ONLINE · reads all your data"}
             </div>
           </div>
+          <button
+            onClick={startNewChat}
+            aria-label="New chat"
+            title="New chat"
+            disabled={thinking}
+            style={{
+              background: C.s2,
+              border: `1px solid ${C.border}`,
+              color: C.t2,
+              height: 30,
+              padding: "0 10px",
+              borderRadius: 15,
+              cursor: thinking ? "default" : "pointer",
+              fontFamily: FONT,
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: ".04em",
+              opacity: thinking ? 0.5 : 1,
+            }}
+          >
+            New
+          </button>
           <button
             onClick={onClose}
             aria-label="Close chat"
@@ -234,6 +300,19 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
                       }}
                     />
                   ))}
+                </div>
+              )}
+              {!(m.images && m.images.length > 0) && m.imgCount && m.imgCount > 0 && (
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontFamily: MONO,
+                    color: m.from === "me" ? "#0a0a0aa0" : C.t4,
+                    marginBottom: 4,
+                    fontStyle: "italic",
+                  }}
+                >
+                  📷 {m.imgCount} image{m.imgCount === 1 ? "" : "s"}
                 </div>
               )}
               {m.text && <div style={{ padding: m.images && m.images.length > 0 ? "0 7px" : 0 }}>{m.text}</div>}

@@ -86,23 +86,6 @@ def test_today_recovery_zone_valid():
         assert d["recoveryZone"] in ("green", "yellow", "red")
 
 
-# ─── /api/trends ────────────────────────────────────────────────────
-
-def test_trends_has_30d_and_series():
-    d = _get("/api/trends")
-    assert "trends30d" in d
-    assert "trendSeries" in d
-    assert "correlations" in d
-
-
-def test_trends_metrics_have_cur_prev_unit_better():
-    d = _get("/api/trends")
-    for k, v in d["trends30d"].items():
-        assert "cur" in v and "prev" in v and "unit" in v and "better" in v, (
-            f"{k} missing one of cur/prev/unit/better"
-        )
-
-
 # ─── /api/workouts ──────────────────────────────────────────────────
 
 def test_workouts_returns_list():
@@ -119,9 +102,38 @@ def test_workout_item_has_required_fields():
         assert f in w, f"workout missing {f}"
 
 
-# ─── /api/body ──────────────────────────────────────────────────────
+# ─── /api/progress ──────────────────────────────────────────────────
 
-def test_body_has_history_arrays():
-    d = _get("/api/body")
+def test_progress_has_now_and_trend():
+    d = _get("/api/progress")
+    assert "now" in d and "trend" in d
+
+
+def test_progress_now_has_history_arrays():
+    d = _get("/api/progress")
     for k in ("weight14d", "weightHistory", "fatHistory", "leanHistory"):
-        assert k in d and isinstance(d[k], list)
+        assert k in d["now"] and isinstance(d["now"][k], list)
+
+
+def test_progress_trend_has_30d_and_series():
+    d = _get("/api/progress")
+    assert "trends30d" in d["trend"]
+    assert "trendSeries" in d["trend"]
+    assert "correlations" in d["trend"]
+
+
+def test_progress_trend_metrics_have_cur_prev_unit_better():
+    d = _get("/api/progress")
+    for k, v in d["trend"]["trends30d"].items():
+        assert "cur" in v and "prev" in v and "unit" in v and "better" in v, (
+            f"{k} missing one of cur/prev/unit/better"
+        )
+
+
+# ─── /api/conversation/latest ──────────────────────────────────────
+
+def test_latest_conversation_shape():
+    d = _get("/api/conversation/latest")
+    assert "conversationId" in d
+    if d["conversationId"] is not None:
+        assert isinstance(d.get("messages"), list)

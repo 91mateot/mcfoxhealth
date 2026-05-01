@@ -917,7 +917,12 @@ _USDA_MIN_SCORE = 500.0
 
 def _fetch_usda_nutrients(query: str, api_key: str) -> Optional[dict]:
     """Query USDA FoodData Central. Returns normalized macros for the top
-    result if the score clears _USDA_MIN_SCORE, else None."""
+    result if the score clears _USDA_MIN_SCORE, else None.
+
+    Only Branded foods with `labelNutrients` (per-serving) are returned.
+    SR Legacy / Foundation / FNDDS report nutrients per 100g, and without
+    knowing the user's portion we can't scale those correctly — writing
+    per-100g numbers as a meal total is worse than skipping the audit."""
     if not query or not api_key:
         return None
     try:
@@ -925,7 +930,7 @@ def _fetch_usda_nutrients(query: str, api_key: str) -> Optional[dict]:
             "query": query[:200],
             "pageSize": "1",
             "api_key": api_key,
-            "dataType": "Branded,Survey (FNDDS),SR Legacy,Foundation",
+            "dataType": "Branded",
         })
         url = f"{_USDA_SEARCH_URL}?{params}"
         req = urllib.request.Request(url, headers={"User-Agent": "mcfoxhealth-validator/1.0"})
@@ -945,31 +950,36 @@ def _fetch_usda_nutrients(query: str, api_key: str) -> Optional[dict]:
     if score < _USDA_MIN_SCORE:
         return None
 
-    nutrients = {n.get("nutrientName", "").lower(): n.get("value") for n in top.get("foodNutrients", [])}
-
-    def _pick(*keys):
-        for k in keys:
-            for name, val in nutrients.items():
-                if k in name and val is not None:
-                    try:
-                        return float(val)
-                    except (TypeError, ValueError):
-                        continue
+    # Branded foods expose `labelNutrients` with per-serving values that match
+    # what's printed on the nutrition panel — the only USDA field safe to use
+    # as a meal total without knowing the user's portion.
+    label = top.get("labelNutrients")
+    if not isinstance(label, dict):
         return None
 
-    cal = _pick("energy") or 0
-    p = _pick("protein") or 0
-    c = _pick("carbohydrate") or 0
-    f = _pick("total lipid", "fat") or 0
+    def _lbl(key):
+        entry = label.get(key)
+        if not isinstance(entry, dict):
+            return None
+        val = entry.get("value")
+        try:
+            return float(val) if val is not None else None
+        except (TypeError, ValueError):
+            return None
 
-    if cal == 0 and p == 0 and c == 0 and f == 0:
+    cal = _lbl("calories")
+    p = _lbl("protein")
+    c = _lbl("carbohydrates")
+    f = _lbl("fat")
+
+    if cal is None and p is None and c is None and f is None:
         return None
 
     return {
-        "cal": round(cal, 1),
-        "p": round(p, 1),
-        "c": round(c, 1),
-        "f": round(f, 1),
+        "cal": round(cal or 0, 1),
+        "p": round(p or 0, 1),
+        "c": round(c or 0, 1),
+        "f": round(f or 0, 1),
         "description": str(top.get("description", ""))[:100],
         "score": score,
     }

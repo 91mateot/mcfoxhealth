@@ -19,6 +19,7 @@ Globals:
         USER_CONFIG_TABLE: !Ref UserConfigTable
         CALIBRATION_TABLE: !Ref CalibrationTable
         EXERCISES_TABLE: !Ref ExercisesTable
+        CONVERSATIONS_TABLE: !Ref ConversationsTable
         SECRETS_ARN: !Ref SecretsArn
         INGEST_API_KEY: !Ref IngestApiKey
 
@@ -204,6 +205,33 @@ Resources:
         - AttributeName: date
           KeyType: RANGE
 
+  ConversationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-conversations
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: conversation_id
+          AttributeType: S
+        - AttributeName: updated_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: conversation_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: by-updated
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: updated_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
   # ── Lambda Functions ─────────────────────────────────────────
 
   IngestFunction:
@@ -320,18 +348,14 @@ Resources:
             TableName: !Ref UserConfigTable
         - DynamoDBReadPolicy:
             TableName: !Ref ExercisesTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref ConversationsTable
       Events:
         GetToday:
           Type: HttpApi
           Properties:
             ApiId: !Ref HttpApi
             Path: /api/today
-            Method: GET
-        GetTrends:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref HttpApi
-            Path: /api/trends
             Method: GET
         GetWorkouts:
           Type: HttpApi
@@ -345,17 +369,17 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/nutrition/{date}
             Method: GET
-        GetBody:
-          Type: HttpApi
-          Properties:
-            ApiId: !Ref HttpApi
-            Path: /api/body
-            Method: GET
         GetProgress:
           Type: HttpApi
           Properties:
             ApiId: !Ref HttpApi
             Path: /api/progress
+            Method: GET
+        GetLatestConversation:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/conversation/latest
             Method: GET
 
   NutritionFunction:
@@ -518,6 +542,8 @@ Resources:
             TableName: !Ref ExercisesTable
         - DynamoDBCrudPolicy:
             TableName: !Ref DailyScoresTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConversationsTable
         - DynamoDBReadPolicy:
             TableName: !Ref HealthMetricsTable
         - DynamoDBReadPolicy:
@@ -548,6 +574,8 @@ Resources:
             - POST
           AllowHeaders:
             - Content-Type
+          ExposeHeaders:
+            - X-Conversation-Id
           MaxAge: 3600
 
 Outputs:

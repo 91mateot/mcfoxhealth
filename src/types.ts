@@ -145,6 +145,16 @@ export interface ChatMessage {
   text: string;
   /** Attached images — only user messages carry these. */
   images?: ChatImage[];
+  /** Set on historical turns loaded from storage — bytes were stripped. */
+  imgCount?: number;
+}
+
+export interface LatestConversationResponse {
+  conversationId: string | null;
+  messages?: ChatMessage[];
+  summary?: string | null;
+  messageCount?: number;
+  updatedAt?: string;
 }
 
 export interface RecoveryComponents {
