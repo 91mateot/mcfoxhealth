@@ -457,41 +457,119 @@ def compute_strain_target(recovery_score: int) -> dict:
     return {"low": 0, "high": 6, "optimal": 3.0, "reason": "Depleted — active recovery"}
 
 
+_SLEEP_BASE_FLOOR_MIN = 360   # 6h — don't let baseline slide below this
+_SLEEP_BASE_CEIL_MIN = 540    # 9h — cap baseline so illness weeks don't corrupt it
+_SLEEP_BASE_FALLBACK_MIN = 420  # 7h — when we don't have enough history
+_MIN_BASELINE_NIGHTS = 7
+_ACUTE_DEBT_WINDOW = 2        # look back 2 nights for acute debt
+_ACUTE_DEBT_CAP_MIN = 60      # max 1h of recovery sleep added for acute debt
+_DEFAULT_WAKE_HOUR = 6.5      # 6:30 AM fallback
+
+
 def compute_sleep_need(
-    base_min: int = 450,
+    sleep_last_30: Optional[list] = None,
     sleep_last_7: Optional[list] = None,
+    wake_hours_last_7: Optional[list] = None,
     today_strain: float = 0.0,
-    wake_hour: float = 6.5,
+    base_min: Optional[int] = None,
 ) -> dict:
-    """Tonight's sleep need = base + 7-night debt + today's-strain adjustment.
+    """Tonight's sleep need, grounded in the user's personal pattern.
 
-    Whoop's strain multiplier is proprietary; 1.5 min-per-strain-point
-    matches common sports-science conventions (Tanaka & Watanabe 2002)."""
-    debt_min = 0
-    if sleep_last_7:
-        for s in sleep_last_7:
-            debt_min += max(0, base_min - s)
-        debt_min = round(debt_min)
+    Inputs:
+      sleep_last_30  — list of nightly totals (min) from the last 30 nights
+                       where data exists. Used to derive the baseline via
+                       median, so the algorithm adapts to the user's actual
+                       sleep pattern rather than assuming a 7.5h norm.
+      sleep_last_7   — last 7 nights (most-recent first). Last 2 are used
+                       for acute debt — the only kind of debt a single
+                       recovery night can address (Banks & Dinges 2007;
+                       Van Dongen 2003).
+      wake_hours_last_7 — decimal hours (e.g. 6.5 = 6:30 AM) for when the
+                          user actually woke up each of the last 7 nights.
+                          Median is used as the wake-time anchor.
+      today_strain   — 0-21 daily strain; adds ~1.5 min per strain point
+                       (Tanaka & Watanabe 2002).
+      base_min       — optional explicit override (testing).
 
-    strain_min = round(today_strain * 1.5)
-    total_min = base_min + debt_min + strain_min
+    Returns dict with baseMin, debtMin, strainMin, totalMin, bedtimeBy,
+    plus baselineSource ("personal" | "fallback") so callers/UI can
+    explain the number.
+    """
+    if base_min is not None:
+        baseline_src = "explicit"
+        base = max(_SLEEP_BASE_FLOOR_MIN, min(_SLEEP_BASE_CEIL_MIN, int(base_min)))
+    else:
+        base, baseline_src = _derive_sleep_baseline(sleep_last_30)
 
-    bedtime_hour = wake_hour - (total_min / 60)
-    if bedtime_hour < 0:
-        bedtime_hour += 24
-    h = int(bedtime_hour)
-    m = int((bedtime_hour - h) * 60)
-    suffix = "a" if h < 12 else "p"
-    if h == 0:
-        h = 12
-    elif h > 12:
-        h -= 12
-    bedtime_str = f"{h}:{m:02d}{suffix}"
+    debt_min = _acute_sleep_debt(sleep_last_7, base)
+    strain_min = round(max(0.0, today_strain) * 1.5)
+    total_min = base + debt_min + strain_min
+
+    wake_hour = _infer_wake_hour(wake_hours_last_7)
+    bedtime_str = _fmt_bedtime(wake_hour, total_min)
 
     return {
-        "baseMin": base_min,
+        "baseMin": base,
+        "baselineSource": baseline_src,
         "debtMin": debt_min,
         "strainMin": strain_min,
         "totalMin": total_min,
         "bedtimeBy": bedtime_str,
+        "wakeHour": round(wake_hour, 2),
     }
+
+
+def _derive_sleep_baseline(sleep_last_30: Optional[list]) -> tuple[int, str]:
+    """Median of last 30 nights with data, clamped to [floor, ceil].
+
+    Returns (base_min, source) where source is 'personal' if we had
+    enough nights or 'fallback' if we used the default.
+    """
+    vals = [int(v) for v in (sleep_last_30 or []) if isinstance(v, (int, float)) and v > 0]
+    if len(vals) < _MIN_BASELINE_NIGHTS:
+        return _SLEEP_BASE_FALLBACK_MIN, "fallback"
+
+    vals.sort()
+    n = len(vals)
+    median = vals[n // 2] if n % 2 == 1 else (vals[n // 2 - 1] + vals[n // 2]) // 2
+    base = max(_SLEEP_BASE_FLOOR_MIN, min(_SLEEP_BASE_CEIL_MIN, int(median)))
+    return base, "personal"
+
+
+def _acute_sleep_debt(sleep_last_7: Optional[list], base_min: int) -> int:
+    """Sum of deficits vs baseline over the last 2 nights, capped at 60 min.
+
+    Chronic debt (weeks of under-sleeping) cannot be repaid in one night
+    (Banks & Dinges 2007), so we deliberately ignore anything older.
+    """
+    if not sleep_last_7:
+        return 0
+    recent = [v for v in sleep_last_7[:_ACUTE_DEBT_WINDOW] if isinstance(v, (int, float)) and v > 0]
+    if not recent:
+        return 0
+    raw = sum(max(0, base_min - int(v)) for v in recent)
+    return int(min(_ACUTE_DEBT_CAP_MIN, raw))
+
+
+def _infer_wake_hour(wake_hours_last_7: Optional[list]) -> float:
+    """Median wake hour from recent data, fall back to 6:30 AM."""
+    vals = [float(v) for v in (wake_hours_last_7 or []) if isinstance(v, (int, float)) and 0 <= v < 24]
+    if not vals:
+        return _DEFAULT_WAKE_HOUR
+    vals.sort()
+    n = len(vals)
+    return vals[n // 2] if n % 2 == 1 else (vals[n // 2 - 1] + vals[n // 2]) / 2
+
+
+def _fmt_bedtime(wake_hour: float, total_min: int) -> str:
+    bedtime_hour = wake_hour - (total_min / 60)
+    if bedtime_hour < 0:
+        bedtime_hour += 24
+    h = int(bedtime_hour)
+    m = int(round((bedtime_hour - h) * 60))
+    if m == 60:
+        h = (h + 1) % 24
+        m = 0
+    suffix = "a" if h < 12 else "p"
+    display_h = 12 if h == 0 else (h - 12 if h > 12 else h)
+    return f"{display_h}:{m:02d}{suffix}"

@@ -53,6 +53,7 @@ def build_system_prompt(snapshot: Optional[dict]) -> str:
 - Location: Pacific Beach, San Diego
 - Training: 4-5x/week, push/pull/legs split with supersets
 - Back injury history: avoid loaded squats and heavy deadlifts
+- Chronic sleep pattern: ~6h/night average over the past 6 months. This is his current reality — the Today ring targets his personal baseline. The medical optimum is 7-9h (NSF 2015; Watson 2015). Treat sleep as a likely lever if recovery, HRV, or mood are trending poorly, but frame it as "extending 15-30 min/week would likely help" rather than "you need 7.5h tonight." Don't moralize.
 
 ## Active Medication
 Retatrutide (GLP-1/GIP/Glucagon triple agonist), 2mg dose, started April 21, 2026.

@@ -321,9 +321,68 @@ def test_strain_target_red():
     assert t["low"] == 0 and t["high"] == 6
 
 
-def test_sleep_need_with_debt():
-    """7 nights × 60min short each → 420min debt."""
-    need = compute_sleep_need(base_min=450, sleep_last_7=[390] * 7, today_strain=10)
-    assert need["debtMin"] == 420
+def test_sleep_need_acute_debt_capped():
+    """Acute debt is computed from the last 2 nights only and capped at 60 min.
+
+    Chronic debt can't be repaid in one night (Banks & Dinges 2007), so
+    even a week of severe underslept nights shouldn't produce a >60min debt.
+    """
+    need = compute_sleep_need(
+        base_min=450,
+        sleep_last_7=[300] * 7,  # every night 150min short = 150min each
+        sleep_last_30=[450] * 30,
+        today_strain=10,
+    )
+    assert need["baseMin"] == 450
+    assert need["debtMin"] == 60, "debt must cap at 60 min per literature"
     assert need["strainMin"] == 15
-    assert need["totalMin"] == 885
+    assert need["totalMin"] == 525
+
+
+def test_sleep_need_personal_baseline_adapts():
+    """Chronic 6h sleeper: baseline = 360 min, not the normative 450."""
+    # 30 nights at 360 min → median 360.
+    need = compute_sleep_need(
+        sleep_last_30=[360] * 30,
+        sleep_last_7=[360] * 7,
+    )
+    assert need["baseMin"] == 360
+    assert need["baselineSource"] == "personal"
+    assert need["debtMin"] == 0  # sleeping at baseline = no debt
+
+
+def test_sleep_need_fallback_when_no_history():
+    """Fewer than 7 nights of data → fallback 420 min, marked 'fallback'."""
+    need = compute_sleep_need(sleep_last_30=[480, 500])
+    assert need["baseMin"] == 420
+    assert need["baselineSource"] == "fallback"
+
+
+def test_sleep_need_wake_hour_inferred():
+    """Median wake hour from recent data replaces the 6:30 AM default."""
+    # Waking around 8 AM consistently.
+    need = compute_sleep_need(
+        sleep_last_30=[420] * 10,
+        sleep_last_7=[420] * 7,
+        wake_hours_last_7=[8.0, 8.25, 7.75, 8.0, 8.5, 7.5, 8.0],
+    )
+    assert need["wakeHour"] == 8.0
+    # With 420 min (7h) total and 8 AM wake, bedtime should be 1 AM.
+    assert need["bedtimeBy"] == "1:00a"
+
+
+def test_sleep_need_no_absurd_afternoon_bedtime():
+    """Regression: old algorithm treated every missing/short night as full
+    debt vs a 7.5h ideal, producing afternoon bedtimes. Never again."""
+    # Simulate Mateo's actual late-April data: chronic 6h, variable week.
+    need = compute_sleep_need(
+        sleep_last_30=[360] * 23 + [440, 337, 329, 379, 334, 463, 498],
+        sleep_last_7=[440, 337, 329, 379, 334, 463, 498],
+        wake_hours_last_7=[9.1, 5.2, 5.95],
+    )
+    # Total sleep need should be < 8h — not 14h as the old algorithm produced.
+    assert need["totalMin"] < 480, f"total was {need['totalMin']}"
+    # Bedtime must be in the evening / night, never PM.
+    bedtime = need["bedtimeBy"]
+    # Accept formats like "11:34p", "12:05a", "1:00a" but reject "3:48p".
+    assert not (bedtime.endswith("p") and int(bedtime.split(":")[0]) < 8), f"absurd bedtime: {bedtime}"

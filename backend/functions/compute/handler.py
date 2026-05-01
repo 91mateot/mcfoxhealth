@@ -143,9 +143,16 @@ def _compute_day(date_str):
     if recovery_result:
         strain_target = compute_strain_target(recovery_result["score"])
 
-    sleep_last_7 = _get_sleep_last_7(date_str)
+    sleep_history = _get_sleep_history(date_str, days=30)
+    # Align recency-sensitive inputs: last-7 durations + wake hours from the
+    # first 7 rows of the 30-day history, since it's ordered most-recent-first.
+    sleep_last_7 = [h["totalMin"] for h in sleep_history[:7]]
+    wake_hours_last_7 = [h["wakeHour"] for h in sleep_history[:7] if h.get("wakeHour") is not None]
+    sleep_last_30 = [h["totalMin"] for h in sleep_history]
     sleep_need = compute_sleep_need(
+        sleep_last_30=sleep_last_30,
         sleep_last_7=sleep_last_7,
+        wake_hours_last_7=wake_hours_last_7,
         today_strain=total_strain,
     )
 
@@ -426,20 +433,57 @@ def _get_baselines():
     return DEFAULT_BASELINES
 
 
-def _get_sleep_last_7(date_str):
-    """Get sleep durations for the 7 nights before date_str."""
+def _get_sleep_history(date_str, days=30):
+    """Sleep rows for the N nights before date_str, most-recent first.
+
+    Each row: {date, totalMin, wakeHour}. Skips nights without data.
+    wakeHour is parsed from the sleep `end` timestamp (local time) when
+    available; otherwise None.
+    """
     metrics_table = get_table("HEALTH_METRICS_TABLE")
     dt = datetime.strptime(date_str, "%Y-%m-%d")
-    vals = []
-    for i in range(1, 8):
+    rows = []
+    for i in range(1, days + 1):
         d = (dt - timedelta(days=i)).strftime("%Y-%m-%d")
         items = query_items(metrics_table, "date", d, sk_name="metric_source", sk_begins="sleep#")
         for item in items:
             total = item.get("total_min", 0)
-            if total > 0:
-                vals.append(total)
+            if total and total > 0:
+                rows.append({
+                    "date": d,
+                    "totalMin": int(total),
+                    "wakeHour": _parse_wake_hour(item.get("end") or item.get("sleep_end")),
+                })
                 break
-    return vals
+    return rows
+
+
+def _parse_wake_hour(ts):
+    """Extract decimal hour-of-day (local) from a timestamp string."""
+    if not ts:
+        return None
+    try:
+        # Accept both "2026-04-30 09:07:13 -0700" and ISO formats.
+        s = str(ts).strip()
+        # Normalize the HealthAutoExport format to ISO-ish for fromisoformat.
+        # "2026-04-30 09:07:13 -0700" → "2026-04-30T09:07:13-07:00"
+        if " " in s and "T" not in s:
+            parts = s.split(" ")
+            date_part = parts[0]
+            time_part = parts[1]
+            tz_part = ""
+            if len(parts) >= 3:
+                tz = parts[2]
+                # "-0700" → "-07:00"
+                if len(tz) == 5 and tz[0] in "+-":
+                    tz_part = tz[:3] + ":" + tz[3:]
+                else:
+                    tz_part = tz
+            s = f"{date_part}T{time_part}{tz_part}"
+        parsed = datetime.fromisoformat(s)
+        return parsed.hour + parsed.minute / 60
+    except Exception:
+        return None
 
 
 # ─── Scoring config loader (hot-swappable via user-config) ──────────────
