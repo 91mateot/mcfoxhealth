@@ -181,6 +181,7 @@ export default function App() {
         open={journalOpen}
         onClose={() => setJournalOpen(false)}
         todayEntry={today.data?.journal ?? null}
+        tagsToday={today.data?.journalTagsToday ?? []}
         onSave={async (data) => {
           try {
             await submitJournal(data);

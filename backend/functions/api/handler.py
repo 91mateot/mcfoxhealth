@@ -152,7 +152,11 @@ def _get_today():
 
     config = get_item(config_table, {"key": "mateo"}) or {}
     targets = config.get("nutrition_targets", {"cal": 2200, "p": 180, "c": 190, "f": 65, "water": 100})
-    supplements = config.get("supplements", [])
+    # Canonical supplement list lives in user_config (name + tag + dose).
+    # "taken today" is derived from whether the tag is present on today's
+    # journal row so Fuel Stack and Journal sheet stay in sync without a
+    # second write path. The journal row is read once below and reused.
+    raw_supplements = config.get("supplements", [])
 
     protein_week = []
     for i in range(6, -1, -1):
@@ -190,6 +194,23 @@ def _get_today():
     planned_workout = _prepare_planned_workout(scores.get("planned_workout"), todays_workouts)
 
     journal_today, journal_last_night = _journal_for_today(today_dt)
+    # Raw tag list from today's journal row, independent of morning-submitted
+    # state. Needed for live supplement-chip toggles in Fuel that must know
+    # the current tag set even before Mateo does his morning check-in.
+    _journal_row = get_item(get_table("JOURNAL_TABLE"), {"date": today_str}) or {}
+    today_journal_tags = list(_journal_row.get("tags") or [])
+    _today_tag_set = set(today_journal_tags)
+    supplements = []
+    for s in raw_supplements:
+        if not isinstance(s, dict):
+            continue
+        tag = s.get("tag") or ""
+        supplements.append({
+            "name": s.get("name", ""),
+            "tag": tag,
+            "dose": s.get("dose", ""),
+            "taken": tag in _today_tag_set if tag else False,
+        })
 
     payload = {
         "date": date_display,
@@ -237,6 +258,7 @@ def _get_today():
         "plannedWorkout": planned_workout,
         "journal": journal_today,
         "journalLastNight": journal_last_night,
+        "journalTagsToday": today_journal_tags,
         "base": {
             "hrv": baselines.get("hrv", 48),
             "rhr": baselines.get("rhr", 64),
@@ -888,9 +910,17 @@ def _journal_for_today(today_dt):
 
 
 def _project_entry(row: dict) -> dict:
-    """Shape a raw journal row for the frontend JournalEntry type."""
+    """Shape a raw journal row for the frontend JournalEntry type.
+
+    The `morning` object is only returned when Mateo has actually done a
+    morning entry — identified by a `morning_saved_at` or `submitted_at`
+    timestamp. Rows with only a `tags` list (from the Fuel supplement-chip
+    live toggle, which uses slot="tags_only") do NOT count as a submitted
+    morning entry; the JournalCard stays in the "pending-morning" state.
+    """
+    has_morning_submit = bool(row.get("morning_saved_at") or row.get("submitted_at"))
     morning = None
-    if row.get("tags") or row.get("mood") is not None or row.get("morning_text") or row.get("morning_saved_at") or row.get("submitted_at"):
+    if has_morning_submit or row.get("mood") is not None or row.get("morning_text"):
         morning = {
             "tags": row.get("tags") or [],
             "mood": row.get("mood"),

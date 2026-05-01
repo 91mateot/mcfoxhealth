@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { MONO, type Palette } from "../theme";
-import type { Meal, NutritionResponse, TodayResponse } from "../types";
+import type { Correlation, Meal, NutritionResponse, Supplement, TodayResponse } from "../types";
 import { Ring } from "../components/Ring";
 import { Panel } from "../components/Panel";
 import { Chip } from "../components/Chip";
@@ -11,7 +11,7 @@ import { Btn } from "../components/Btn";
 import { HydrationPanel } from "../components/HydrationPanel";
 import { CaffeinePanel } from "../components/CaffeinePanel";
 import { HydrationDetail } from "../modals/HydrationDetail";
-import { formatMealTime, todayISO } from "../api";
+import { formatMealTime, submitJournal, todayISO, useInsights } from "../api";
 
 interface FuelScreenProps {
   C: Palette;
@@ -153,46 +153,7 @@ export function FuelScreen({ C, today, nutrition, onLogMeal, onOpenMeal }: FuelS
 
       {/* Supplements */}
       {supplements.length > 0 && (
-        <>
-          <SectionHead C={C} kicker="Stack" title="Supplements" />
-          <Panel C={C} style={{ padding: 8 }}>
-            {supplements.map((s, i) => (
-              <div
-                key={i}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  padding: "9px 8px",
-                  borderBottom: i === supplements.length - 1 ? "none" : `1px solid ${C.border}`,
-                }}
-              >
-                <div
-                  style={{
-                    width: 20,
-                    height: 20,
-                    borderRadius: 6,
-                    flexShrink: 0,
-                    background: s.taken ? C.primary : "transparent",
-                    border: s.taken ? "none" : `1.5px solid ${C.s4}`,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    color: C.bg,
-                    fontSize: 12,
-                    fontWeight: 800,
-                  }}
-                >
-                  {s.taken ? "✓" : ""}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 12, color: C.t, fontWeight: 600 }}>{s.name}</div>
-                  <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO }}>{s.dose} · {s.timing}</div>
-                </div>
-              </div>
-            ))}
-          </Panel>
-        </>
+        <SupplementsSection C={C} today={today} supplements={supplements} />
       )}
 
       <div style={{ margin: "4px 0 8px" }}>
@@ -201,6 +162,142 @@ export function FuelScreen({ C, today, nutrition, onLogMeal, onOpenMeal }: FuelS
         </Btn>
       </div>
     </div>
+  );
+}
+
+function SupplementsSection({
+  C,
+  today,
+  supplements,
+}: {
+  C: Palette;
+  today: TodayResponse;
+  supplements: Supplement[];
+}) {
+  // Tag toggle = slot:"tags_only" write. Updates `tags` on today's journal
+  // row WITHOUT setting submitted_at, so the Morning check-in card stays
+  // "pending" until Mateo actually does the full entry. journalTagsToday is
+  // the raw tag list on today's row, server-authoritative and populated
+  // whether or not the morning entry has been submitted.
+  const journalTags = today.journalTagsToday ?? [];
+  const [pendingTag, setPendingTag] = useState<string | null>(null);
+  const insights = useInsights(true);
+
+  const toggle = async (tag: string) => {
+    if (pendingTag) return;
+    setPendingTag(tag);
+    const has = journalTags.includes(tag);
+    const next = has ? journalTags.filter((t) => t !== tag) : [...journalTags, tag];
+    try {
+      await submitJournal({ slot: "tags_only", tags: next });
+    } catch (err) {
+      console.error("supplement toggle failed", err);
+    } finally {
+      setPendingTag(null);
+    }
+  };
+
+  // Inline correlation hints: pick the strongest signal per supplement tag
+  // from the learned journal correlations. Uses the "high" confidence bar
+  // so we only surface claims the correlation engine is willing to stand
+  // behind, matching the Insights modal's filtering.
+  const hints: Record<string, { label: string; direction: "positive" | "negative" }> = {};
+  const byTag: Record<string, Correlation[]> = {};
+  for (const c of insights.data?.journal ?? []) {
+    if (c.confidence !== "high") continue;
+    (byTag[c.tag] ||= []).push(c);
+  }
+  for (const [tag, rows] of Object.entries(byTag)) {
+    // Rank by absolute effect magnitude, show the biggest.
+    rows.sort((a, b) => Math.abs(b.effect) - Math.abs(a.effect));
+    const top = rows[0];
+    if (!top) continue;
+    const arrow = top.direction === "positive" ? "↑" : "↓";
+    const magnitude = Math.abs(top.effect).toFixed(1);
+    hints[tag] = {
+      label: `${arrow} ${top.metric} ${magnitude}${top.unit}`,
+      direction: top.direction,
+    };
+  }
+
+  return (
+    <>
+      <SectionHead C={C} kicker="Stack" title="Supplements" />
+      <Panel C={C} style={{ padding: 10 }}>
+        <div style={{ fontSize: 11, color: C.t3, lineHeight: 1.5, marginBottom: 8 }}>
+          Tap what you took today.
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {supplements.map((s) => {
+            const taken = s.taken;
+            const isPending = pendingTag === s.tag;
+            const hint = hints[s.tag];
+            return (
+              <button
+                key={s.tag || s.name}
+                onClick={() => s.tag && toggle(s.tag)}
+                disabled={!s.tag || isPending}
+                aria-pressed={taken}
+                style={{
+                  fontSize: 11.5,
+                  color: taken ? C.primary : C.t2,
+                  background: taken ? C.primary + "18" : C.s2,
+                  border: `1px solid ${taken ? C.primary + "60" : C.border}`,
+                  padding: "7px 11px",
+                  borderRadius: 18,
+                  fontWeight: 600,
+                  cursor: s.tag ? "pointer" : "default",
+                  fontFamily: "inherit",
+                  transition: "all .15s ease",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                  opacity: isPending ? 0.6 : 1,
+                }}
+              >
+                <span
+                  style={{
+                    width: 14,
+                    height: 14,
+                    borderRadius: 4,
+                    background: taken ? C.primary : "transparent",
+                    border: taken ? "none" : `1.5px solid ${C.s4}`,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: C.bg,
+                    fontSize: 10,
+                    fontWeight: 800,
+                    flexShrink: 0,
+                  }}
+                >
+                  {taken ? "✓" : ""}
+                </span>
+                <span>{s.name}</span>
+                {s.dose && (
+                  <span style={{ fontSize: 10, color: C.t4, fontFamily: MONO, marginLeft: 2 }}>{s.dose}</span>
+                )}
+                {hint && (
+                  <span
+                    style={{
+                      fontSize: 9.5,
+                      color: hint.direction === "positive" ? C.primary : C.warn,
+                      fontFamily: MONO,
+                      marginLeft: 4,
+                      padding: "1px 5px",
+                      borderRadius: 8,
+                      background: (hint.direction === "positive" ? C.primary : C.warn) + "15",
+                    }}
+                  >
+                    {hint.label}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </Panel>
+    </>
   );
 }
 

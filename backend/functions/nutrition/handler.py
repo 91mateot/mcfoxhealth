@@ -417,7 +417,7 @@ def _post_journal(event):
     if not body:
         return _resp(400, {"error": "invalid JSON body"})
     slot = str(body.get("slot") or "morning").lower()
-    if slot not in ("morning", "evening"):
+    if slot not in ("morning", "evening", "tags_only"):
         slot = "morning"
     tags = body.get("tags")
     if slot == "evening" and tags is None:

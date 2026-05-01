@@ -666,6 +666,10 @@ def log_journal(
 
     Morning slot writes: tags, mood, stress, soreness, morning_text, morning_prompts.
     Evening slot writes: evening_tags, evening_mood, evening_stress, evening_text, evening_prompts.
+    Tags-only writes (slot="tags_only", or morning slot with only tags and nothing else)
+    update `tags` without marking morning as submitted — used for live supplement chip
+    toggles from Fuel so the Morning check-in card stays "pending" until Mateo actually
+    does it.
     If slot is omitted, defaults to "morning" for backward compatibility with the
     pre-expansion call path that passes only tags/mood/stress/soreness.
     """
@@ -692,6 +696,10 @@ def log_journal(
         if clean_prompts is not None:
             item["evening_prompts"] = clean_prompts
         item["evening_saved_at"] = now_iso
+    elif slot == "tags_only":
+        if tags is not None:
+            item["tags"] = list(tags or [])
+        item["tags_updated_at"] = now_iso
     else:
         if tags is not None:
             item["tags"] = list(tags or [])

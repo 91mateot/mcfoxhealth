@@ -114,10 +114,14 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "List of tags. Valid: alcohol, caffeine_late, ate_late, heavy_meal, "
+                        "List of tags. Optional — omit if the entry is narrative-only. "
+                        "Behavior tags: alcohol, caffeine_late, ate_late, heavy_meal, "
                         "hydrated, screens_bed, late_bedtime, meditated, stretched, sauna, "
                         "cold, sunlight_am, stress, social, travel, sick, back_flare. "
-                        "Optional — omit if the entry is narrative-only."
+                        "Supplement tags (use when Mateo mentions taking them today): "
+                        "creatine, zinc, d3_k2, fish_oil, vitamin_c, l_theanine, rx, "
+                        "5_htp, b_complex. 'rx' is Adderall — always use the generic "
+                        "'rx' tag, never 'adderall'."
                     ),
                 },
                 "mood": {"type": "integer", "minimum": 1, "maximum": 5, "description": "1 (bad) - 5 (great)"},

@@ -15,6 +15,7 @@ import type {
   JournalPromptsResponse,
   JournalPrompt,
   JournalSlot,
+  JournalSlotApi,
   LatestConversationResponse,
   PlannedWorkout,
 } from "./types";
@@ -278,7 +279,7 @@ export async function deleteWater(date: string, waterId: string) {
 }
 
 export interface JournalSubmission {
-  slot?: JournalSlot;
+  slot?: JournalSlotApi;
   tags?: string[];
   mood?: number | null;
   stress?: number | null;

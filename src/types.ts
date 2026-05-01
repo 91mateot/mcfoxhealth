@@ -116,8 +116,9 @@ export interface NutritionTargets {
 
 export interface Supplement {
   name: string;
+  /** Matching JOURNAL_TAGS id — used to toggle today's tag. */
+  tag: string;
   dose: string;
-  timing: string;
   taken: boolean;
 }
 
@@ -212,6 +213,11 @@ export interface TodayResponse {
   base: Baselines;
   journal?: JournalToday;
   journalLastNight?: JournalLastNight;
+  /** Raw tag list on today's journal row. Set whether or not the morning
+   * check-in has been submitted — used by Fuel supplement-chip toggles that
+   * need to know the live tag state before Mateo does the full morning
+   * entry. */
+  journalTagsToday?: string[];
 }
 
 export type WorkoutType =
@@ -520,9 +526,12 @@ export interface ProgressResponse {
 export interface JournalTag {
   id: string;
   label: string;
-  cat: "intake" | "sleep" | "body" | "mind" | "context";
+  cat: "intake" | "sleep" | "body" | "mind" | "context" | "supplement";
   icon: string;
   negative: boolean;
+  /** Display-name override — used when the DB tag id is intentionally generic
+   * (e.g., id="rx" renders as "Rx" in the UI; coach knows rx=Adderall). */
+  displayLabel?: string;
 }
 
 export interface JournalPrompt {
@@ -557,6 +566,9 @@ export interface JournalEntry {
 }
 
 export type JournalSlot = "morning" | "evening";
+/** API-layer slot: includes "tags_only" for the Fuel supplement-chip live toggle,
+ * which updates tags on today's journal row without marking morning as submitted. */
+export type JournalSlotApi = JournalSlot | "tags_only";
 
 export interface JournalToday extends JournalEntry {}
 
@@ -665,7 +677,20 @@ export const JOURNAL_TAGS: JournalTag[] = [
   { id: "travel", label: "Travel", cat: "context", icon: "✈️", negative: true },
   { id: "sick", label: "Feeling sick", cat: "context", icon: "🤒", negative: true },
   { id: "back_flare", label: "Back flare", cat: "context", icon: "⚠️", negative: true },
+  // Supplements — logged per-day, feed the correlation engine on equal footing
+  // with other journal tags. Order here is the canonical display order.
+  { id: "creatine", label: "Creatine", cat: "supplement", icon: "💪", negative: false },
+  { id: "zinc", label: "Zinc", cat: "supplement", icon: "⚗️", negative: false },
+  { id: "d3_k2", label: "D3 + K2", cat: "supplement", icon: "☀️", negative: false },
+  { id: "fish_oil", label: "Fish Oil", cat: "supplement", icon: "🐟", negative: false },
+  { id: "vitamin_c", label: "Vitamin C", cat: "supplement", icon: "🍊", negative: false },
+  { id: "l_theanine", label: "L-theanine", cat: "supplement", icon: "🍵", negative: false },
+  { id: "rx", label: "Rx", cat: "supplement", icon: "💊", negative: false },
+  { id: "5_htp", label: "5-HTP", cat: "supplement", icon: "🌙", negative: false },
+  { id: "b_complex", label: "B-complex", cat: "supplement", icon: "🧬", negative: false },
 ];
+
+export const SUPPLEMENT_TAGS: JournalTag[] = JOURNAL_TAGS.filter((t) => t.cat === "supplement");
 
 export const MATEO: Mateo = {
   name: "Mateo Thompson",

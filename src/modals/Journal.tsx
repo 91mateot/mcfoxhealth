@@ -15,9 +15,14 @@ interface JournalSheetProps {
   /** Today's saved journal (if any) so evening mode can show morning as read-only
    * and re-opens pre-fill saved answers. */
   todayEntry?: JournalEntry | null;
+  /** Raw tag list on today's journal row — used to pre-populate supplement
+   * chips in the morning sheet even when Mateo hasn't done the full morning
+   * check-in yet (he may have toggled supplements live from Fuel). */
+  tagsToday?: string[];
 }
 
 const CATS: { id: JournalTag["cat"]; label: string }[] = [
+  { id: "supplement", label: "Supplements" },
   { id: "intake", label: "Intake" },
   { id: "sleep", label: "Sleep behavior" },
   { id: "body", label: "Body" },
@@ -48,7 +53,7 @@ function currentSlot(): JournalSlot {
   return now.getHours() >= 18 ? "evening" : "morning";
 }
 
-export function JournalSheet({ C, open, onClose, onSave, todayEntry }: JournalSheetProps) {
+export function JournalSheet({ C, open, onClose, onSave, todayEntry, tagsToday }: JournalSheetProps) {
   const [slot, setSlot] = useState<JournalSlot>(() => currentSlot());
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [mood, setMood] = useState<number | null>(null);
@@ -67,13 +72,20 @@ export function JournalSheet({ C, open, onClose, onSave, todayEntry }: JournalSh
     setSlot(nextSlot);
 
     const saved = nextSlot === "evening" ? todayEntry?.evening : todayEntry?.morning;
-    setSel(new Set(saved?.tags ?? []));
+    // For morning: fall back to the raw tag list on today's row so supplement
+    // chips toggled live from Fuel stay selected here. For evening: use the
+    // saved evening tags only.
+    const seedTags =
+      nextSlot === "evening"
+        ? saved?.tags ?? []
+        : saved?.tags ?? tagsToday ?? [];
+    setSel(new Set(seedTags));
     setMood(saved?.mood ?? null);
     setStress(saved?.stress ?? null);
     setSoreness(nextSlot === "morning" ? (todayEntry?.morning?.soreness ?? null) : null);
     setText(saved?.text ?? "");
     setPrompts(saved?.prompts && saved.prompts.length > 0 ? saved.prompts : null);
-  }, [open, todayEntry]);
+  }, [open, todayEntry, tagsToday]);
 
   // Lazy-load coach-generated prompts when the sheet opens without cached ones.
   useEffect(() => {
@@ -127,7 +139,7 @@ export function JournalSheet({ C, open, onClose, onSave, todayEntry }: JournalSh
   const mood5Label = slot === "evening" ? "Mood · day" : "Mood";
   const stress5Label = slot === "evening" ? "Stress · day" : "Stress";
   const visibleCats = slot === "evening"
-    ? CATS.filter((c) => c.id !== "sleep")
+    ? CATS.filter((c) => c.id !== "sleep" && c.id !== "supplement")
     : CATS;
 
   return (
