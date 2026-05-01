@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { mutate } from "swr";
 import { MONO, type Palette } from "../theme";
 import type { Correlation, Meal, NutritionResponse, Supplement, TodayResponse } from "../types";
 import { Ring } from "../components/Ring";
@@ -179,27 +180,57 @@ function SupplementsSection({
   // "pending" until Mateo actually does the full entry. journalTagsToday is
   // the raw tag list on today's row, server-authoritative and populated
   // whether or not the morning entry has been submitted.
-  const journalTags = today.journalTagsToday ?? [];
-  const [pendingTag, setPendingTag] = useState<string | null>(null);
+  const serverTags = today.journalTagsToday ?? [];
+  // Optimistic tag set — the source of truth for chip rendering. Flipped
+  // synchronously on tap so the chip reacts instantly; server write happens
+  // in the background and reconciles. Keyed to serverTags so when /api/today
+  // revalidates, the optimistic state resets to server truth.
+  const [optimisticTags, setOptimisticTags] = useState<Set<string>>(() => new Set(serverTags));
+  const serverKey = serverTags.slice().sort().join("|");
+  const seenKeyRef = useRef(serverKey);
+  if (seenKeyRef.current !== serverKey) {
+    seenKeyRef.current = serverKey;
+    setOptimisticTags(new Set(serverTags));
+  }
+  // Coalesce rapid taps — if the user taps 4 chips in a second, we want one
+  // network write with the final set, not 4 racing writes.
+  const writeTimerRef = useRef<number | null>(null);
+  const pendingSetRef = useRef<Set<string> | null>(null);
+
   // Collapsed by default — 9 chips is a lot of real estate if most days the
   // stack is already taken. Auto-expand when none are taken yet so the empty
   // state isn't hidden behind a tap.
-  const takenCount = supplements.filter((s) => s.taken).length;
+  const takenCount = supplements.filter((s) => optimisticTags.has(s.tag)).length;
   const [expanded, setExpanded] = useState(() => takenCount === 0);
   const insights = useInsights(true);
 
-  const toggle = async (tag: string) => {
-    if (pendingTag) return;
-    setPendingTag(tag);
-    const has = journalTags.includes(tag);
-    const next = has ? journalTags.filter((t) => t !== tag) : [...journalTags, tag];
-    try {
-      await submitJournal({ slot: "tags_only", tags: next });
-    } catch (err) {
-      console.error("supplement toggle failed", err);
-    } finally {
-      setPendingTag(null);
+  const toggle = (tag: string) => {
+    if (!tag) return;
+    // Compute + commit optimistic state synchronously.
+    setOptimisticTags((prev) => {
+      const next = new Set(prev);
+      if (next.has(tag)) next.delete(tag);
+      else next.add(tag);
+      pendingSetRef.current = next;
+      return next;
+    });
+    // Debounce the network write so rapid taps coalesce into a single POST.
+    if (writeTimerRef.current !== null) {
+      window.clearTimeout(writeTimerRef.current);
     }
+    writeTimerRef.current = window.setTimeout(async () => {
+      writeTimerRef.current = null;
+      const toWrite = pendingSetRef.current;
+      pendingSetRef.current = null;
+      if (!toWrite) return;
+      try {
+        await submitJournal({ slot: "tags_only", tags: Array.from(toWrite) });
+      } catch (err) {
+        console.error("supplement toggle failed", err);
+        // On failure, revalidate to rollback to server truth.
+        mutate("/api/today");
+      }
+    }, 250);
   };
 
   // Inline correlation hints: pick the strongest signal per supplement tag
@@ -227,7 +258,7 @@ function SupplementsSection({
 
   const total = supplements.length;
   const takenTags = supplements
-    .filter((s) => s.taken)
+    .filter((s) => optimisticTags.has(s.tag))
     .map((s) => s.name)
     .join(", ");
 
@@ -288,14 +319,13 @@ function SupplementsSection({
         {expanded && (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {supplements.map((s) => {
-            const taken = s.taken;
-            const isPending = pendingTag === s.tag;
+            const taken = optimisticTags.has(s.tag);
             const hint = hints[s.tag];
             return (
               <button
                 key={s.tag || s.name}
-                onClick={() => s.tag && toggle(s.tag)}
-                disabled={!s.tag || isPending}
+                onClick={() => toggle(s.tag)}
+                disabled={!s.tag}
                 aria-pressed={taken}
                 style={{
                   fontSize: 11.5,
@@ -307,11 +337,12 @@ function SupplementsSection({
                   fontWeight: 600,
                   cursor: s.tag ? "pointer" : "default",
                   fontFamily: "inherit",
-                  transition: "all .15s ease",
+                  transition: "background .12s ease, color .12s ease, border-color .12s ease",
                   display: "flex",
                   alignItems: "center",
                   gap: 5,
-                  opacity: isPending ? 0.6 : 1,
+                  touchAction: "manipulation",
+                  WebkitTapHighlightColor: "transparent",
                 }}
               >
                 <span
