@@ -232,6 +232,18 @@ Resources:
           Projection:
             ProjectionType: ALL
 
+  # ── Lambda Layer (shared Python package) ─────────────────────
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: fitness-shared
+      ContentUri: shared/
+      CompatibleRuntimes:
+        - python3.13
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: makefile
+
   # ── Lambda Functions ─────────────────────────────────────────
 
   IngestFunction:
@@ -239,6 +251,8 @@ Resources:
     Properties:
       CodeUri: functions/ingest/
       Handler: handler.lambda_handler
+      Layers:
+        - !Ref SharedLayer
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref HealthMetricsTable
@@ -293,6 +307,8 @@ Resources:
       CodeUri: functions/compute/
       Handler: handler.lambda_handler
       Timeout: 120
+      Layers:
+        - !Ref SharedLayer
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref HealthMetricsTable
@@ -329,6 +345,8 @@ Resources:
     Properties:
       CodeUri: functions/api/
       Handler: handler.lambda_handler
+      Layers:
+        - !Ref SharedLayer
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref HealthMetricsTable
@@ -425,6 +443,8 @@ Resources:
       CodeUri: functions/nutrition/
       Handler: handler.lambda_handler
       Timeout: 30
+      Layers:
+        - !Ref SharedLayer
       Environment:
         Variables:
           NUTRITION_FUNCTION_NAME: !Sub '${AWS::StackName}-NutritionFunction'
@@ -567,6 +587,7 @@ Resources:
       MemorySize: 1024
       Layers:
         - !Sub 'arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:27'
+        - !Ref SharedLayer
       Environment:
         Variables:
           AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
