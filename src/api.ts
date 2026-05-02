@@ -17,6 +17,7 @@ import type {
   JournalSlot,
   JournalSlotApi,
   LatestConversationResponse,
+  ConversationListItem,
   PlannedWorkout,
 } from "./types";
 
@@ -356,6 +357,19 @@ export async function refreshPlannedWorkout(): Promise<PlannedWorkout | null> {
 
 export async function fetchLatestConversation(): Promise<LatestConversationResponse> {
   const res = await fetch(`${API_BASE}/api/conversation/latest`);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+export async function fetchConversationList(limit = 20): Promise<ConversationListItem[]> {
+  const res = await fetch(`${API_BASE}/api/conversation/list?limit=${limit}`);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  const data = (await res.json()) as { threads?: ConversationListItem[] };
+  return data.threads ?? [];
+}
+
+export async function fetchConversationById(id: string): Promise<LatestConversationResponse> {
+  const res = await fetch(`${API_BASE}/api/conversation/${encodeURIComponent(id)}`);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }

@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { mutate } from "swr";
 import { FONT, MONO, type Palette } from "../theme";
-import type { ChatImage, ChatMessage, TodayResponse } from "../types";
+import type { ChatImage, ChatMessage, ConversationListItem, TodayResponse } from "../types";
 import { Sheet } from "../components/Sheet";
 import { MicButton } from "../components/VoiceInput";
-import { askCoachStream, fetchLatestConversation, todayISO } from "../api";
+import {
+  askCoachStream,
+  fetchConversationById,
+  fetchConversationList,
+  fetchLatestConversation,
+  todayISO,
+} from "../api";
 import { compressImage } from "../lib/images";
 
 const MAX_IMAGES_PER_TURN = 5;
@@ -27,6 +33,23 @@ function nowStamp(): string {
   return new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }).toLowerCase().replace(" ", "");
 }
 
+function relativeTime(iso: string): string {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const mins = Math.max(0, Math.floor((Date.now() - then) / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days === 1) return "yesterday";
+  if (days < 7) return `${days} days ago`;
+  const weeks = Math.floor(days / 7);
+  if (weeks < 5) return `${weeks}w ago`;
+  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalProps) {
   const [msgs, setMsgs] = useState<ChatMessage[]>(() => [DEFAULT_GREETING()]);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -36,10 +59,16 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
   const [pendingImages, setPendingImages] = useState<ChatImage[]>([]);
   const [attachBusy, setAttachBusy] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyThreads, setHistoryThreads] = useState<ConversationListItem[] | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [openingThreadId, setOpeningThreadId] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const hasLoadedRef = useRef(false);
+  const historyLoadedRef = useRef(false);
 
   useEffect(() => {
     if (open && initialPrompt) setInput(initialPrompt);
@@ -52,6 +81,10 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
       // Reset so reopening re-fetches latest (captures any new thread created
       // mid-session by a background tool-use).
       hasLoadedRef.current = false;
+      historyLoadedRef.current = false;
+      setHistoryOpen(false);
+      setHistoryThreads(null);
+      setHistoryError(null);
     }
   }, [open, initialPrompt]);
 
@@ -85,6 +118,40 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
     setInput("");
     setPendingImages([]);
     setAttachError(null);
+    setHistoryOpen(false);
+  };
+
+  const toggleHistory = () => {
+    const next = !historyOpen;
+    setHistoryOpen(next);
+    if (next && !historyLoadedRef.current) {
+      historyLoadedRef.current = true;
+      setHistoryLoading(true);
+      setHistoryError(null);
+      fetchConversationList()
+        .then((threads) => setHistoryThreads(threads))
+        .catch(() => setHistoryError("Couldn't load history."))
+        .finally(() => setHistoryLoading(false));
+    }
+  };
+
+  const openThread = async (id: string) => {
+    if (openingThreadId || thinking) return;
+    abortRef.current?.abort();
+    setOpeningThreadId(id);
+    try {
+      const data = await fetchConversationById(id);
+      if (data.conversationId && data.messages && data.messages.length > 0) {
+        setMsgs(data.messages);
+        setConversationId(data.conversationId);
+        setResumed(true);
+      }
+      setHistoryOpen(false);
+    } catch {
+      setHistoryError("Couldn't open that thread.");
+    } finally {
+      setOpeningThreadId(null);
+    }
   };
 
   const handlePickImage = async (file: File | null) => {
@@ -222,6 +289,28 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
             </div>
           </div>
           <button
+            onClick={toggleHistory}
+            aria-label="Conversation history"
+            title="Conversation history"
+            disabled={thinking}
+            style={{
+              background: historyOpen ? C.primary : C.s2,
+              border: `1px solid ${historyOpen ? C.primary : C.border}`,
+              color: historyOpen ? "#0a0a0a" : C.t2,
+              height: 30,
+              padding: "0 10px",
+              borderRadius: 15,
+              cursor: thinking ? "default" : "pointer",
+              fontFamily: FONT,
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: ".04em",
+              opacity: thinking ? 0.5 : 1,
+            }}
+          >
+            History
+          </button>
+          <button
             onClick={startNewChat}
             aria-label="New chat"
             title="New chat"
@@ -252,6 +341,99 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
           </button>
         </div>
       </div>
+
+      {historyOpen && (
+        <div
+          style={{
+            border: `1px solid ${C.border}`,
+            background: C.s,
+            borderRadius: 12,
+            padding: 8,
+            marginBottom: 10,
+            maxHeight: 260,
+            overflowY: "auto",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "2px 4px 6px",
+            }}
+          >
+            <span style={{ fontSize: 11, fontFamily: MONO, fontWeight: 700, color: C.t3, letterSpacing: ".05em" }}>
+              PAST THREADS
+            </span>
+            {historyThreads && (
+              <span style={{ fontSize: 11, fontFamily: MONO, color: C.t4 }}>
+                {historyThreads.length}
+              </span>
+            )}
+          </div>
+          {historyLoading && (
+            <div style={{ fontSize: 12, color: C.t3, padding: "8px 4px" }}>Loading…</div>
+          )}
+          {historyError && (
+            <div style={{ fontSize: 12, color: C.danger, padding: "8px 4px" }}>{historyError}</div>
+          )}
+          {!historyLoading && !historyError && historyThreads && historyThreads.length === 0 && (
+            <div style={{ fontSize: 12, color: C.t3, padding: "8px 4px" }}>No past conversations yet.</div>
+          )}
+          {!historyLoading && historyThreads && historyThreads.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {historyThreads.map((t) => {
+                const isActive = t.conversationId === conversationId;
+                const isOpening = openingThreadId === t.conversationId;
+                return (
+                  <button
+                    key={t.conversationId}
+                    onClick={() => openThread(t.conversationId)}
+                    disabled={isOpening || thinking}
+                    style={{
+                      textAlign: "left",
+                      background: isActive ? C.s2 : "transparent",
+                      border: `1px solid ${isActive ? C.primary : C.border}`,
+                      borderRadius: 10,
+                      padding: "8px 10px",
+                      cursor: isOpening || thinking ? "default" : "pointer",
+                      fontFamily: FONT,
+                      color: C.t,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 3,
+                      opacity: isOpening ? 0.6 : 1,
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                      <span style={{ fontSize: 11, fontFamily: MONO, color: C.t3 }}>
+                        {relativeTime(t.updatedAt)}
+                      </span>
+                      <span style={{ fontSize: 11, fontFamily: MONO, color: C.t4 }}>
+                        {t.messageCount} msg{t.messageCount === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 12.5,
+                        lineHeight: 1.35,
+                        color: C.t2,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        display: "-webkit-box",
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: "vertical",
+                      }}
+                    >
+                      {t.preview || "(no preview)"}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       <div ref={scrollRef} style={{ padding: "6px 0 10px" }}>
         {msgs.map((m, i) => (

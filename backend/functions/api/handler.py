@@ -7,6 +7,8 @@ API Lambda — read endpoints for the PWA frontend.
   GET  /api/progress                    — Body composition + 30-day trends + lifts
   GET  /api/insights                    — Numeric + journal-tag correlations for the Insights modal
   GET  /api/conversation/latest         — Most recent coach thread (if active within 6h)
+  GET  /api/conversation/list           — Recent coach threads (projected, newest first)
+  GET  /api/conversation/{id}           — Full thread by id (no idle cutoff)
   POST /api/planned-workout/refresh     — Re-run the proposer for today
 """
 
@@ -16,7 +18,11 @@ from datetime import datetime, timedelta, timezone
 
 from shared.db import get_table, get_item, put_item, query_items
 from shared.timezone import local_now, local_today_str
-from shared.conversation_service import get_latest as get_latest_conversation
+from shared.conversation_service import (
+    get_latest as get_latest_conversation,
+    list_recent as list_recent_conversations,
+    load as load_conversation,
+)
 from shared.workout_proposer import propose_for_date as _propose_workout_for_date
 
 
@@ -38,6 +44,11 @@ def lambda_handler(event, context):
         return _get_insights()
     if path == "/api/conversation/latest":
         return _get_latest_conversation()
+    if path == "/api/conversation/list":
+        return _list_conversations(event)
+    if path.startswith("/api/conversation/"):
+        conv_id = params.get("conversationId") or path.rsplit("/", 1)[-1]
+        return _get_conversation_by_id(conv_id)
     if path == "/api/journal/history":
         return _get_journal_history(event)
     if path == "/api/planned-workout/refresh" and method == "POST":
@@ -876,6 +887,56 @@ def _get_latest_conversation():
         "summary": thread.get("summary"),
         "messageCount": int(thread.get("message_count") or 0),
         "updatedAt": updated,
+    })
+
+
+def _list_conversations(event):
+    """Return recent coach threads with preview text, newest first."""
+    try:
+        limit = int((event.get("queryStringParameters") or {}).get("limit", "20"))
+    except (TypeError, ValueError):
+        limit = 20
+    limit = max(1, min(limit, 50))
+
+    rows = list_recent_conversations(limit=limit)
+    threads = [
+        {
+            "conversationId": r.get("conversation_id"),
+            "updatedAt": r.get("updated_at"),
+            "createdAt": r.get("created_at"),
+            "messageCount": int(r.get("message_count") or 0),
+            "preview": r.get("preview") or "",
+        }
+        for r in rows
+    ]
+    return _resp(200, {"threads": threads})
+
+
+def _get_conversation_by_id(conversation_id):
+    """Return a full thread by id, with no idle cutoff."""
+    if not conversation_id:
+        return _resp(400, {"error": "missing conversation id"})
+    thread = load_conversation(conversation_id)
+    if not thread:
+        return _resp(404, {"error": "not found"})
+
+    messages = []
+    for m in thread.get("messages") or []:
+        row = {
+            "from": m.get("from"),
+            "t": m.get("t", ""),
+            "text": m.get("text", ""),
+        }
+        if m.get("imgCount"):
+            row["imgCount"] = int(m["imgCount"])
+        messages.append(row)
+
+    return _resp(200, {
+        "conversationId": thread.get("conversation_id"),
+        "messages": messages,
+        "summary": thread.get("summary"),
+        "messageCount": int(thread.get("message_count") or 0),
+        "updatedAt": thread.get("updated_at", ""),
     })
 
 

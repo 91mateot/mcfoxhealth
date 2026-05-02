@@ -387,6 +387,18 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/conversation/latest
             Method: GET
+        ListConversations:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/conversation/list
+            Method: GET
+        GetConversationById:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/conversation/{conversationId}
+            Method: GET
         GetJournalHistory:
           Type: HttpApi
           Properties:

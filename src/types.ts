@@ -158,6 +158,14 @@ export interface LatestConversationResponse {
   updatedAt?: string;
 }
 
+export interface ConversationListItem {
+  conversationId: string;
+  updatedAt: string;
+  createdAt: string;
+  messageCount: number;
+  preview: string;
+}
+
 export interface RecoveryComponents {
   hrv?: number | null;
   rhr?: number | null;
