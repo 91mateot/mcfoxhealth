@@ -238,7 +238,7 @@ def _get_today():
         "wristTemp": scores.get("wrist_temp"),
         "recoveryComponents": scores.get("recovery_components"),
         "steps": scores.get("steps") or 0,
-        "stepsGoal": baselines.get("steps", 10000),
+        "stepsGoal": 10000,
         "calories": {
             "active": scores.get("active_cal") or 0,
             "resting": 1680,
