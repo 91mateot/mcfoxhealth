@@ -38,6 +38,9 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
       : zone === "yellow"
       ? "Train smart."
       : "Active recovery.";
+  const hour = new Date().getHours();
+  const greeting =
+    hour < 5 ? "Late night" : hour < 12 ? "Morning" : hour < 17 ? "Afternoon" : "Evening";
 
   return (
     <div>
@@ -47,7 +50,7 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
           {data.dateFull.toUpperCase()} · PACIFIC BEACH
         </div>
         <div style={{ fontSize: 26, fontWeight: 700, color: C.t, letterSpacing: "-.02em", marginTop: 4, lineHeight: 1.15 }}>
-          Morning, Mateo.
+          {greeting}, Mateo.
           <br />
           <span style={{ color: zoneColor }}>{zoneLabel}.</span> {zoneHeadline}
         </div>
