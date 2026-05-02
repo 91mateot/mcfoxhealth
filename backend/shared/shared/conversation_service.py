@@ -74,6 +74,51 @@ def get_latest(user_id: str = _USER_ID) -> Optional[dict]:
     return rows[0] if rows else None
 
 
+def list_recent(user_id: str = _USER_ID, limit: int = 20) -> list[dict]:
+    """Return recent threads for this user, newest first.
+
+    Each entry is projected to keep payloads small: no full messages, just a
+    preview string so the UI can render a list without hydrating thread bodies.
+    """
+    try:
+        table = get_table("CONVERSATIONS_TABLE")
+    except ValueError:
+        return []
+    rows = query_items(
+        table,
+        pk_name="user_id",
+        pk_value=user_id,
+        sk_name="updated_at",
+        reverse=True,
+        limit=limit,
+        index_name="by-updated",
+    )
+    out = []
+    for row in rows:
+        out.append({
+            "conversation_id": row.get("conversation_id"),
+            "updated_at": row.get("updated_at"),
+            "created_at": row.get("created_at"),
+            "message_count": int(row.get("message_count") or 0),
+            "preview": _build_preview(row.get("messages") or []),
+        })
+    return out
+
+
+def _build_preview(messages: list) -> str:
+    """Short preview — first user message if any, else the first message text."""
+    for m in messages:
+        if m.get("from") == "me":
+            text = (m.get("text") or "").strip()
+            if text:
+                return text[:80]
+    for m in messages:
+        text = (m.get("text") or "").strip()
+        if text:
+            return text[:80]
+    return ""
+
+
 def load(conversation_id: str) -> Optional[dict]:
     if not conversation_id:
         return None
