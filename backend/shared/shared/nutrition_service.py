@@ -15,6 +15,7 @@ import socket
 import urllib.parse
 import urllib.request
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Optional
@@ -22,7 +23,7 @@ from typing import Optional
 import boto3
 
 from shared.db import get_table, put_item, get_item, query_items
-from shared.timezone import local_now, local_today_str
+from shared.timezone import local_now, local_today_str, LOCAL_TZ
 
 logger = logging.getLogger("nutrition_service")
 
@@ -718,6 +719,162 @@ def log_journal(
 
     put_item(journal_table, item)
     return {"status": "saved", "date": date, "slot": slot}
+
+
+def _normalize_scale(value) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    if n < 1 or n > 5:
+        return None
+    return n
+
+
+def _normalize_tags(tags) -> Optional[list]:
+    if tags is None:
+        return None
+    if not isinstance(tags, list):
+        return None
+    return [str(t).strip() for t in tags if str(t).strip()]
+
+
+def _parse_note_at(at_str: Optional[str], date: str) -> str:
+    """Validate a client-supplied `at` ISO timestamp. If None, return server now.
+    When provided, the timestamp must fall within the given `date` in local TZ,
+    so a note can't drift onto the wrong day."""
+    if not at_str:
+        return datetime.now(timezone.utc).isoformat()
+    try:
+        dt = datetime.fromisoformat(str(at_str).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise ValueError("invalid `at` timestamp")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local_dt = dt.astimezone(LOCAL_TZ)
+    if local_dt.strftime("%Y-%m-%d") != date:
+        raise ValueError("`at` falls outside `date` in America/Los_Angeles")
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def append_note(
+    text: str,
+    date: Optional[str] = None,
+    at: Optional[str] = None,
+    tags: Optional[list] = None,
+    mood: Optional[int] = None,
+    stress: Optional[int] = None,
+) -> dict:
+    """Append a time-marked note to a date's journal row. Notes live alongside
+    morning/evening snapshots; they don't overwrite them."""
+    clean_text = _clean_text(text)
+    if not clean_text:
+        raise ValueError("text is required")
+
+    date = date or local_today_str()
+    at_iso = _parse_note_at(at, date)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    note = {
+        "id": f"note_{uuid.uuid4().hex[:12]}",
+        "at": at_iso,
+        "created_at": now_iso,
+        "text": clean_text,
+    }
+    clean_tags = _normalize_tags(tags)
+    if clean_tags is not None:
+        note["tags"] = clean_tags
+    mood_val = _normalize_scale(mood)
+    if mood_val is not None:
+        note["mood"] = mood_val
+    stress_val = _normalize_scale(stress)
+    if stress_val is not None:
+        note["stress"] = stress_val
+
+    journal_table = get_table("JOURNAL_TABLE")
+    existing = get_item(journal_table, {"date": date}) or {"date": date}
+    notes = list(existing.get("notes") or [])
+    notes.append(note)
+    notes.sort(key=lambda n: n.get("at") or "")
+    existing["notes"] = notes
+    existing["date"] = date
+    put_item(journal_table, existing)
+
+    return {"status": "saved", "date": date, "note": note}
+
+
+def update_note(
+    date: str,
+    note_id: str,
+    text: Optional[str] = None,
+    tags: Optional[list] = None,
+    mood: Optional[int] = None,
+    stress: Optional[int] = None,
+    at: Optional[str] = None,
+) -> dict:
+    """Edit an existing note. Returns {status, note} on success; raises
+    KeyError if the note isn't found, ValueError on bad input."""
+    if not date or not note_id:
+        raise ValueError("date and note_id required")
+
+    journal_table = get_table("JOURNAL_TABLE")
+    existing = get_item(journal_table, {"date": date})
+    if not existing:
+        raise KeyError("journal row not found")
+    notes = list(existing.get("notes") or [])
+    idx = next((i for i, n in enumerate(notes) if n.get("id") == note_id), -1)
+    if idx < 0:
+        raise KeyError("note not found")
+
+    note = dict(notes[idx])
+
+    if text is not None:
+        clean_text = _clean_text(text)
+        if not clean_text:
+            raise ValueError("text cannot be empty")
+        note["text"] = clean_text
+    if tags is not None:
+        note["tags"] = _normalize_tags(tags) or []
+    if mood is not None:
+        val = _normalize_scale(mood)
+        if val is None:
+            note.pop("mood", None)
+        else:
+            note["mood"] = val
+    if stress is not None:
+        val = _normalize_scale(stress)
+        if val is None:
+            note.pop("stress", None)
+        else:
+            note["stress"] = val
+    if at is not None:
+        note["at"] = _parse_note_at(at, date)
+
+    note["updated_at"] = datetime.now(timezone.utc).isoformat()
+    notes[idx] = note
+    notes.sort(key=lambda n: n.get("at") or "")
+    existing["notes"] = notes
+    put_item(journal_table, existing)
+
+    return {"status": "saved", "date": date, "note": note}
+
+
+def delete_note(date: str, note_id: str) -> dict:
+    if not date or not note_id:
+        raise ValueError("date and note_id required")
+    journal_table = get_table("JOURNAL_TABLE")
+    existing = get_item(journal_table, {"date": date})
+    if not existing:
+        raise KeyError("journal row not found")
+    notes = list(existing.get("notes") or [])
+    remaining = [n for n in notes if n.get("id") != note_id]
+    if len(remaining) == len(notes):
+        raise KeyError("note not found")
+    existing["notes"] = remaining
+    put_item(journal_table, existing)
+    return {"status": "deleted", "date": date, "id": note_id}
 
 
 def _clean_text(text: Optional[str]) -> Optional[str]:

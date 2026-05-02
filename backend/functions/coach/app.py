@@ -37,6 +37,7 @@ from shared.nutrition_service import (
     delete_meal as svc_delete_meal,
     delete_water as svc_delete_water,
     delete_workout as svc_delete_workout,
+    append_note as svc_append_note,
 )
 from shared.workout_service import annotate_workout as svc_annotate_workout
 from shared.workout_proposer import (
@@ -157,6 +158,46 @@ TOOLS = [
                     },
                 },
             },
+        },
+    },
+    {
+        "name": "log_note",
+        "description": (
+            "Append a time-marked note to today's journal — a mid-day delta that "
+            "doesn't overwrite the morning or evening snapshot. Use when Mateo "
+            "mentions something in the moment ('felt a twinge after lunch', "
+            "'energy just crashed', 'back feels better after the walk') that "
+            "belongs in the day's timeline rather than as a formal check-in. "
+            "Prefer log_note over log_journal for passing observations; reserve "
+            "log_journal for the morning and evening reflections."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Verbatim note text, in Mateo's voice.",
+                },
+                "date": {
+                    "type": "string",
+                    "description": "YYYY-MM-DD. Defaults to today (America/Los_Angeles).",
+                },
+                "at": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 timestamp the note refers to. Defaults to now. "
+                        "Must fall within `date` in America/Los_Angeles."
+                    ),
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional tags — same vocabulary as log_journal.",
+                },
+                "mood": {"type": "integer", "minimum": 1, "maximum": 5},
+                "stress": {"type": "integer", "minimum": 1, "maximum": 5},
+            },
+            "required": ["text"],
         },
     },
     {
@@ -343,6 +384,15 @@ def _execute_tool(name: str, args: dict) -> dict:
                 slot=args.get("slot"),
                 text=args.get("text"),
                 prompts=args.get("prompts"),
+            )
+        if name == "log_note":
+            return svc_append_note(
+                text=args.get("text", ""),
+                date=args.get("date"),
+                at=args.get("at"),
+                tags=args.get("tags"),
+                mood=args.get("mood"),
+                stress=args.get("stress"),
             )
         if name == "generate_weekly_summary":
             return _weekly_summary()

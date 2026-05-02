@@ -17,6 +17,7 @@ import type {
   JournalPrompt,
   JournalSlot,
   JournalSlotApi,
+  JournalNote,
   LatestConversationResponse,
   ConversationListItem,
   PlannedWorkout,
@@ -306,10 +307,48 @@ export interface JournalSubmission {
   soreness?: number | null;
   text?: string;
   prompts?: JournalPrompt[];
+  /** ISO 8601 timestamp the entry refers to. Only meaningful for slot="note".
+   * Backend rejects values that fall outside `date` in America/Los_Angeles. */
+  at?: string;
+  /** YYYY-MM-DD in local TZ. Defaults to today server-side. */
+  date?: string;
 }
 
 export async function submitJournal(journal: JournalSubmission) {
-  const result = await post<{ status: string; date: string; slot: string }>("/api/journal", journal);
+  const result = await post<{ status: string; date: string; slot: string; note?: JournalNote }>(
+    "/api/journal",
+    journal,
+  );
+  mutate("/api/today");
+  mutate("/api/journal/history");
+  return result;
+}
+
+export interface NoteUpdate {
+  date: string;
+  id: string;
+  text?: string;
+  tags?: string[];
+  mood?: number | null;
+  stress?: number | null;
+  at?: string;
+}
+
+export async function updateJournalNote(update: NoteUpdate) {
+  const result = await patch<{ status: string; date: string; note: JournalNote }>(
+    "/api/journal/note",
+    update,
+  );
+  mutate("/api/today");
+  mutate("/api/journal/history");
+  return result;
+}
+
+export async function deleteJournalNote(date: string, id: string) {
+  const qs = new URLSearchParams({ date, id }).toString();
+  const result = await del<{ status: string; date: string; id: string }>(
+    `/api/journal/note?${qs}`,
+  );
   mutate("/api/today");
   mutate("/api/journal/history");
   return result;

@@ -1,11 +1,26 @@
 import { useEffect, useState } from "react";
 import { FONT, MONO, type Palette } from "../theme";
-import { JOURNAL_TAGS, type JournalEntry, type JournalPrompt, type JournalSlot, type JournalTag } from "../types";
+import {
+  JOURNAL_TAGS,
+  type JournalEntry,
+  type JournalNote,
+  type JournalPrompt,
+  type JournalSlot,
+  type JournalTag,
+} from "../types";
 import { Sheet } from "../components/Sheet";
 import { Btn } from "../components/Btn";
 import { Scale5 } from "../components/Scale5";
 import { VoiceInput } from "../components/VoiceInput";
-import { fetchJournalPrompts, type JournalSubmission } from "../api";
+import { NoteComposer, type NoteDraft } from "../components/NoteComposer";
+import {
+  deleteJournalNote,
+  fetchJournalPrompts,
+  submitJournal,
+  todayISO,
+  updateJournalNote,
+  type JournalSubmission,
+} from "../api";
 
 interface JournalSheetProps {
   C: Palette;
@@ -142,9 +157,20 @@ export function JournalSheet({ C, open, onClose, onSave, todayEntry, tagsToday }
     ? CATS.filter((c) => c.id !== "sleep" && c.id !== "supplement")
     : CATS;
 
+  const todayStr = todayISO();
+  const notes = todayEntry?.notes ?? [];
+
   return (
     <Sheet C={C} open={open} onClose={onClose} title={title} height="92%">
       <SlotHeader C={C} slot={slot} todayEntry={todayEntry ?? null} />
+
+      <TodaySoFar
+        C={C}
+        date={todayStr}
+        morning={todayEntry?.morning ?? null}
+        evening={todayEntry?.evening ?? null}
+        notes={notes}
+      />
 
       <div style={{ fontSize: 11, color: C.t3, lineHeight: 1.5, marginBottom: 14 }}>
         {slot === "evening"
@@ -413,4 +439,283 @@ function PromptsSection({
       ))}
     </div>
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Today-so-far timeline: morning → notes (chronological) → evening. Each
+// note has an inline edit/delete affordance. A "+ Note" action opens an
+// inline NoteComposer — the composer lives INSIDE the sheet so it doesn't
+// collide with the morning/evening form state.
+// ─────────────────────────────────────────────────────────────────────────
+
+function TodaySoFar({
+  C,
+  date,
+  morning,
+  evening,
+  notes,
+}: {
+  C: Palette;
+  date: string;
+  morning: JournalEntry["morning"];
+  evening: JournalEntry["evening"];
+  notes: JournalNote[];
+}) {
+  const [composerMode, setComposerMode] = useState<"closed" | "new" | string>("closed");
+  const sortedNotes = [...(notes || [])].sort((a, b) => (a.at || "").localeCompare(b.at || ""));
+
+  const hasAnything = morning || evening || sortedNotes.length > 0 || composerMode !== "closed";
+
+  const handleAdd = async (draft: NoteDraft) => {
+    await submitJournal({ slot: "note", date, ...draft });
+    setComposerMode("closed");
+  };
+
+  const handleEdit = async (id: string, draft: NoteDraft) => {
+    await updateJournalNote({ date, id, ...draft });
+    setComposerMode("closed");
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!window.confirm("Delete this note?")) return;
+    await deleteJournalNote(date, id);
+  };
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 8,
+        }}
+      >
+        <div
+          style={{
+            fontSize: 11,
+            color: C.t3,
+            textTransform: "uppercase",
+            letterSpacing: ".12em",
+            fontWeight: 700,
+          }}
+        >
+          Today so far
+        </div>
+        <button
+          type="button"
+          onClick={() => setComposerMode(composerMode === "new" ? "closed" : "new")}
+          style={{
+            all: "unset",
+            cursor: "pointer",
+            fontSize: 11,
+            color: C.primary,
+            fontFamily: MONO,
+            letterSpacing: ".06em",
+            fontWeight: 700,
+          }}
+        >
+          {composerMode === "new" ? "× close" : "+ note"}
+        </button>
+      </div>
+
+      {composerMode === "new" && (
+        <div style={{ marginBottom: 10 }}>
+          <NoteComposer
+            C={C}
+            date={date}
+            dateMode="today"
+            onSubmit={handleAdd}
+            onCancel={() => setComposerMode("closed")}
+          />
+        </div>
+      )}
+
+      {!hasAnything && composerMode === "closed" && (
+        <div
+          style={{
+            background: C.s2,
+            border: `1px dashed ${C.border}`,
+            borderRadius: 12,
+            padding: 12,
+            fontSize: 11,
+            color: C.t4,
+            fontFamily: MONO,
+            letterSpacing: ".04em",
+            textAlign: "center",
+          }}
+        >
+          NO ENTRIES YET TODAY
+        </div>
+      )}
+
+      <Timeline C={C}>
+        {morning && <TimelineItem C={C} label="Morning" time={morning.savedAt} text={morning.text} />}
+        {sortedNotes.map((n) =>
+          composerMode === n.id ? (
+            <div key={n.id} style={{ marginLeft: 10, marginBottom: 10 }}>
+              <NoteComposer
+                C={C}
+                date={date}
+                dateMode="today"
+                initial={n}
+                onSubmit={(draft) => handleEdit(n.id, draft)}
+                onCancel={() => setComposerMode("closed")}
+              />
+            </div>
+          ) : (
+            <TimelineItem
+              key={n.id}
+              C={C}
+              label="Note"
+              time={n.at}
+              text={n.text}
+              tags={n.tags}
+              mood={n.mood ?? undefined}
+              stress={n.stress ?? undefined}
+              onEdit={() => setComposerMode(n.id)}
+              onDelete={() => handleDelete(n.id)}
+            />
+          ),
+        )}
+        {evening && <TimelineItem C={C} label="Evening" time={evening.savedAt} text={evening.text} />}
+      </Timeline>
+    </div>
+  );
+}
+
+function Timeline({ C, children }: { C: Palette; children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        borderLeft: `2px solid ${C.border}`,
+        paddingLeft: 10,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function TimelineItem({
+  C,
+  label,
+  time,
+  text,
+  tags,
+  mood,
+  stress,
+  onEdit,
+  onDelete,
+}: {
+  C: Palette;
+  label: string;
+  time: string | null | undefined;
+  text?: string | null;
+  tags?: string[];
+  mood?: number;
+  stress?: number;
+  onEdit?: () => void;
+  onDelete?: () => void;
+}) {
+  const tagObjs = (tags ?? [])
+    .map((id) => JOURNAL_TAGS.find((t) => t.id === id))
+    .filter(Boolean) as JournalTag[];
+  return (
+    <div
+      style={{
+        background: C.s,
+        border: `1px solid ${C.border}`,
+        borderRadius: 10,
+        padding: "8px 10px",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 }}>
+          <span
+            style={{
+              fontSize: 10,
+              color: C.t4,
+              textTransform: "uppercase",
+              letterSpacing: ".12em",
+              fontWeight: 700,
+            }}
+          >
+            {label}
+          </span>
+          <span style={{ fontSize: 10, color: C.t3, fontFamily: MONO, letterSpacing: ".04em" }}>
+            {formatRelative(time)}
+          </span>
+        </div>
+        {(onEdit || onDelete) && (
+          <div style={{ display: "flex", gap: 6 }}>
+            {onEdit && (
+              <button
+                type="button"
+                onClick={onEdit}
+                style={{ all: "unset", cursor: "pointer", fontSize: 10, color: C.t3, fontFamily: MONO }}
+              >
+                edit
+              </button>
+            )}
+            {onDelete && (
+              <button
+                type="button"
+                onClick={onDelete}
+                style={{ all: "unset", cursor: "pointer", fontSize: 10, color: C.warn, fontFamily: MONO }}
+              >
+                delete
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      {text && (
+        <div style={{ fontSize: 12, color: C.t2, lineHeight: 1.4, marginTop: 4 }}>
+          "{text}"
+        </div>
+      )}
+      {(tagObjs.length > 0 || mood !== undefined || stress !== undefined) && (
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6, alignItems: "center" }}>
+          {tagObjs.map((t) => (
+            <span
+              key={t.id}
+              style={{
+                fontSize: 10,
+                color: t.negative ? C.warn : C.primary,
+                background: (t.negative ? C.warn : C.primary) + "15",
+                padding: "2px 6px",
+                borderRadius: 8,
+                fontWeight: 600,
+              }}
+            >
+              {t.icon} {t.label}
+            </span>
+          ))}
+          {mood !== undefined && (
+            <span style={{ fontSize: 10, color: C.t3, fontFamily: MONO }}>mood {mood}/5</span>
+          )}
+          {stress !== undefined && (
+            <span style={{ fontSize: 10, color: C.t3, fontFamily: MONO }}>stress {stress}/5</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatRelative(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const dt = new Date(iso);
+  if (Number.isNaN(dt.getTime())) return "";
+  const hhmm = `${dt.getHours().toString().padStart(2, "0")}:${dt.getMinutes().toString().padStart(2, "0")}`;
+  const diffMin = Math.round((Date.now() - dt.getTime()) / 60_000);
+  if (diffMin < 1) return `now · ${hhmm}`;
+  if (diffMin < 60) return `${diffMin}m ago · ${hhmm}`;
+  const hrs = Math.round(diffMin / 60);
+  if (hrs < 24) return `${hrs}h ago · ${hhmm}`;
+  return hhmm;
 }

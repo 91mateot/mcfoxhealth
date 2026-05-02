@@ -578,17 +578,32 @@ export interface EveningEntry {
   savedAt?: string | null;
 }
 
+/** Time-marked mid-day journal note. Lives alongside morning/evening entries
+ * on the same daily row — never overwrites them. */
+export interface JournalNote {
+  id: string;
+  at: string;
+  text: string;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  tags?: string[];
+  mood?: number | null;
+  stress?: number | null;
+}
+
 export interface JournalEntry {
   date: string;
   submitted?: boolean;
   morning?: MorningEntry | null;
   evening?: EveningEntry | null;
+  notes?: JournalNote[];
 }
 
 export type JournalSlot = "morning" | "evening";
 /** API-layer slot: includes "tags_only" for the Fuel supplement-chip live toggle,
- * which updates tags on today's journal row without marking morning as submitted. */
-export type JournalSlotApi = JournalSlot | "tags_only";
+ * which updates tags on today's journal row without marking morning as submitted;
+ * and "note" for time-marked mid-day notes that append to the notes[] array. */
+export type JournalSlotApi = JournalSlot | "tags_only" | "note";
 
 export interface JournalToday extends JournalEntry {}
 

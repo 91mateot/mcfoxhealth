@@ -34,6 +34,9 @@ from shared.nutrition_service import (
     validate_meal as svc_validate_meal,
     sanitize_ingredients,
     generate_journal_prompts as svc_generate_journal_prompts,
+    append_note as svc_append_note,
+    update_note as svc_update_note,
+    delete_note as svc_delete_note,
 )
 from shared.workout_service import (
     annotate_workout as svc_annotate_workout,
@@ -96,6 +99,11 @@ def lambda_handler(event, context):
         return _post_journal(event)
     if path == "/api/journal/prompts":
         return _post_journal_prompts(event)
+    if path == "/api/journal/note":
+        if method == "PATCH":
+            return _patch_journal_note(event)
+        if method == "DELETE":
+            return _delete_journal_note(event)
     if path == "/api/workout":
         return _post_workout(event)
     if path.startswith("/api/workout/") and path.endswith("/annotate"):
@@ -417,6 +425,19 @@ def _post_journal(event):
     if not body:
         return _resp(400, {"error": "invalid JSON body"})
     slot = str(body.get("slot") or "morning").lower()
+    if slot == "note":
+        try:
+            result = svc_append_note(
+                text=body.get("text") or "",
+                date=body.get("date"),
+                at=body.get("at"),
+                tags=body.get("tags"),
+                mood=body.get("mood"),
+                stress=body.get("stress"),
+            )
+        except ValueError as e:
+            return _resp(400, {"error": str(e)})
+        return _resp(200, result)
     if slot not in ("morning", "evening", "tags_only"):
         slot = "morning"
     tags = body.get("tags")
@@ -434,6 +455,47 @@ def _post_journal(event):
         text=text,
         prompts=prompts if isinstance(prompts, list) else None,
     )
+    return _resp(200, result)
+
+
+def _patch_journal_note(event):
+    body = _parse_body(event)
+    if not body:
+        return _resp(400, {"error": "invalid JSON body"})
+    date = body.get("date")
+    note_id = body.get("id")
+    if not date or not note_id:
+        return _resp(400, {"error": "date and id required"})
+    try:
+        result = svc_update_note(
+            date=date,
+            note_id=note_id,
+            text=body.get("text"),
+            tags=body.get("tags"),
+            mood=body.get("mood"),
+            stress=body.get("stress"),
+            at=body.get("at"),
+        )
+    except KeyError:
+        return _resp(404, {"error": "note not found"})
+    except ValueError as e:
+        return _resp(400, {"error": str(e)})
+    return _resp(200, result)
+
+
+def _delete_journal_note(event):
+    qs = event.get("queryStringParameters") or {}
+    body = _parse_body(event) or {}
+    date = qs.get("date") or body.get("date")
+    note_id = qs.get("id") or body.get("id")
+    if not date or not note_id:
+        return _resp(400, {"error": "date and id required"})
+    try:
+        result = svc_delete_note(date=date, note_id=note_id)
+    except KeyError:
+        return _resp(404, {"error": "note not found"})
+    except ValueError as e:
+        return _resp(400, {"error": str(e)})
     return _resp(200, result)
 
 

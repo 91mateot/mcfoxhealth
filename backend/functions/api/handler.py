@@ -1089,11 +1089,32 @@ def _project_entry(row: dict) -> dict:
             "prompts": row.get("evening_prompts") or [],
             "savedAt": row.get("evening_saved_at"),
         }
+    notes = []
+    for n in (row.get("notes") or []):
+        if not isinstance(n, dict) or not n.get("id") or not n.get("text"):
+            continue
+        out = {
+            "id": n.get("id"),
+            "at": n.get("at"),
+            "text": n.get("text") or "",
+            "createdAt": n.get("created_at"),
+        }
+        if n.get("updated_at"):
+            out["updatedAt"] = n["updated_at"]
+        if n.get("tags"):
+            out["tags"] = list(n["tags"])
+        if n.get("mood") is not None:
+            out["mood"] = n["mood"]
+        if n.get("stress") is not None:
+            out["stress"] = n["stress"]
+        notes.append(out)
+    notes.sort(key=lambda n: n.get("at") or "")
     return {
         "date": row.get("date", ""),
         "submitted": morning is not None,
         "morning": morning,
         "evening": evening,
+        "notes": notes,
     }
 
 
@@ -1115,7 +1136,7 @@ def _get_journal_history(event):
         if not row:
             continue
         entry = _project_entry(row)
-        if entry.get("morning") or entry.get("evening"):
+        if entry.get("morning") or entry.get("evening") or entry.get("notes"):
             entries.append(entry)
 
     return _resp(200, {"entries": entries})

@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
 import { mutate } from "swr";
 import { FONT, MONO, type Palette } from "../theme";
-import { JOURNAL_TAGS, type EveningEntry, type MorningEntry, type NutritionResponse, type TodayResponse } from "../types";
+import {
+  JOURNAL_TAGS,
+  type EveningEntry,
+  type JournalNote,
+  type MorningEntry,
+  type NutritionResponse,
+  type TodayResponse,
+} from "../types";
 import { BigRing } from "../components/BigRing";
 import { Panel } from "../components/Panel";
 import { Chip } from "../components/Chip";
@@ -11,8 +18,9 @@ import { Btn } from "../components/Btn";
 import { HydrationPanel } from "../components/HydrationPanel";
 import { CaffeinePanel } from "../components/CaffeinePanel";
 import { PlannedWorkoutCard } from "../components/PlannedWorkoutCard";
+import { NoteComposer, type NoteDraft } from "../components/NoteComposer";
 import { HydrationDetail } from "../modals/HydrationDetail";
-import { todayISO } from "../api";
+import { submitJournal, todayISO } from "../api";
 
 interface TodayScreenProps {
   C: Palette;
@@ -527,9 +535,17 @@ function JournalCard({
   onOpen: () => void;
   onOpenHistory: () => void;
 }) {
+  const [composerOpen, setComposerOpen] = useState(false);
   const morning = data.journal?.morning ?? null;
   const evening = data.journal?.evening ?? null;
+  const notes = data.journal?.notes ?? [];
   const isEveningTime = new Date().getHours() >= 18;
+  const todayStr = todayISO();
+
+  const handleAddNote = async (draft: NoteDraft) => {
+    await submitJournal({ slot: "note", date: todayStr, ...draft });
+    setComposerOpen(false);
+  };
 
   // State machine:
   //   pending-morning = no morning entry AND before 6pm
@@ -622,22 +638,88 @@ function JournalCard({
           {cta}
         </Btn>
       )}
-      <button
-        onClick={onOpenHistory}
-        style={{
-          all: "unset",
-          cursor: "pointer",
-          display: "block",
-          marginTop: 10,
-          fontSize: 11,
-          color: C.t4,
-          fontFamily: MONO,
-          letterSpacing: ".06em",
-        }}
-      >
-        {state === "logged" ? "Tap to edit · " : ""}View past entries →
-      </button>
+
+      {notes.length > 0 && <NotesStrip C={C} notes={notes} />}
+
+      {composerOpen && (
+        <div style={{ marginTop: 10 }}>
+          <NoteComposer
+            C={C}
+            date={todayStr}
+            dateMode="today"
+            onSubmit={handleAddNote}
+            onCancel={() => setComposerOpen(false)}
+          />
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, gap: 8 }}>
+        <button
+          onClick={onOpenHistory}
+          style={{
+            all: "unset",
+            cursor: "pointer",
+            fontSize: 11,
+            color: C.t4,
+            fontFamily: MONO,
+            letterSpacing: ".06em",
+          }}
+        >
+          {state === "logged" ? "Tap to edit · " : ""}View past entries →
+        </button>
+        <button
+          onClick={() => setComposerOpen((v) => !v)}
+          style={{
+            all: "unset",
+            cursor: "pointer",
+            fontSize: 11,
+            color: composerOpen ? C.t4 : C.primary,
+            fontFamily: MONO,
+            letterSpacing: ".06em",
+            fontWeight: 700,
+          }}
+        >
+          {composerOpen ? "× close" : "+ quick note"}
+        </button>
+      </div>
     </Panel>
+  );
+}
+
+function NotesStrip({ C, notes }: { C: Palette; notes: JournalNote[] }) {
+  const sorted = [...notes].sort((a, b) => (a.at || "").localeCompare(b.at || ""));
+  const recent = sorted.slice(-2);
+  return (
+    <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+      {sorted.length > 2 && (
+        <div style={{ fontSize: 10, color: C.t4, fontFamily: MONO, letterSpacing: ".08em" }}>
+          {sorted.length - 2} EARLIER NOTES · TAP "VIEW PAST" TO SEE ALL
+        </div>
+      )}
+      {recent.map((n) => {
+        const dt = n.at ? new Date(n.at) : null;
+        const hhmm = dt && !Number.isNaN(dt.getTime())
+          ? `${dt.getHours().toString().padStart(2, "0")}:${dt.getMinutes().toString().padStart(2, "0")}`
+          : "";
+        return (
+          <div
+            key={n.id}
+            style={{
+              background: C.s2,
+              border: `1px solid ${C.border}`,
+              borderRadius: 10,
+              padding: "6px 10px",
+              fontSize: 12,
+              color: C.t2,
+              lineHeight: 1.4,
+            }}
+          >
+            <span style={{ fontSize: 10, color: C.t4, fontFamily: MONO, marginRight: 6 }}>{hhmm}</span>
+            "{n.text}"
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

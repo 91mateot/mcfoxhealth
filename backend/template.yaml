@@ -553,6 +553,18 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/journal/prompts
             Method: POST
+        PatchJournalNote:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/journal/note
+            Method: PATCH
+        DeleteJournalNote:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/journal/note
+            Method: DELETE
         PostWorkout:
           Type: HttpApi
           Properties:

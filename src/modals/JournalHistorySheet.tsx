@@ -1,8 +1,15 @@
 import { useState } from "react";
 import { MONO, type Palette } from "../theme";
-import { JOURNAL_TAGS, type JournalEntry, type JournalTag } from "../types";
+import { JOURNAL_TAGS, type JournalEntry, type JournalNote, type JournalTag } from "../types";
 import { Sheet } from "../components/Sheet";
-import { useJournalHistory } from "../api";
+import { NoteComposer, type NoteDraft } from "../components/NoteComposer";
+import {
+  deleteJournalNote,
+  submitJournal,
+  todayISO,
+  updateJournalNote,
+  useJournalHistory,
+} from "../api";
 
 interface Props {
   C: Palette;
@@ -49,8 +56,12 @@ export function JournalHistorySheet({ C, open, onClose }: Props) {
 
 function EntryRow({ C, entry }: { C: Palette; entry: JournalEntry }) {
   const [expanded, setExpanded] = useState(false);
+  const [composerMode, setComposerMode] = useState<"closed" | "new" | string>("closed");
   const morning = entry.morning;
   const evening = entry.evening;
+  const notes = entry.notes ?? [];
+  const sortedNotes = [...notes].sort((a, b) => (a.at || "").localeCompare(b.at || ""));
+  const isToday = entry.date === todayISO();
 
   const primaryTags = (morning?.tags || evening?.tags || [])
     .map((id) => JOURNAL_TAGS.find((t) => t.id === id))
@@ -60,7 +71,21 @@ function EntryRow({ C, entry }: { C: Palette; entry: JournalEntry }) {
     (evening?.text || "").trim() ||
     firstPromptAnswer(morning?.prompts) ||
     firstPromptAnswer(evening?.prompts) ||
+    (sortedNotes[0]?.text || "").trim() ||
     "";
+
+  const handleAdd = async (draft: NoteDraft) => {
+    await submitJournal({ slot: "note", date: entry.date, ...draft });
+    setComposerMode("closed");
+  };
+  const handleEdit = async (id: string, draft: NoteDraft) => {
+    await updateJournalNote({ date: entry.date, id, ...draft });
+    setComposerMode("closed");
+  };
+  const handleDelete = async (id: string) => {
+    if (!window.confirm("Delete this note?")) return;
+    await deleteJournalNote(entry.date, id);
+  };
 
   const moodFor = morning?.mood ?? evening?.mood ?? null;
   const dotColor = moodDotColor(C, moodFor);
@@ -143,7 +168,151 @@ function EntryRow({ C, entry }: { C: Palette; entry: JournalEntry }) {
       {expanded && (
         <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
           {morning && <SlotBlock C={C} label="Morning" slot={morning} />}
+          {sortedNotes.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div
+                style={{
+                  fontSize: 10,
+                  color: C.t4,
+                  textTransform: "uppercase",
+                  letterSpacing: ".12em",
+                  fontWeight: 700,
+                  marginBottom: 6,
+                }}
+              >
+                Notes
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {sortedNotes.map((n) =>
+                  composerMode === n.id ? (
+                    <NoteComposer
+                      key={n.id}
+                      C={C}
+                      date={entry.date}
+                      dateMode={isToday ? "today" : "past"}
+                      initial={n}
+                      onSubmit={(draft) => handleEdit(n.id, draft)}
+                      onCancel={() => setComposerMode("closed")}
+                    />
+                  ) : (
+                    <NoteRow
+                      key={n.id}
+                      C={C}
+                      note={n}
+                      onEdit={() => setComposerMode(n.id)}
+                      onDelete={() => handleDelete(n.id)}
+                    />
+                  ),
+                )}
+              </div>
+            </div>
+          )}
           {evening && <SlotBlock C={C} label="Evening" slot={evening} />}
+
+          {composerMode === "new" ? (
+            <NoteComposer
+              C={C}
+              date={entry.date}
+              dateMode={isToday ? "today" : "past"}
+              onSubmit={handleAdd}
+              onCancel={() => setComposerMode("closed")}
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => setComposerMode("new")}
+              style={{
+                all: "unset",
+                cursor: "pointer",
+                marginTop: 6,
+                fontSize: 11,
+                color: C.primary,
+                fontFamily: MONO,
+                letterSpacing: ".08em",
+                fontWeight: 700,
+              }}
+            >
+              + add note to this day
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NoteRow({
+  C,
+  note,
+  onEdit,
+  onDelete,
+}: {
+  C: Palette;
+  note: JournalNote;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const tagObjs = (note.tags ?? [])
+    .map((id) => JOURNAL_TAGS.find((t) => t.id === id))
+    .filter(Boolean) as JournalTag[];
+  const dt = note.at ? new Date(note.at) : null;
+  const hhmm = dt && !Number.isNaN(dt.getTime())
+    ? `${dt.getHours().toString().padStart(2, "0")}:${dt.getMinutes().toString().padStart(2, "0")}`
+    : "";
+  return (
+    <div
+      style={{
+        background: C.s2,
+        border: `1px solid ${C.border}`,
+        borderRadius: 10,
+        padding: "8px 10px",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+        <span style={{ fontSize: 10, color: C.t4, fontFamily: MONO, letterSpacing: ".06em" }}>{hhmm}</span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            type="button"
+            onClick={onEdit}
+            style={{ all: "unset", cursor: "pointer", fontSize: 10, color: C.t3, fontFamily: MONO }}
+          >
+            edit
+          </button>
+          <button
+            type="button"
+            onClick={onDelete}
+            style={{ all: "unset", cursor: "pointer", fontSize: 10, color: C.warn, fontFamily: MONO }}
+          >
+            delete
+          </button>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: C.t2, lineHeight: 1.4, marginTop: 4 }}>
+        "{note.text}"
+      </div>
+      {(tagObjs.length > 0 || note.mood !== undefined || note.stress !== undefined) && (
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6, alignItems: "center" }}>
+          {tagObjs.map((t) => (
+            <span
+              key={t.id}
+              style={{
+                fontSize: 10,
+                color: t.negative ? C.warn : C.primary,
+                background: (t.negative ? C.warn : C.primary) + "15",
+                padding: "2px 6px",
+                borderRadius: 8,
+                fontWeight: 600,
+              }}
+            >
+              {t.icon} {t.label}
+            </span>
+          ))}
+          {note.mood !== undefined && note.mood !== null && (
+            <span style={{ fontSize: 10, color: C.t3, fontFamily: MONO }}>mood {note.mood}/5</span>
+          )}
+          {note.stress !== undefined && note.stress !== null && (
+            <span style={{ fontSize: 10, color: C.t3, fontFamily: MONO }}>stress {note.stress}/5</span>
+          )}
         </div>
       )}
     </div>

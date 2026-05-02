@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from shared.db import get_table, get_item, query_items
-from shared.timezone import local_today_str
+from shared.timezone import local_today_str, LOCAL_TZ
 
 
 def build_system_prompt(snapshot: Optional[dict]) -> str:
@@ -448,6 +448,7 @@ def _last_night_journal_block(journal_table, today_str):
             or j.get("morning_text")
             or j.get("evening_text")
             or j.get("evening_tags")
+            or j.get("notes")
         )
         if not has_any:
             continue
@@ -479,6 +480,28 @@ def _last_night_journal_block(journal_table, today_str):
                 if q and a:
                     lines.append(f"- Q: {q}")
                     lines.append(f"  A: {a[:400]}")
+
+        notes = [n for n in (j.get("notes") or []) if isinstance(n, dict) and n.get("text")]
+        if notes:
+            notes_sorted = sorted(notes, key=lambda n: n.get("at") or "")
+            lines.append("### Notes (time-marked)")
+            for n in notes_sorted[:10]:
+                at = str(n.get("at") or "")
+                hhmm = ""
+                try:
+                    dt_at = datetime.fromisoformat(at.replace("Z", "+00:00"))
+                    hhmm = dt_at.astimezone(LOCAL_TZ).strftime("%H:%M")
+                except Exception:
+                    hhmm = at[:16]
+                extra_bits = []
+                if n.get("mood") is not None:
+                    extra_bits.append(f"mood {n['mood']}/5")
+                if n.get("stress") is not None:
+                    extra_bits.append(f"stress {n['stress']}/5")
+                if n.get("tags"):
+                    extra_bits.append(", ".join(n["tags"]))
+                extra = f" ({'; '.join(extra_bits)})" if extra_bits else ""
+                lines.append(f"- {hhmm}{extra}: \"{str(n.get('text'))[:400]}\"")
 
         evening_tags = j.get("evening_tags") or []
         evening_mood = j.get("evening_mood")
