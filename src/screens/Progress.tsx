@@ -44,6 +44,15 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
   const stepsWeek = today.stepsWeek ?? [];
   const stepsSum = stepsWeek.reduce((a, s) => a + s.v, 0);
   const stepsAvg = stepsWeek.length ? Math.round(stepsSum / stepsWeek.length) : 0;
+  const stepsGoal = today.stepsGoal || 1;
+  const stepsPct = Math.min(1, today.steps / stepsGoal);
+  const stepsPctDisplay = Math.round((today.steps / stepsGoal) * 100);
+  const stepsStatusColor = today.steps >= stepsGoal ? C.primary : today.steps >= stepsGoal * 0.7 ? C.yellow : C.warn;
+  const daysHit = stepsWeek.filter((d) => d.v >= stepsGoal).length;
+  const peakDay = stepsWeek.reduce<{ d: string; v: number } | null>(
+    (best, s) => (best == null || s.v > best.v ? { d: s.d, v: s.v } : best),
+    null,
+  );
   // BMI = 703 × lb / in². Mateo's height is 5'8" = 68in. If MATEO.height
   // format ever changes, parseHeightInches stays robust.
   const heightInches = parseHeightInches(MATEO.height);
@@ -86,34 +95,66 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
         </div>
       </Panel>
 
-      <SectionHead C={C} kicker="Movement" title="Steps · 7 days" right={<Chip C={C} color={C.cyan}>avg {stepsAvg.toLocaleString()}</Chip>} />
+      <SectionHead C={C} kicker="Movement" title="Steps" />
       <Panel C={C}>
-        {/* Headline stacked (not inline with meta) so the big number never
-            tangles with bar labels below. Subtext lives on its own line. */}
-        <div style={{ marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
           <div style={{ fontSize: 28, fontWeight: 800, color: C.t, fontFamily: MONO, letterSpacing: "-.04em", lineHeight: 1 }}>
             {today.steps.toLocaleString()}
           </div>
-          {today.steps >= today.stepsGoal ? (
-            <div style={{ fontSize: 11, color: C.primary, fontFamily: MONO, fontWeight: 700, marginTop: 4, letterSpacing: ".02em" }}>
-              goal hit · +{(today.steps - today.stepsGoal).toLocaleString()} over {today.stepsGoal.toLocaleString()}
-            </div>
-          ) : (
-            <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO, marginTop: 4, letterSpacing: ".02em" }}>
-              {(today.stepsGoal - today.steps).toLocaleString()} to {today.stepsGoal.toLocaleString()} goal
-            </div>
-          )}
+          <div
+            style={{
+              fontSize: 12,
+              fontWeight: 800,
+              fontFamily: MONO,
+              color: stepsStatusColor,
+              background: stepsStatusColor + "1f",
+              padding: "3px 8px",
+              borderRadius: 6,
+              letterSpacing: "-.01em",
+            }}
+          >
+            {stepsPctDisplay}%
+          </div>
         </div>
-        <BarRow
-          C={C}
-          items={stepsWeek}
-          accessor="v"
-          height={48}
-          // Two-tier: on-target (green) vs below (dim warn). Don't use C.t4
-          // for bars — it reads as "missing data" rather than "short day".
-          colorFn={(_it, v) => (v >= today.stepsGoal ? C.primary : v >= today.stepsGoal * 0.7 ? C.yellow : C.warn)}
-          valueFn={(it) => (it.v / 1000).toFixed(0) + "k"}
-        />
+        <div style={{ height: 4, borderRadius: 2, background: C.s4, marginTop: 10, overflow: "hidden" }}>
+          <div
+            style={{
+              height: "100%",
+              width: `${stepsPct * 100}%`,
+              background: stepsStatusColor,
+              borderRadius: 2,
+              transition: "width 1s ease",
+            }}
+          />
+        </div>
+        <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 6, letterSpacing: ".02em" }}>
+          {today.steps >= stepsGoal
+            ? `+${(today.steps - stepsGoal).toLocaleString()} past ${(stepsGoal / 1000).toFixed(0)}k goal`
+            : `${(stepsGoal - today.steps).toLocaleString()} to ${(stepsGoal / 1000).toFixed(0)}k goal`}
+        </div>
+
+        <div style={{ marginTop: 18 }}>
+          <BarRow
+            C={C}
+            items={stepsWeek}
+            accessor="v"
+            height={64}
+            colorFn={() => C.primary}
+            goalValue={stepsGoal}
+            belowGoalOpacity={0.35}
+          />
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6, marginTop: 14 }}>
+          <Stat C={C} label="7d avg" value={stepsAvg.toLocaleString()} sub="steps/day" valueC={C.primary} />
+          <Stat C={C} label="Days hit" value={`${daysHit} / 7`} sub={`of ${(stepsGoal / 1000).toFixed(0)}k goal`} />
+          <Stat
+            C={C}
+            label="Best day"
+            value={peakDay ? (peakDay.v / 1000).toFixed(1) + "k" : "—"}
+            sub={peakDay ? peakDay.d : undefined}
+          />
+        </div>
       </Panel>
 
       <SectionHead C={C} kicker="Last night" title="Sleep stages" />
