@@ -366,7 +366,15 @@ def _detect_preferred_type(session_splits: list[dict], target_dt: datetime) -> s
         return last_seen.get(split, 999)
 
     ordered = sorted(("push", "pull", "legs"), key=_rank, reverse=True)
-    return ordered[0]
+    preferred = ordered[0]
+
+    # Guardrail: if every split we'd consider has been hit within the last day
+    # (e.g. a full-body session yesterday), don't force another lift session —
+    # suggest mobility instead of recommending push-after-push.
+    if last_seen.get(preferred, 999) <= 1:
+        return "mobility"
+
+    return preferred
 
 
 def _build_main(
@@ -404,7 +412,12 @@ def _build_main(
         if last is None:
             bits.append(f"no {workout_type} work in last 28d")
         else:
-            bits.append(f"last {workout_type}: {_fmt_when(last['daysAgo'], last['date'], target_dt)}")
+            when = _fmt_when(last["daysAgo"], last["date"], target_dt)
+            mg_detail = _fmt_mg_counts(last.get("mgCounts") or {}, workout_type)
+            bits.append(
+                f"last {workout_type}: {when} ({mg_detail})" if mg_detail
+                else f"last {workout_type}: {when}"
+            )
 
     reason = ". ".join(bits).strip() or f"{workout_type.capitalize()} day."
 
@@ -431,6 +444,25 @@ def _fmt_when(days_ago: int, date_str: str, target_dt: datetime) -> str:
     if days_ago <= 6:
         return f"{d.strftime('%a')} {d.month}/{d.day}"
     return f"{d.month}/{d.day}"
+
+
+def _fmt_mg_counts(mg_counts: dict, workout_type: str) -> str:
+    """Compact muscle-group breakdown for the proposal's reason line.
+
+    Filters to groups relevant to the workout type, sorts by count desc, caps
+    at 3 entries. Returns '' when nothing relevant to surface.
+    """
+    relevant = set(_TYPE_TO_MUSCLE_GROUPS.get(workout_type, []))
+    if not relevant or not mg_counts:
+        return ""
+    ordered = sorted(
+        ((mg, int(n)) for mg, n in mg_counts.items() if mg in relevant),
+        key=lambda kv: kv[1],
+        reverse=True,
+    )
+    if not ordered:
+        return ""
+    return ", ".join(f"{mg} {n}" for mg, n in ordered[:3])
 
 
 # Workout type → which muscle groups the focus-lifts should come from.
