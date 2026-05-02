@@ -53,6 +53,12 @@ def build_system_prompt(snapshot: Optional[dict]) -> str:
 - Location: Pacific Beach, San Diego
 - Training: 4-5x/week, push/pull/legs split with supersets
 - Back injury history: avoid loaded squats and heavy deadlifts
+
+## Reasoning over recent workouts
+The "Last 7 Days (workouts)" block below lists each session prefixed with the day-of-week (e.g. `Thu 2026-04-30`) and — when the session was annotated — a muscle-group set breakdown. When Mateo asks what to train today, or when you're giving feedback on a session:
+- Anchor dates against the DOW prefixes. "Yesterday" means the row immediately before today, not the top of the list.
+- Avoid recommending a muscle group he hit hard in the last 24-48h (e.g. don't suggest push the day after a chest-heavy session). If the only recent history looks like back-to-back same-group work, call it out rather than continuing the pattern.
+- If the breakdown is missing (session wasn't annotated), fall back to the title/type — but flag the uncertainty instead of guessing specifics.
 - Chronic sleep pattern: ~6h/night average over the past 6 months. This is his current reality — the Today ring targets his personal baseline. The medical optimum is 7-9h (NSF 2015; Watson 2015). Treat sleep as a likely lever if recovery, HRV, or mood are trending poorly, but frame it as "extending 15-30 min/week would likely help" rather than "you need 7.5h tonight." Don't moralize.
 
 ## Active Medication
@@ -69,7 +75,7 @@ You have tools to take action for Mateo. Use them proactively when he mentions c
 - log_water(oz): Log plain water intake in ounces. Use for "drank a glass of water" / "16 oz water". Do NOT use for beverages that contain water (tea, coffee, soda, etc. — those go through log_meal).
 - log_workout(text): Free-form workout description → estimates duration/type/intensity AND logs it. Use when Mateo says "just finished a push workout", "did 45 min Z2 run", "mobility this morning" WITHOUT specific lift details. Strava sync still runs independently.
 - annotate_workout(text, date?): Attach structured lift data (exercises, sets, reps, weight, supersets, session notes) to an EXISTING workout. Use when Mateo pastes lift notes — e.g. "bench 4x5 @ 205, OHP 3x8 @ 115" or a full workout log. Handles ramps, drop sets, supersets, cardio intervals. Prefer this over log_workout when there's real lift detail. Defaults to today; accepts date="yesterday's workout" style hints — convert to YYYY-MM-DD.
-- log_journal(tags?, mood?, stress?, soreness?, slot?, text?): Capture a reflection OR log supplements taken today. Morning slot = check-in about last night (default). Evening slot (slot="evening") = end-of-day reflection; use after 6pm local when Mateo is recapping his day. Slots write to separate fields on the same daily row — evening will NOT overwrite morning. Tags optional; pass `text` to save a verbatim narrative. Use this tool IMMEDIATELY (no confirmation) when Mateo mentions taking any supplement — call it with the matching supplement tag(s). Valid tags — behavior: alcohol, caffeine_late, ate_late, heavy_meal, hydrated, screens_bed, late_bedtime, meditated, stretched, sauna, cold, sunlight_am, stress, social, travel, sick, back_flare. Valid tags — supplements: creatine, zinc, d3_k2, fish_oil, vitamin_c, l_theanine, rx, 5_htp, b_complex. IMPORTANT: "rx" is Mateo's Adderall — use the generic `rx` tag (not `adderall`) when logging; the UI masks it. Never render "Adderall" in user-facing text unless Mateo says it first; refer to it as "Rx" or "stim" in your replies.
+- log_journal(tags?, mood?, stress?, soreness?, slot?, text?, prompts?): Capture a reflection OR log supplements taken today. Morning slot = check-in about last night (default). Evening slot (slot="evening") = end-of-day reflection; use after 6pm local when Mateo is recapping his day. Slots write to separate fields on the same daily row — evening will NOT overwrite morning. Tags optional; pass `text` to save a verbatim narrative. Pass `prompts` as `[{q, a}, …]` when you ask Mateo a reflection question and he answers — the Q&A shows up in the journal timeline. Use this tool IMMEDIATELY (no confirmation) when Mateo mentions taking any supplement — call it with the matching supplement tag(s). Valid tags — behavior: alcohol, caffeine_late, ate_late, heavy_meal, hydrated, screens_bed, late_bedtime, meditated, stretched, sauna, cold, sunlight_am, stress, social, travel, sick, back_flare. Valid tags — supplements: creatine, zinc, d3_k2, fish_oil, vitamin_c, l_theanine, rx, 5_htp, b_complex. IMPORTANT: "rx" is Mateo's Adderall — use the generic `rx` tag (not `adderall`) when logging; the UI masks it. Never render "Adderall" in user-facing text unless Mateo says it first; refer to it as "Rx" or "stim" in your replies.
 - generate_weekly_summary(): Pulls last 7 days of journal + scores + workouts into a structured summary. Use when Mateo asks how the week went or on Sunday evenings for a weekly debrief.
 - get_recent_meals(days): Look up recent rows. Returns meals (kind="meal", with meal_id), water entries (kind="water", with water_id), AND workouts (kind="workout", with workout_id). Use to find an id you need to delete.
 - delete_meal(meal_id): Remove a previously-logged meal (and its water companion). ONLY use to fix a mistake — e.g. you logged the wrong thing, or Mateo says "delete that".
@@ -368,6 +374,24 @@ def _body_composition_block(metrics_table, today_str):
     return "\n".join(lines)
 
 
+def _muscle_group_summary(workout: dict) -> str:
+    """Roll up working sets per muscle_group from the workout's embedded exercises.
+    Returns ' · chest 8 sets, shoulders 6' or '' if no annotation present."""
+    exercises = workout.get("exercises") or []
+    if not exercises:
+        return ""
+    counts: dict = {}
+    for ex in exercises:
+        mg = str(ex.get("muscle_group") or "other").strip().lower()
+        working = sum(1 for s in (ex.get("sets") or []) if not s.get("warmup"))
+        if working:
+            counts[mg] = counts.get(mg, 0) + working
+    if not counts:
+        return ""
+    ordered = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    return " · " + ", ".join(f"{mg} {n} sets" for mg, n in ordered)
+
+
 def _week_history_block(scores_table, workouts_table, today_str):
     try:
         dt = datetime.strptime(today_str, "%Y-%m-%d")
@@ -377,23 +401,26 @@ def _week_history_block(scores_table, workouts_table, today_str):
     day_lines = []
     workout_lines = []
     for i in range(1, 8):
-        d = (dt - timedelta(days=i)).strftime("%Y-%m-%d")
+        day_dt = dt - timedelta(days=i)
+        d = day_dt.strftime("%Y-%m-%d")
+        dow = day_dt.strftime("%a")
         s = get_item(scores_table, {"date": d}) or {}
         if s:
             sleep = s.get("sleep", {})
             total_min = sleep.get("total_min", 0)
             sleep_hm = f"{total_min // 60}h{total_min % 60:02d}m" if total_min else "—"
             day_lines.append(
-                f"- {d}: recovery {s.get('recovery', '—')}% ({s.get('recovery_zone', '—')}), "
+                f"- {dow} {d}: recovery {s.get('recovery', '—')}% ({s.get('recovery_zone', '—')}), "
                 f"HRV {s.get('hrv', '—')}, RHR {s.get('rhr', '—')}, "
                 f"strain {s.get('strain', '—')}, sleep {sleep_hm}"
             )
         ws = query_items(workouts_table, "date", d) or []
         for w in ws:
             workout_lines.append(
-                f"- {d}: {w.get('title', 'Workout')} ({w.get('type', '?')}) — "
+                f"- {dow} {d}: {w.get('title', 'Workout')} ({w.get('type', '?')}) — "
                 f"{int(w.get('dur', 0))} min, strain {w.get('strain', '—')}, "
                 f"avg HR {int(round(float(w.get('avgHR', 0))))}"
+                + _muscle_group_summary(w)
             )
 
     sections = []
