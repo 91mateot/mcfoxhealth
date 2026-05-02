@@ -20,9 +20,10 @@ interface FuelScreenProps {
   nutrition: NutritionResponse;
   onLogMeal: (prefill?: string) => void;
   onOpenMeal?: (m: Meal) => void;
+  onOpenMealHistory: () => void;
 }
 
-export function FuelScreen({ C, today, nutrition, onLogMeal, onOpenMeal }: FuelScreenProps) {
+export function FuelScreen({ C, today, nutrition, onLogMeal, onOpenMeal, onOpenMealHistory }: FuelScreenProps) {
   const T = nutrition.targets;
   const eaten = nutrition.totals;
   const planned = nutrition.mealPlanned ?? today.mealPlanned;
@@ -113,7 +114,33 @@ export function FuelScreen({ C, today, nutrition, onLogMeal, onOpenMeal }: FuelS
       />
 
       {/* Today's meals */}
-      <SectionHead C={C} kicker="Logged" title="Today's meals" right={<Chip C={C}>{nutrition.meals.length} items</Chip>} />
+      <SectionHead
+        C={C}
+        kicker="Logged"
+        title="Today's meals"
+        right={
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <Chip C={C}>{nutrition.meals.length} items</Chip>
+            <button
+              onClick={onOpenMealHistory}
+              style={{
+                background: "transparent",
+                border: `1px solid ${C.border}`,
+                borderRadius: 8,
+                padding: "4px 8px",
+                fontSize: 11,
+                color: C.t2,
+                fontFamily: MONO,
+                fontWeight: 700,
+                cursor: "pointer",
+                letterSpacing: ".05em",
+              }}
+            >
+              7d
+            </button>
+          </div>
+        }
+      />
       {nutrition.meals.length === 0 ? (
         <Panel C={C}>
           <div style={{ fontSize: 12, color: C.t3, textAlign: "center", padding: "12px 0" }}>

@@ -363,6 +363,12 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/workouts
             Method: GET
+        GetNutritionHistory:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/nutrition/history
+            Method: GET
         GetNutrition:
           Type: HttpApi
           Properties:

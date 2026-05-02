@@ -4,6 +4,7 @@ API Lambda — read endpoints for the PWA frontend.
   GET  /api/today                       — Full today screen payload
   GET  /api/workouts                    — Workout history
   GET  /api/nutrition/:d                — Day's nutrition log
+  GET  /api/nutrition/history           — Last N days of nutrition (default 7)
   GET  /api/progress                    — Body composition + 30-day trends + lifts
   GET  /api/insights                    — Numeric + journal-tag correlations for the Insights modal
   GET  /api/conversation/latest         — Most recent coach thread (if active within 6h)
@@ -35,6 +36,8 @@ def lambda_handler(event, context):
         return _get_today()
     if path == "/api/workouts":
         return _get_workouts()
+    if path == "/api/nutrition/history":
+        return _get_nutrition_history(event)
     if path.startswith("/api/nutrition/"):
         date = params.get("date") or path.split("/")[-1]
         return _get_nutrition(date)
@@ -422,6 +425,66 @@ def _get_workouts():
 
     result.sort(key=lambda x: x["date"], reverse=True)
     return _resp(200, {"workouts": result})
+
+
+def _get_nutrition_history(event):
+    """Return the last N days (default 7, max 30) of nutrition, newest first.
+
+    Each day carries the same shape `_get_nutrition` returns, minus the
+    supplements/targets which are day-invariant and can be pulled from /today.
+    Used by the Meal history sheet.
+    """
+    try:
+        days = int((event.get("queryStringParameters") or {}).get("days", "7"))
+    except (TypeError, ValueError):
+        days = 7
+    days = max(1, min(days, 30))
+
+    table = get_table("NUTRITION_TABLE")
+    today_dt = local_now()
+    out = []
+    for i in range(days):
+        d_dt = today_dt - timedelta(days=i)
+        d = d_dt.strftime("%Y-%m-%d")
+        items = query_items(table, "date", d) or []
+        meals = []
+        water_total = 0
+        caffeine_total = 0
+        totals = {"cal": 0, "p": 0, "c": 0, "f": 0}
+        for m in items:
+            mid = m.get("meal_id", "")
+            if mid.startswith("water_"):
+                water_total += m.get("oz", 0)
+            elif mid.startswith("meal_"):
+                meal = {
+                    "id": mid,
+                    "time": m.get("time", ""),
+                    "name": m.get("name", ""),
+                    "portion": m.get("portion", ""),
+                    "cal": m.get("cal", 0),
+                    "p": m.get("p", 0),
+                    "c": m.get("c", 0),
+                    "f": m.get("f", 0),
+                    "tag": m.get("tag", ""),
+                }
+                if m.get("caffeine_mg") is not None:
+                    meal["caffeineMg"] = m["caffeine_mg"]
+                    caffeine_total += m.get("caffeine_mg", 0)
+                meals.append(meal)
+                totals["cal"] += meal["cal"]
+                totals["p"] += meal["p"]
+                totals["c"] += meal["c"]
+                totals["f"] += meal["f"]
+        meals.sort(key=lambda x: x.get("time") or "")
+        out.append({
+            "date": d,
+            "meals": meals,
+            "totals": totals,
+            "water": water_total,
+            "caffeineMg": caffeine_total,
+        })
+
+    return _resp(200, {"days": out})
 
 
 def _get_nutrition(date_str):

@@ -3,6 +3,7 @@ import type {
   TodayResponse,
   WorkoutsResponse,
   NutritionResponse,
+  NutritionHistoryResponse,
   ProgressResponse,
   InsightsResponse,
   Meal,
@@ -87,6 +88,13 @@ export function useInsights(enabled = true): SWRResponse<InsightsResponse> {
 
 export function useNutrition(date: string): SWRResponse<NutritionResponse> {
   return useSWR<NutritionResponse>(`/api/nutrition/${date}`, fetcher);
+}
+
+export function useNutritionHistory(enabled = true, days = 7): SWRResponse<NutritionHistoryResponse> {
+  return useSWR<NutritionHistoryResponse>(
+    enabled ? `/api/nutrition/history?days=${days}` : null,
+    fetcher,
+  );
 }
 
 export function todayISO(): string {

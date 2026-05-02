@@ -12,7 +12,9 @@ import { ChatModal } from "./modals/Chat";
 import { JournalSheet } from "./modals/Journal";
 import { JournalHistorySheet } from "./modals/JournalHistorySheet";
 import { MealDetailModal } from "./modals/MealDetail";
+import { MealHistorySheet } from "./modals/MealHistorySheet";
 import { WorkoutDetailModal } from "./modals/WorkoutDetail";
+import { WorkoutHistorySheet } from "./modals/WorkoutHistorySheet";
 import { InsightsModal } from "./modals/Insights";
 import type { Meal, Workout } from "./types";
 import { useToday, useWorkouts, useProgress, useNutrition, logMeal, logWorkout, submitJournal, todayISO } from "./api";
@@ -40,7 +42,9 @@ export default function App() {
   const [journalOpen, setJournalOpen] = useState(false);
   const [journalHistoryOpen, setJournalHistoryOpen] = useState(false);
   const [mealDetail, setMealDetail] = useState<Meal | null>(null);
+  const [mealHistoryOpen, setMealHistoryOpen] = useState(false);
   const [workoutDetail, setWorkoutDetail] = useState<Workout | null>(null);
+  const [workoutHistoryOpen, setWorkoutHistoryOpen] = useState(false);
   const [insightsOpen, setInsightsOpen] = useState(false);
 
   useEffect(() => {
@@ -118,6 +122,7 @@ export default function App() {
           workouts={workouts.data}
           onLogWorkout={() => setWorkoutOpen(true)}
           onOpenWorkout={(w) => setWorkoutDetail(w)}
+          onOpenWorkoutHistory={() => setWorkoutHistoryOpen(true)}
           week={week}
           setWeek={setWeek}
         />
@@ -130,6 +135,7 @@ export default function App() {
           nutrition={nutrition.data}
           onLogMeal={openLogMeal}
           onOpenMeal={(m) => setMealDetail(m)}
+          onOpenMealHistory={() => setMealHistoryOpen(true)}
         />
       )}
 
@@ -213,6 +219,17 @@ export default function App() {
         open={workoutDetail !== null}
         onClose={() => setWorkoutDetail(null)}
         workout={workoutDetail}
+      />
+      <MealHistorySheet
+        C={C}
+        open={mealHistoryOpen}
+        onClose={() => setMealHistoryOpen(false)}
+      />
+      <WorkoutHistorySheet
+        C={C}
+        open={workoutHistoryOpen}
+        onClose={() => setWorkoutHistoryOpen(false)}
+        onOpenWorkout={(w) => setWorkoutDetail(w)}
       />
       <InsightsModal C={C} open={insightsOpen} onClose={() => setInsightsOpen(false)} />
     </div>

@@ -418,6 +418,18 @@ export interface NutritionResponse {
   supplements?: Supplement[];
 }
 
+export interface NutritionHistoryDay {
+  date: string;
+  meals: Meal[];
+  totals: { cal: number; p: number; c: number; f: number };
+  water: number;
+  caffeineMg?: number;
+}
+
+export interface NutritionHistoryResponse {
+  days: NutritionHistoryDay[];
+}
+
 export interface TrendMetric {
   cur: number;
   prev: number;

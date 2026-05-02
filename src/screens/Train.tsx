@@ -14,11 +14,12 @@ interface TrainScreenProps {
   workouts: WorkoutsResponse;
   onLogWorkout: () => void;
   onOpenWorkout: (w: Workout) => void;
+  onOpenWorkoutHistory: () => void;
   week: number;
   setWeek: (n: number) => void;
 }
 
-export function TrainScreen({ C, today, workouts, onLogWorkout, onOpenWorkout, week, setWeek }: TrainScreenProps) {
+export function TrainScreen({ C, today, workouts, onLogWorkout, onOpenWorkout, onOpenWorkoutHistory, week, setWeek }: TrainScreenProps) {
   const list = workouts.workouts ?? [];
   const weekStrain = today.recoveryWeek.reduce((a, d) => a + (d.strain ?? 0), 0);
   const recent = list.slice(0, 5);
@@ -92,7 +93,30 @@ export function TrainScreen({ C, today, workouts, onLogWorkout, onOpenWorkout, w
         </>
       )}
 
-      <SectionHead C={C} kicker="Log" title="Recent sessions" />
+      <SectionHead
+        C={C}
+        kicker="Log"
+        title="Recent sessions"
+        right={
+          <button
+            onClick={onOpenWorkoutHistory}
+            style={{
+              background: "transparent",
+              border: `1px solid ${C.border}`,
+              borderRadius: 8,
+              padding: "4px 8px",
+              fontSize: 11,
+              color: C.t2,
+              fontFamily: MONO,
+              fontWeight: 700,
+              cursor: "pointer",
+              letterSpacing: ".05em",
+            }}
+          >
+            7d
+          </button>
+        }
+      />
       {list.length === 0 ? (
         <Panel C={C}>
           <div style={{ fontSize: 12, color: C.t3, textAlign: "center", padding: "12px 0" }}>
