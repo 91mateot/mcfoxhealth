@@ -368,6 +368,12 @@ Resources:
             TableName: !Ref ExercisesTable
         - DynamoDBReadPolicy:
             TableName: !Ref ConversationsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:fitness-api-key-*'
       Events:
         GetToday:
           Type: HttpApi

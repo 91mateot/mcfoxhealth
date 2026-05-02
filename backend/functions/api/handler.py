@@ -15,7 +15,10 @@ API Lambda — read endpoints for the PWA frontend.
 
 import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
+
+import boto3
 
 from shared.db import get_table, get_item, put_item, query_items
 from shared.timezone import local_now, local_today_str
@@ -27,7 +30,29 @@ from shared.conversation_service import (
 from shared.workout_proposer import propose_for_date as _propose_workout_for_date
 
 
+_secrets_client = boto3.client("secretsmanager")
+_api_key_cache = {"value": None, "ts": 0}
+
+
+def _verify_api_key(event):
+    key = (event.get("headers") or {}).get("x-api-key", "")
+    if not key:
+        return False
+    now = int(time.time())
+    if _api_key_cache["value"] is None or now - _api_key_cache["ts"] > 300:
+        try:
+            resp = _secrets_client.get_secret_value(SecretId="fitness-api-key")
+            _api_key_cache["value"] = json.loads(resp["SecretString"]).get("api_key", "")
+        except Exception:
+            _api_key_cache["value"] = os.environ.get("INGEST_API_KEY", "")
+        _api_key_cache["ts"] = now
+    return bool(_api_key_cache["value"]) and key == _api_key_cache["value"]
+
+
 def lambda_handler(event, context):
+    if not _verify_api_key(event):
+        return _resp(401, {"error": "unauthorized"})
+
     path = event.get("rawPath", "")
     method = (event.get("requestContext", {}).get("http", {}) or {}).get("method", "GET")
     params = event.get("pathParameters", {}) or {}

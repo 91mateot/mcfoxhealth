@@ -71,6 +71,9 @@ def lambda_handler(event, context):
             return {"ok": False, "error": str(e)}
         return result
 
+    if not _verify_api_key(event):
+        return _resp(401, {"error": "unauthorized"})
+
     path = event.get("rawPath", "")
     method = event.get("requestContext", {}).get("http", {}).get("method", "POST")
     params = event.get("pathParameters") or {}
@@ -121,9 +124,6 @@ def lambda_handler(event, context):
 
 
 def _post_calibration(event):
-    if not _verify_api_key(event):
-        return _resp(401, {"error": "unauthorized"})
-
     body = _parse_body(event)
     if not body:
         return _resp(400, {"error": "invalid JSON body"})
