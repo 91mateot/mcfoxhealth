@@ -35,8 +35,16 @@ export const COACH_URL =
   (import.meta.env.VITE_COACH_URL as string | undefined)?.trim()
     || `${API_BASE}/api/coach`;
 
+const API_KEY = (import.meta.env.VITE_API_KEY as string | undefined)?.trim() || "";
+
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...(extra ?? {}) };
+  if (API_KEY) h["x-api-key"] = API_KEY;
+  return h;
+}
+
 async function fetcher<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`);
+  const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
@@ -44,7 +52,7 @@ async function fetcher<T>(path: string): Promise<T> {
 async function post<TResp>(path: string, body: unknown): Promise<TResp> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -54,7 +62,7 @@ async function post<TResp>(path: string, body: unknown): Promise<TResp> {
 async function patch<TResp>(path: string, body: unknown): Promise<TResp> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -62,7 +70,10 @@ async function patch<TResp>(path: string, body: unknown): Promise<TResp> {
 }
 
 async function del<TResp>(path: string): Promise<TResp> {
-  const res = await fetch(`${API_BASE}${path}`, { method: "DELETE" });
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
@@ -364,20 +375,20 @@ export async function refreshPlannedWorkout(): Promise<PlannedWorkout | null> {
 }
 
 export async function fetchLatestConversation(): Promise<LatestConversationResponse> {
-  const res = await fetch(`${API_BASE}/api/conversation/latest`);
+  const res = await fetch(`${API_BASE}/api/conversation/latest`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
 
 export async function fetchConversationList(limit = 20): Promise<ConversationListItem[]> {
-  const res = await fetch(`${API_BASE}/api/conversation/list?limit=${limit}`);
+  const res = await fetch(`${API_BASE}/api/conversation/list?limit=${limit}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const data = (await res.json()) as { threads?: ConversationListItem[] };
   return data.threads ?? [];
 }
 
 export async function fetchConversationById(id: string): Promise<LatestConversationResponse> {
-  const res = await fetch(`${API_BASE}/api/conversation/${encodeURIComponent(id)}`);
+  const res = await fetch(`${API_BASE}/api/conversation/${encodeURIComponent(id)}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json();
 }
