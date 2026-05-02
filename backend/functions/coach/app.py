@@ -105,7 +105,8 @@ TOOLS = [
             "reflection. Slots write to separate fields on the same daily row — calling with "
             "slot='evening' will NOT clobber the morning entry. Prefer slot='evening' after "
             "6pm local when Mateo is recapping the day. If he writes a narrative, pass it as "
-            "`text`."
+            "`text`. When you ask Mateo a reflection question and he answers, capture the "
+            "exchange as a `prompts` pair so it shows up alongside the day's journal entry."
         ),
         "input_schema": {
             "type": "object",
@@ -138,6 +139,22 @@ TOOLS = [
                         "Free-form narrative, captured verbatim from what Mateo said. "
                         "Keep his voice; don't summarize into third person."
                     ),
+                },
+                "prompts": {
+                    "type": "array",
+                    "description": (
+                        "Optional reflection Q&A pairs. Use when Mateo answers one of the "
+                        "guided prompts, or when you ask him a reflection question and he "
+                        "responds. Each item is {q: your question, a: his verbatim answer}."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "q": {"type": "string", "description": "The question asked."},
+                            "a": {"type": "string", "description": "Mateo's verbatim answer."},
+                        },
+                        "required": ["q", "a"],
+                    },
                 },
             },
         },
@@ -325,6 +342,7 @@ def _execute_tool(name: str, args: dict) -> dict:
                 soreness=args.get("soreness"),
                 slot=args.get("slot"),
                 text=args.get("text"),
+                prompts=args.get("prompts"),
             )
         if name == "generate_weekly_summary":
             return _weekly_summary()
