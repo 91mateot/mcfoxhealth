@@ -37,7 +37,18 @@ export function BarRow<T extends BarItem>({
         return (
           <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
             {valueFn && (
-              <div style={{ fontSize: 11, color: isToday ? col : C.t4, fontFamily: MONO, fontWeight: 600 }}>
+              <div
+                style={{
+                  // Label color tracks bar color so short days ("4k" in warn)
+                  // stay readable against the dark panel. Today pops slightly
+                  // brighter to keep the "this is today" signal.
+                  fontSize: 11,
+                  color: col,
+                  opacity: isToday ? 1 : 0.75,
+                  fontFamily: MONO,
+                  fontWeight: isToday ? 700 : 600,
+                }}
+              >
                 {valueFn(it)}
               </div>
             )}

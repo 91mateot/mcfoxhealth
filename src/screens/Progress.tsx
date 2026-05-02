@@ -88,17 +88,19 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
 
       <SectionHead C={C} kicker="Movement" title="Steps · 7 days" right={<Chip C={C} color={C.cyan}>avg {stepsAvg.toLocaleString()}</Chip>} />
       <Panel C={C}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 10 }}>
-          <div style={{ fontSize: 22, fontWeight: 800, color: C.t, fontFamily: MONO, letterSpacing: "-.04em" }}>
+        {/* Headline stacked (not inline with meta) so the big number never
+            tangles with bar labels below. Subtext lives on its own line. */}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 28, fontWeight: 800, color: C.t, fontFamily: MONO, letterSpacing: "-.04em", lineHeight: 1 }}>
             {today.steps.toLocaleString()}
           </div>
           {today.steps >= today.stepsGoal ? (
-            <div style={{ fontSize: 11, color: C.primary, fontFamily: MONO, fontWeight: 700 }}>
-              goal hit · +{(today.steps - today.stepsGoal).toLocaleString()} over
+            <div style={{ fontSize: 11, color: C.primary, fontFamily: MONO, fontWeight: 700, marginTop: 4, letterSpacing: ".02em" }}>
+              goal hit · +{(today.steps - today.stepsGoal).toLocaleString()} over {today.stepsGoal.toLocaleString()}
             </div>
           ) : (
-            <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO }}>
-              of {today.stepsGoal.toLocaleString()} today
+            <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO, marginTop: 4, letterSpacing: ".02em" }}>
+              {(today.stepsGoal - today.steps).toLocaleString()} to {today.stepsGoal.toLocaleString()} goal
             </div>
           )}
         </div>
