@@ -84,7 +84,10 @@ export default function App() {
         paddingTop: "calc(12px + env(safe-area-inset-top, 0px))",
         paddingLeft: "max(14px, env(safe-area-inset-left, 0px))",
         paddingRight: "max(14px, env(safe-area-inset-right, 0px))",
-        paddingBottom: "120px",
+        // TabBar is fixed at bottom (~50px), FAB juts 18px above it, plus the
+        // home-indicator safe area on newer iPhones (~26px). Add headroom so
+        // the last panel on any tab clears the FAB without content clipping.
+        paddingBottom: "calc(140px + env(safe-area-inset-bottom, 0px))",
         maxWidth: 520,
         margin: "0 auto",
         position: "relative",

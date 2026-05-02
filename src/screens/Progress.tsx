@@ -44,6 +44,11 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
   const stepsWeek = today.stepsWeek ?? [];
   const stepsSum = stepsWeek.reduce((a, s) => a + s.v, 0);
   const stepsAvg = stepsWeek.length ? Math.round(stepsSum / stepsWeek.length) : 0;
+  // BMI = 703 × lb / in². Mateo's height is 5'8" = 68in. If MATEO.height
+  // format ever changes, parseHeightInches stays robust.
+  const heightInches = parseHeightInches(MATEO.height);
+  const bmi = heightInches > 0 ? (703 * currentWeight) / (heightInches * heightInches) : 0;
+  const bmiBucket = bmiLabel(bmi);
 
   return (
     <>
@@ -76,8 +81,8 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
         {weight14d.length > 0 && <WeightChart C={C} data={weight14d} color={C.cyan} h={62} />}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6, marginTop: 10 }}>
           <Stat C={C} label="Muscle" value={leanMass} unit="lbs" valueC={C.primary} sub="lean mass" />
-          <Stat C={C} label="Height" value={MATEO.height} sub="173 cm" />
-          <Stat C={C} label="BMI" value="25.7" sub="athletic range" />
+          <Stat C={C} label="Height" value={MATEO.height} sub={`${MATEO.age}y`} />
+          <Stat C={C} label="BMI" value={bmi ? bmi.toFixed(1) : "—"} sub={bmiBucket} />
         </div>
       </Panel>
 
@@ -87,14 +92,24 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
           <div style={{ fontSize: 22, fontWeight: 800, color: C.t, fontFamily: MONO, letterSpacing: "-.04em" }}>
             {today.steps.toLocaleString()}
           </div>
-          <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO }}>of {today.stepsGoal.toLocaleString()} today</div>
+          {today.steps >= today.stepsGoal ? (
+            <div style={{ fontSize: 11, color: C.primary, fontFamily: MONO, fontWeight: 700 }}>
+              goal hit · +{(today.steps - today.stepsGoal).toLocaleString()} over
+            </div>
+          ) : (
+            <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO }}>
+              of {today.stepsGoal.toLocaleString()} today
+            </div>
+          )}
         </div>
         <BarRow
           C={C}
           items={stepsWeek}
           accessor="v"
           height={48}
-          colorFn={(_it, v) => (v >= 10000 ? C.primary : v >= 7000 ? C.yellow : C.t4)}
+          // Two-tier: on-target (green) vs below (dim warn). Don't use C.t4
+          // for bars — it reads as "missing data" rather than "short day".
+          colorFn={(_it, v) => (v >= today.stepsGoal ? C.primary : v >= today.stepsGoal * 0.7 ? C.yellow : C.warn)}
           valueFn={(it) => (it.v / 1000).toFixed(0) + "k"}
         />
       </Panel>
@@ -663,3 +678,20 @@ function LiftsSectionView({ C, lifts }: { C: Palette; lifts: LiftsSection }) {
     </>
   );
 }
+
+function parseHeightInches(h: string): number {
+  // Accepts "5'8\"", "5'8", "68in", or a plain number interpreted as inches.
+  const feetIn = /^\s*(\d+)'\s*(\d+)?\"?\s*$/.exec(h);
+  if (feetIn) return Number(feetIn[1]) * 12 + Number(feetIn[2] ?? 0);
+  const plain = Number(h);
+  return Number.isFinite(plain) ? plain : 0;
+}
+
+function bmiLabel(bmi: number): string {
+  if (!bmi) return "—";
+  if (bmi < 18.5) return "underweight";
+  if (bmi < 25) return "healthy range";
+  if (bmi < 30) return "athletic range";
+  return "high BMI";
+}
+
