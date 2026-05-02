@@ -210,11 +210,13 @@ def _compute_day(date_str):
         score_item["recovery"] = recovery_result["score"]
         score_item["recovery_zone"] = recovery_result["zone"]
         score_item["recovery_components"] = recovery_result["components"]
+        score_item["recovery_weights_used"] = recovery_result.get("weights_used") or {}
 
     if sleep_score_val is not None:
         score_item["sleep_score"] = sleep_score_val
 
     score_item["strain"] = total_strain
+    score_item["strain_coefficient"] = strain_coef
     if strain_target:
         score_item["strain_target"] = strain_target
     score_item["sleep_need"] = sleep_need
