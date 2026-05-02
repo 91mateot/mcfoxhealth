@@ -612,6 +612,10 @@ Resources:
           PORT: '8080'
           AWS_LWA_INVOKE_MODE: response_stream
           NUTRITION_FUNCTION_NAME: !Sub '${AWS::StackName}-NutritionFunction'
+          # Lambda Web Adapter spawns `python -m uvicorn` in a subprocess,
+          # which does NOT inherit the runtime's auto-injected /opt/python path.
+          # Without this, `from shared.*` fails with ModuleNotFoundError.
+          PYTHONPATH: /opt/python:/var/task
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref NutritionTable
