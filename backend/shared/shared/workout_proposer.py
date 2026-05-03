@@ -104,7 +104,9 @@ _LATERAL_CHAIN_CIRCUITS = {
 _GYM_TYPES = {"push", "pull", "legs", "hiit"}
 _UPPER_TYPES = {"push", "pull"}
 _LOWER_TYPES = {"legs"}
-_CARDIO_TYPES = {"run", "hiit", "pickleball", "walk"}
+# Pickleball is a valid WorkoutType Mateo can log, but the proposer should
+# never recommend it — he plays socially when he wants to, not on a schedule.
+_CARDIO_TYPES = {"run", "hiit", "walk"}
 
 # Duration defaults by type (minutes).
 _DEFAULT_DURATION = {
@@ -114,7 +116,6 @@ _DEFAULT_DURATION = {
     "run": 30,
     "hiit": 25,
     "pilates": 45,
-    "pickleball": 60,
     "walk": 30,
     "mobility": 15,
     "sport_prep": 20,
@@ -335,21 +336,20 @@ def _detect_preferred_type(session_splits: list[dict], target_dt: datetime) -> s
     """Choose the 'due' workout type from muscle-group classified sessions.
 
     Strategy:
-      1. Weekend nudge to cardio/pickleball if none in last ~14 days.
+      1. Weekend nudge to easy cardio if gym volume is heavy (≥4 in 7 days).
       2. Among push/pull/legs: pick the one not seen in longest (including
          any "mixed" session that touched it).
       3. If all three seen in last 3 days, pick the one done least
          recently to space things out.
       4. No gym activity at all in last 7 days → default to push.
     """
-    # Weekend nudge (Sat=5, Sun=6). Check workouts table indirectly via
-    # the splits list — cardio sessions don't go through exercises table,
-    # so we rely on pattern inference from exercise-based classification.
-    # For now, if it's Sunday and the last 14 days had 4+ gym sessions,
-    # propose active recovery pickleball to balance.
+    # Weekend nudge (Sat=5, Sun=6). Cardio sessions don't hit the exercises
+    # table, so we rely on pattern inference from the splits we do see.
+    # If the last 7 days are gym-heavy, propose an easy outdoor session to
+    # balance load — a walk on Sunday, a short run on Saturday.
     recent_7 = [s for s in session_splits if s["daysAgo"] <= 7]
     if target_dt.weekday() in (5, 6) and len(recent_7) >= 4:
-        return "pickleball" if target_dt.weekday() == 6 else "run"
+        return "walk" if target_dt.weekday() == 6 else "run"
 
     if not recent_7:
         return "push"
@@ -393,7 +393,6 @@ def _build_main(
         "run": ["cardio"],
         "hiit": ["cardio", "conditioning"],
         "pilates": ["core", "mobility"],
-        "pickleball": ["cardio", "lateral_stability"],
         "walk": ["cardio", "recovery"],
         "mobility": ["mobility"],
         "sport_prep": ["lateral_stability"],
