@@ -258,8 +258,13 @@ function invalidateMealCaches() {
 }
 
 export async function patchMeal(date: string, mealId: string, updates: MealPatch) {
-  const result = await patch<{ meal: Meal }>(`/api/meal/${date}/${mealId}`, updates);
+  const result = await patch<{ meal: Meal; date?: string }>(`/api/meal/${date}/${mealId}`, updates);
   invalidateMealCaches();
+  // Cross-day move: the meal's nutrition day changed, so the target date's
+  // SWR cache needs to refetch too.
+  if (updates.date && updates.date !== date) {
+    mutate(`/api/nutrition/${updates.date}`);
+  }
   return result;
 }
 

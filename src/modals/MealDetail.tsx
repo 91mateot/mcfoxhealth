@@ -6,7 +6,7 @@ import { Btn } from "../components/Btn";
 import { Chip } from "../components/Chip";
 import { ProgressBar } from "../components/ProgressBar";
 import { VoiceInput } from "../components/VoiceInput";
-import { addFavorite, deleteMeal, estimateMeal, formatMealTime, patchMeal } from "../api";
+import { addFavorite, deleteMeal, estimateMeal, formatMealTime, patchMeal, todayISO } from "../api";
 
 interface MealDetailProps {
   C: Palette;
@@ -27,7 +27,7 @@ function confidenceColor(C: Palette, conf?: EstimateConfidence): string {
 
 export function MealDetailModal({ C, open, onClose, meal, date, targets }: MealDetailProps) {
   const [mode, setMode] = useState<Mode>("view");
-  const [edited, setEdited] = useState<{ name: string; cal: number; p: number; c: number; f: number; tag: string } | null>(null);
+  const [edited, setEdited] = useState<{ name: string; cal: number; p: number; c: number; f: number; tag: string; date: string; time: string } | null>(null);
   const [reestimateText, setReestimateText] = useState("");
   const [busy, setBusy] = useState<"save" | "delete" | "reestimate" | "favorite" | "rematch" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +42,16 @@ export function MealDetailModal({ C, open, onClose, meal, date, targets }: MealD
     setAssumptionsOpen(false);
     setSavedFavorite(false);
     if (meal) {
-      setEdited({ name: meal.name, cal: meal.cal, p: meal.p, c: meal.c, f: meal.f, tag: meal.tag });
+      setEdited({
+        name: meal.name,
+        cal: meal.cal,
+        p: meal.p,
+        c: meal.c,
+        f: meal.f,
+        tag: meal.tag,
+        date,
+        time: meal.time || "",
+      });
       setReestimateText(meal.originalText ?? meal.name ?? "");
     }
   }, [open, meal]);
@@ -65,6 +74,8 @@ export function MealDetailModal({ C, open, onClose, meal, date, targets }: MealD
         f: edited.f,
         tag: edited.tag,
       };
+      if (edited.date !== date) patch.date = edited.date;
+      if (edited.time !== (meal.time || "")) patch.time = edited.time;
       await patchMeal(date, mealId, patch);
       onClose();
     } catch (e) {
@@ -328,6 +339,10 @@ export function MealDetailModal({ C, open, onClose, meal, date, targets }: MealD
           <div style={{ background: C.s, border: `1px solid ${C.border}`, borderRadius: 14, padding: 12, marginBottom: 10 }}>
             <EditField C={C} label="Name" value={edited.name} onChange={(v) => setEdited({ ...edited, name: v })} />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
+              <EditDate C={C} label="Date" value={edited.date} max={todayISO()} onChange={(v) => setEdited({ ...edited, date: v })} />
+              <EditTime C={C} label="Time" value={edited.time} onChange={(v) => setEdited({ ...edited, time: v })} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
               <EditNum C={C} label="Calories" value={edited.cal} onChange={(v) => setEdited({ ...edited, cal: v })} unit="kcal" color={C.primary} />
               <EditNum C={C} label="Protein" value={edited.p} onChange={(v) => setEdited({ ...edited, p: v })} unit="g" color={C.primary} />
               <EditNum C={C} label="Carbs" value={edited.c} onChange={(v) => setEdited({ ...edited, c: v })} unit="g" color={C.yellow} />
@@ -448,6 +463,63 @@ function EditNum({ C, label, value, onChange, unit, color }: { C: Palette; label
         />
         <span style={{ color: C.t4, fontFamily: MONO, fontSize: 11, marginLeft: 4 }}>{unit}</span>
       </div>
+    </div>
+  );
+}
+
+function EditDate({ C, label, value, max, onChange }: { C: Palette; label: string; value: string; max?: string; onChange: (v: string) => void }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: C.t4, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 4 }}>
+        {label}
+      </div>
+      <input
+        type="date"
+        value={value}
+        max={max}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          width: "100%",
+          background: C.bg,
+          border: `1px solid ${C.border}`,
+          borderRadius: 8,
+          padding: "8px 10px",
+          color: C.t,
+          fontFamily: MONO,
+          fontSize: 13,
+          fontWeight: 600,
+          outline: "none",
+          boxSizing: "border-box",
+        }}
+      />
+    </div>
+  );
+}
+
+function EditTime({ C, label, value, onChange }: { C: Palette; label: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: C.t4, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 4 }}>
+        {label}
+      </div>
+      <input
+        type="time"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          width: "100%",
+          background: C.bg,
+          border: `1px solid ${C.border}`,
+          borderRadius: 8,
+          padding: "8px 10px",
+          color: C.t,
+          fontFamily: MONO,
+          fontSize: 13,
+          fontWeight: 600,
+          outline: "none",
+          boxSizing: "border-box",
+        }}
+      />
     </div>
   );
 }

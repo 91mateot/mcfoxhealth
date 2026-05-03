@@ -1086,6 +1086,71 @@ def delete_meal(meal_id: str, date: Optional[str] = None) -> dict:
     return {"ok": True, "meal_id": meal_id, "companions_deleted": companions}
 
 
+def move_meal(
+    meal_id: str,
+    old_date: str,
+    new_date: str,
+    new_time: Optional[str] = None,
+) -> dict:
+    """Move a meal row (and any companion water row) from `old_date` to `new_date`.
+    `date` is the DynamoDB partition key, so a cross-day move = copy + delete.
+    `new_time` optionally overwrites `time` (HH:MM, local). Returns the relocated
+    meal item so callers can echo it back."""
+    if not meal_id or not meal_id.startswith("meal_"):
+        raise ValueError("invalid meal_id")
+    if not _valid_date(old_date) or not _valid_date(new_date):
+        raise ValueError("date must be YYYY-MM-DD")
+    if new_time is not None and not _valid_time(new_time):
+        raise ValueError("time must be HH:MM")
+
+    table = get_table("NUTRITION_TABLE")
+    existing = get_item(table, {"date": old_date, "meal_id": meal_id})
+    if not existing:
+        raise KeyError("meal not found")
+
+    if old_date == new_date:
+        if new_time is not None:
+            existing["time"] = new_time
+            existing["edited_at"] = datetime.now(timezone.utc).isoformat()
+            put_item(table, existing)
+        return existing
+
+    moved = dict(existing)
+    moved["date"] = new_date
+    if new_time is not None:
+        moved["time"] = new_time
+    moved["edited_at"] = datetime.now(timezone.utc).isoformat()
+    put_item(table, moved)
+    table.delete_item(Key={"date": old_date, "meal_id": meal_id})
+
+    for row in query_items(table, "date", old_date) or []:
+        if row.get("meal_id", "").startswith("water_") and row.get("source_meal_id") == meal_id:
+            water_moved = dict(row)
+            water_moved["date"] = new_date
+            put_item(table, water_moved)
+            table.delete_item(Key={"date": old_date, "meal_id": row["meal_id"]})
+
+    return moved
+
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def _valid_date(s: str) -> bool:
+    if not isinstance(s, str) or not _DATE_RE.match(s):
+        return False
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+
+def _valid_time(s: str) -> bool:
+    return isinstance(s, str) and bool(_TIME_RE.match(s))
+
+
 def delete_water(water_id: str, date: Optional[str] = None) -> dict:
     """Delete a standalone water row. Use for correcting duplicate log_water calls."""
     if not water_id or not water_id.startswith("water_"):

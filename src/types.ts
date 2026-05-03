@@ -651,6 +651,10 @@ export interface MealPatch {
   tag?: string;
   portion?: string;
   time?: string;
+  /** YYYY-MM-DD in local TZ. When provided (and different from the meal's
+   * current date), the backend moves the row across days and returns the new
+   * date in the response. */
+  date?: string;
   original_text?: string;
   assumptions?: string[];
   confidence?: EstimateConfidence;

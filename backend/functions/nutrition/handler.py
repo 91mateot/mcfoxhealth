@@ -31,6 +31,7 @@ from shared.nutrition_service import (
     log_journal as svc_log_journal,
     log_workout as svc_log_workout,
     delete_water as svc_delete_water,
+    move_meal as svc_move_meal,
     validate_meal as svc_validate_meal,
     sanitize_ingredients,
     generate_journal_prompts as svc_generate_journal_prompts,
@@ -257,9 +258,30 @@ def _patch_meal(date_str: str, meal_id: str, event):
         return _resp(400, {"error": "invalid meal_id"})
 
     table = get_table("NUTRITION_TABLE")
-    existing = get_item(table, {"date": date_str, "meal_id": meal_id})
-    if not existing:
-        return _resp(404, {"error": "meal not found"})
+
+    # `date` in the body means the client wants to move this meal to a different
+    # day. Route through move_meal (copy + delete) since `date` is the partition
+    # key and can't be updated in place. The rest of the patch then applies to
+    # the relocated row.
+    new_date = body.pop("date", None)
+    new_time = body.get("time")
+    moved_dates = False
+    if new_date is not None and new_date != date_str:
+        try:
+            moved = svc_move_meal(meal_id, date_str, new_date, new_time=new_time if isinstance(new_time, str) else None)
+        except KeyError:
+            return _resp(404, {"error": "meal not found"})
+        except ValueError as e:
+            return _resp(400, {"error": str(e)})
+        date_str = new_date
+        existing = moved
+        moved_dates = True
+        # `time` was handled by move_meal; don't double-apply.
+        body.pop("time", None)
+    else:
+        existing = get_item(table, {"date": date_str, "meal_id": meal_id})
+        if not existing:
+            return _resp(404, {"error": "meal not found"})
 
     updates = {}
     for k, v in body.items():
@@ -289,15 +311,17 @@ def _patch_meal(date_str: str, meal_id: str, event):
                 v = v[:2000]
             updates[k] = v
 
-    if not updates:
+    if not updates and not moved_dates:
         return _resp(400, {"error": "no valid fields to update"})
 
-    updates["edited_at"] = datetime.now(timezone.utc).isoformat()
+    if updates:
+        updates["edited_at"] = datetime.now(timezone.utc).isoformat()
+        merged = {**existing, **updates}
+        put_item(table, merged)
+    else:
+        merged = existing
 
-    merged = {**existing, **updates}
-    put_item(table, merged)
-
-    return _resp(200, {"meal": _serialize_meal(merged)})
+    return _resp(200, {"meal": _serialize_meal(merged), "date": date_str})
 
 
 def _delete_meal(date_str: str, meal_id: str):
