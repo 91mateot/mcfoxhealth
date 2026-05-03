@@ -281,6 +281,10 @@ export interface PlannedWorkout {
   generatedAt: string;
   matched: boolean;
   matchedWorkoutId?: string | null;
+  /** True when Mateo explicitly marked today as a recovery day (via the
+   * Today card or the coach). The nightly cron won't replace the rest plan
+   * while this is set; hitting Refresh clears it. */
+  restOverride?: boolean;
 }
 
 export type MuscleGroup =

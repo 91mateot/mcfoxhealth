@@ -27,7 +27,10 @@ from shared.conversation_service import (
     list_recent as list_recent_conversations,
     load as load_conversation,
 )
-from shared.workout_proposer import propose_for_date as _propose_workout_for_date
+from shared.workout_proposer import (
+    propose_for_date as _propose_workout_for_date,
+    set_rest_day as _set_rest_day,
+)
 
 
 _secrets_client = boto3.client("secretsmanager")
@@ -81,12 +84,15 @@ def lambda_handler(event, context):
         return _get_journal_history(event)
     if path == "/api/planned-workout/refresh" and method == "POST":
         return _refresh_planned_workout()
+    if path == "/api/planned-workout/rest" and method == "POST":
+        return _mark_rest_day(event)
 
     return _resp(404, {"error": "not found"})
 
 
 def _refresh_planned_workout():
-    """Re-run the proposer for today and persist."""
+    """Re-run the proposer for today and persist. Clears any manual
+    rest-day override — Refresh = 'give me a fresh recommendation'."""
     today_str = local_today_str()
     try:
         proposal = _propose_workout_for_date(today_str)
@@ -97,6 +103,25 @@ def _refresh_planned_workout():
     existing = get_item(scores_table, {"date": today_str}) or {"date": today_str}
     existing["planned_workout"] = proposal
     put_item(scores_table, existing)
+
+    todays_workouts = query_items(get_table("WORKOUTS_TABLE"), "date", today_str)
+    return _resp(200, {"plannedWorkout": _prepare_planned_workout(proposal, todays_workouts)})
+
+
+def _mark_rest_day(event):
+    """Mark today as a recovery day. Persists with rest_override=True so
+    the nightly compute job doesn't regenerate a workout proposal on top."""
+    raw = event.get("body") or "{}"
+    try:
+        body = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except (json.JSONDecodeError, TypeError):
+        body = {}
+    reason = body.get("reason") if isinstance(body, dict) else None
+    today_str = local_today_str()
+    try:
+        proposal = _set_rest_day(today_str, reason=reason if isinstance(reason, str) else None)
+    except Exception as e:
+        return _resp(500, {"error": f"set rest day failed: {e}"})
 
     todays_workouts = query_items(get_table("WORKOUTS_TABLE"), "date", today_str)
     return _resp(200, {"plannedWorkout": _prepare_planned_workout(proposal, todays_workouts)})
@@ -798,6 +823,7 @@ def _prepare_planned_workout(proposal, todays_workouts):
         "generatedAt": proposal.get("generatedAt") or proposal.get("generated_at"),
         "matched": matched,
         "matchedWorkoutId": matched_id,
+        "restOverride": bool(proposal.get("restOverride") or proposal.get("rest_override")),
     }
 
 

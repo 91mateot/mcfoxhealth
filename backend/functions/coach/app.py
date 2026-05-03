@@ -44,6 +44,7 @@ from shared.workout_proposer import (
     propose_for_date as svc_propose_workout,
     write_proposal as svc_write_proposal,
     update_lateral_chain_phase as svc_update_lateral_chain_phase,
+    set_rest_day as svc_set_rest_day,
 )
 from shared.timezone import local_today_str
 
@@ -331,6 +332,28 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "set_rest_day",
+        "description": (
+            "Mark today as a recovery/rest day. Writes a rest-day plan "
+            "(home bands + short walk) to the Today card AND sets an "
+            "override flag so the nightly compute job doesn't replace it "
+            "with a workout recommendation. Use when Mateo says "
+            "'I'm taking a rest day', 'recovery day today', 'taking today "
+            "off', or similar. Don't confirm first — just call it. If he "
+            "later decides to train, hitting Refresh on the Today card "
+            "clears the override."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Short note on why (what Mateo said). Optional — defaults to a generic recovery-day reason.",
+                },
+            },
+        },
+    },
+    {
         "name": "set_lateral_chain_phase",
         "description": (
             "Update Mateo's current Lateral Chain Rebuild program phase "
@@ -417,6 +440,8 @@ def _execute_tool(name: str, args: dict) -> dict:
             proposal = svc_propose_workout(today_str)
             svc_write_proposal(today_str, proposal)
             return proposal
+        if name == "set_rest_day":
+            return svc_set_rest_day(local_today_str(), reason=args.get("reason"))
         if name == "set_lateral_chain_phase":
             return svc_update_lateral_chain_phase(
                 int(args.get("phase", 1)),

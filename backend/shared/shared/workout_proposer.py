@@ -146,30 +146,14 @@ def propose_for_date(date_str: str) -> dict:
 
     regress = _should_regress(recent_journal)
 
-    generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-
     if recovery_zone == "red" or regress:
         reason_parts = []
         if recovery_zone == "red":
             reason_parts.append("Recovery red — active recovery only")
         if regress:
             reason_parts.append("Back flare logged — scale back loaded/explosive work")
-        return {
-            "main": {
-                "type": "rest",
-                "durationMin": 20,
-                "intensity": "light",
-                "reason": ". ".join(reason_parts) or "Easy day.",
-                "focusMuscleGroups": ["glute_med", "adductors", "core"],
-                "focusLifts": [],
-            },
-            "activation": _LATERAL_CHAIN_CIRCUITS[phase]["home"],
-            "reason": "Easy day. Home bands + short walk.",
-            "phase": phase,
-            "generatedAt": generated_at,
-            "matched": False,
-            "matchedWorkoutId": None,
-        }
+        main_reason = ". ".join(reason_parts) or "Easy day."
+        return _build_rest_proposal(phase, main_reason=main_reason)
 
     # Build the muscle-group history from the exercises table — ground truth.
     # The workouts table stores `type="Workout"` from Strava, which is useless
@@ -196,10 +180,67 @@ def propose_for_date(date_str: str) -> dict:
         "activation": activation,
         "reason": _combined_reason(main, activation, recovery_zone),
         "phase": phase,
-        "generatedAt": generated_at,
+        "generatedAt": _now_iso_z(),
         "matched": False,
         "matchedWorkoutId": None,
     }
+
+
+def _now_iso_z() -> str:
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+def _build_rest_proposal(
+    phase: int,
+    main_reason: str,
+    combined_reason: str = "Easy day. Home bands + short walk.",
+    rest_override: bool = False,
+) -> dict:
+    """Canonical rest-day proposal shape. Shared between the auto-regress
+    branch (recovery red / back flare) and the manual set_rest_day flow."""
+    if phase not in (1, 2, 3):
+        phase = 1
+    proposal = {
+        "main": {
+            "type": "rest",
+            "durationMin": 20,
+            "intensity": "light",
+            "reason": main_reason,
+            "focusMuscleGroups": ["glute_med", "adductors", "core"],
+            "focusLifts": [],
+        },
+        "activation": _LATERAL_CHAIN_CIRCUITS[phase]["home"],
+        "reason": combined_reason,
+        "phase": phase,
+        "generatedAt": _now_iso_z(),
+        "matched": False,
+        "matchedWorkoutId": None,
+    }
+    if rest_override:
+        # Signals the compute cron to skip regeneration; cleared by an explicit
+        # refresh (which calls propose_for_date and overwrites the payload).
+        proposal["restOverride"] = True
+    return proposal
+
+
+def set_rest_day(date_str: str, reason: Optional[str] = None) -> dict:
+    """Persist a manual rest-day override for `date_str` and return the
+    proposal. Used by POST /api/planned-workout/rest and the coach's
+    set_rest_day tool."""
+    config_table = get_table("USER_CONFIG_TABLE")
+    config = get_item(config_table, {"key": "mateo"}) or {}
+    program = config.get("lateral_chain_program") or {}
+    phase = int(program.get("phase", 1))
+
+    main_reason = (reason or "").strip() or "Recovery day — Mateo's call."
+    proposal = _build_rest_proposal(
+        phase=phase,
+        main_reason=main_reason,
+        combined_reason="Recovery day. Home bands + short walk.",
+        rest_override=True,
+    )
+    write_proposal(date_str, proposal)
+    return proposal
 
 
 def write_proposal(date_str: str, proposal: dict) -> None:

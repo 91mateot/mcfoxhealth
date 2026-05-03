@@ -3,7 +3,7 @@ import { FONT, MONO, type Palette } from "../theme";
 import type { PlannedWorkout } from "../types";
 import { Panel } from "../components/Panel";
 import { Btn } from "../components/Btn";
-import { refreshPlannedWorkout } from "../api";
+import { markRestDay, refreshPlannedWorkout } from "../api";
 
 interface Props {
   C: Palette;
@@ -34,12 +34,14 @@ const INTENSITY_LABELS: Record<string, string> = {
 export function PlannedWorkoutCard({ C, planned, onSwap }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [resting, setResting] = useState(false);
 
   if (!planned) return null;
 
   const { main, activation, matched } = planned;
   const typeLabel = TYPE_LABELS[main.type] || main.type;
   const intensityLabel = INTENSITY_LABELS[main.intensity] || main.intensity;
+  const isRestDay = planned.restOverride || main.type === "rest";
 
   const accent = matched
     ? C.primary
@@ -57,6 +59,18 @@ export function PlannedWorkoutCard({ C, planned, onSwap }: Props) {
       console.error("refreshPlannedWorkout failed", err);
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const handleRestDay = async () => {
+    if (resting || isRestDay) return;
+    setResting(true);
+    try {
+      await markRestDay();
+    } catch (err) {
+      console.error("markRestDay failed", err);
+    } finally {
+      setResting(false);
     }
   };
 
@@ -205,12 +219,19 @@ export function PlannedWorkoutCard({ C, planned, onSwap }: Props) {
 
       {!matched && (
         <div style={{ display: "flex", gap: 6 }}>
-          <Btn C={C} onClick={handleSwap} style={{ flex: 1 }}>
-            Swap
-          </Btn>
+          {!isRestDay && (
+            <Btn C={C} onClick={handleSwap} style={{ flex: 1 }}>
+              Swap
+            </Btn>
+          )}
           <Btn C={C} onClick={handleRefresh} disabled={refreshing} style={{ flex: 1 }}>
-            {refreshing ? "Refreshing…" : "Refresh"}
+            {refreshing ? "Refreshing…" : isRestDay ? "Train instead" : "Refresh"}
           </Btn>
+          {!isRestDay && (
+            <Btn C={C} onClick={handleRestDay} disabled={resting} style={{ flex: 1 }}>
+              {resting ? "…" : "Rest day"}
+            </Btn>
+          )}
         </div>
       )}
 

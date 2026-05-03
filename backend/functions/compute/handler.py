@@ -251,8 +251,14 @@ def _compute_day(date_str):
     # proposer sees fresh recovery_zone. Isolated try/except so a
     # proposer bug never breaks the daily compute.
     try:
-        proposal = _propose_workout_for_date(date_str)
-        score_item["planned_workout"] = proposal
+        existing = get_item(scores_table, {"date": date_str}) or {}
+        existing_plan = existing.get("planned_workout") or {}
+        # Respect a manual rest-day override — don't let the cron clobber
+        # a recovery day Mateo set explicitly.
+        if existing_plan.get("restOverride") or existing_plan.get("rest_override"):
+            score_item["planned_workout"] = existing_plan
+        else:
+            score_item["planned_workout"] = _propose_workout_for_date(date_str)
         put_item(scores_table, score_item)
     except Exception:
         logger.exception("propose_for_date failed for %s", date_str)

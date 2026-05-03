@@ -418,6 +418,14 @@ export async function refreshPlannedWorkout(): Promise<PlannedWorkout | null> {
   return result.plannedWorkout;
 }
 
+export async function markRestDay(reason?: string): Promise<PlannedWorkout | null> {
+  const body: Record<string, unknown> = {};
+  if (reason && reason.trim()) body.reason = reason.trim();
+  const result = await post<{ plannedWorkout: PlannedWorkout | null }>("/api/planned-workout/rest", body);
+  mutate("/api/today");
+  return result.plannedWorkout;
+}
+
 export async function fetchLatestConversation(): Promise<LatestConversationResponse> {
   const res = await fetch(`${API_BASE}/api/conversation/latest`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
