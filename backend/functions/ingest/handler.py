@@ -6,7 +6,11 @@ Ingest Lambda — handles incoming health data from three sources:
   GET  /ingest/strava    — Strava webhook verification
 """
 
+import base64
+import hashlib
+import hmac
 import json
+import logging
 import os
 import re
 import time
@@ -16,6 +20,9 @@ import urllib.request
 from datetime import datetime, timezone
 
 import boto3
+
+logger = logging.getLogger("ingest")
+logger.setLevel(logging.INFO)
 
 from shared.db import get_table, put_item, query_items
 from shared.scoring import compute_trimp, compute_strain, classify_hr_zone, estimate_strain_simple, HR_ZONES, MAX_HR
@@ -528,7 +535,20 @@ def _normalize_sleep_aggregated(p, date_str):
 
 
 def _handle_withings(event):
-    """Process Withings webhook notification — fetch actual data via API."""
+    """Process Withings webhook notification — fetch actual data via API.
+
+    Withings does not sign notification POSTs (verified 2026-05 against their
+    developer docs). Our trust anchor is therefore the OAuth `access_token`
+    on the downstream `getmeas` call, not the webhook itself — the webhook
+    only tells us *when* to fetch, not *what* the data is. A spoofed
+    notification at worst causes a spurious Withings API round-trip for a
+    user-id we own. Still, we layer defensive checks:
+
+    - `appli` allowlist (only `1` = weight measurement is acted on)
+    - optional `userid` allowlist from the secret, rejecting notifications
+      for userids we didn't link
+    - callback URL obscurity (existing; no change)
+    """
     body = _parse_body(event)
     # Withings verifies the callback URL with an empty or sparse form POST;
     # it expects a 2xx response before activating the subscription.
@@ -550,6 +570,19 @@ def _handle_withings(event):
     secret = _get_secret("withings-oauth")
     if not secret:
         return _resp(500, {"error": "missing withings credentials"})
+
+    # Userid allowlist — the secret may carry `user_id` or `userids` (list).
+    # Absent → skip the check (backwards-compatible; notification-drive flows
+    # without a linked user recorded still work). Present → reject mismatches.
+    notif_userid = str(body.get("userid") or "").strip()
+    allowed: list[str] = []
+    if secret.get("user_id"):
+        allowed.append(str(secret["user_id"]))
+    if isinstance(secret.get("userids"), list):
+        allowed.extend(str(u) for u in secret["userids"])
+    if allowed and notif_userid and notif_userid not in allowed:
+        logger.warning("rejected withings notification for userid=%s (not in allowlist)", notif_userid)
+        return _resp(200, {"status": "ignored", "reason": "userid not in allowlist"})
 
     # Proactive refresh if within 5 minutes of expiry (or already expired / missing)
     token = secret.get("access_token", "")
@@ -739,8 +772,83 @@ def _handle_strava_verify(event):
     return _resp(403, {"error": "verification failed"})
 
 
+_STRAVA_SIG_TOLERANCE_SEC = 300
+
+
+def _raw_body(event) -> str:
+    """Return the decoded request body exactly as Strava signed it — no JSON
+    round-trip, no whitespace canonicalization. Returns "" when absent."""
+    body = event.get("body") or ""
+    if event.get("isBase64Encoded"):
+        try:
+            body = base64.b64decode(body).decode("utf-8")
+        except Exception:
+            return ""
+    return body if isinstance(body, str) else ""
+
+
+def _verify_strava_signature(event, secret: dict) -> tuple[bool, str]:
+    """Verify X-Strava-Signature on a webhook POST. Returns (ok, reason).
+
+    Header format: `X-Strava-Signature: t=<unix>,v1=<hex>`. We HMAC-SHA256
+    `{t}.{raw_body}` with the Strava signing secret. 5-minute tolerance.
+
+    Signing key preference: `signing_secret` from strava-oauth (explicit),
+    falling back to `client_secret` (the only shared secret Strava exposes
+    for an app and the conventional value for this header)."""
+    headers = event.get("headers") or {}
+    # API Gateway v2 lower-cases header names; belt-and-suspenders on mixed case.
+    sig_header = headers.get("x-strava-signature") or headers.get("X-Strava-Signature") or ""
+    if not sig_header:
+        return False, "missing signature header"
+
+    parts: dict = {}
+    for token in sig_header.split(","):
+        if "=" in token:
+            k, v = token.split("=", 1)
+            parts[k.strip()] = v.strip()
+    ts = parts.get("t")
+    provided = parts.get("v1")
+    if not ts or not provided:
+        return False, "malformed signature header"
+    try:
+        ts_int = int(ts)
+    except ValueError:
+        return False, "non-numeric timestamp"
+
+    drift = abs(int(time.time()) - ts_int)
+    if drift > _STRAVA_SIG_TOLERANCE_SEC:
+        return False, f"timestamp outside tolerance ({drift}s)"
+
+    signing_key = (secret or {}).get("signing_secret") or (secret or {}).get("client_secret") or ""
+    if not signing_key:
+        return False, "no strava signing secret configured"
+
+    raw = _raw_body(event)
+    expected = hmac.new(
+        signing_key.encode("utf-8"),
+        f"{ts}.{raw}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if hmac.compare_digest(expected, provided):
+        return True, "ok"
+    return False, "signature mismatch"
+
+
 def _handle_strava(event):
     """Process Strava webhook event — fetch activity and compute strain."""
+    # Webhook POSTs are signed by Strava with HMAC-SHA256 — verify before we
+    # hit the Strava API to refresh tokens / fetch the activity, so a spoofed
+    # webhook can't force token work or a spurious strain write. Verification
+    # can be bypassed with STRAVA_WEBHOOK_VERIFY=0 for local testing.
+    verify_on = os.environ.get("STRAVA_WEBHOOK_VERIFY", "1") not in ("0", "false", "False")
+    strava_secret = _get_secret("strava-oauth") or {}
+    if verify_on:
+        ok, reason = _verify_strava_signature(event, strava_secret)
+        if not ok:
+            logger.warning("rejected strava webhook: %s", reason)
+            return _resp(401, {"error": "signature verification failed"})
+
     body = _parse_body(event)
     if not body:
         return _resp(400, {"error": "invalid body"})
@@ -752,7 +860,7 @@ def _handle_strava(event):
     if obj_type != "activity" or aspect_type not in ("create", "update"):
         return _resp(200, {"status": "ignored"})
 
-    secret = _get_secret("strava-oauth")
+    secret = strava_secret or _get_secret("strava-oauth")
     if not secret:
         return _resp(500, {"error": "missing strava credentials"})
 
