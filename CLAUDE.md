@@ -28,18 +28,18 @@ SCORING-ALGORITHMSfromClaudeChat.md   Reference-quality scoring doc
 
 ## Five Lambdas
 
-- **ingest** — `POST /ingest/{health,withings,strava}`, HAE uses `x-api-key`
-- **compute** — Daily cron 2am PT (baselines, scores), weekly cron Sun 6am PT (correlations)
-- **api** — `GET /api/*` reads (today, progress, workouts, nutrition, insights, conversations)
-- **nutrition** — `POST/PATCH/DELETE /api/{meal,water,journal,workout,favorites,calibration}` writes
-- **coach** — Streaming chat via Function URL (RESPONSE_STREAM, not behind API Gateway)
+- **ingest** — `POST /ingest/{health,withings,strava}`; HAE uses `x-api-key`, Strava verifies `X-Strava-Signature` HMAC, Withings checks a `userid` allowlist from the OAuth secret.
+- **compute** — Daily cron 2am PT (baselines, scores, sleep quality), weekly cron Sun 6am PT (correlations + event rollup).
+- **api** — `GET /api/*` reads (today, progress, workouts, nutrition, insights, conversations, infra-cost).
+- **nutrition** — `POST/PATCH/DELETE /api/{meal,water,journal,workout,favorites,calibration,feedback,event}` writes.
+- **coach** — Streaming chat via Function URL (RESPONSE_STREAM, not behind API Gateway). FastAPI + Lambda Web Adapter.
 
 ## Auth
 
 - Every `/api/*` request requires `x-api-key` header. Value lives in Secrets Manager (`fitness-api-key`) with env-var fallback (`INGEST_API_KEY`).
-- Frontend reads `VITE_API_KEY` (set in Vercel env) and sends on every API call.
-- Coach Function URL is currently **unauthenticated** (streaming + EventSource interaction — deferred).
-- Ingest endpoints: HAE checks `x-api-key`; Withings/Strava webhooks rely on OAuth signature (can't send custom headers).
+- Frontend reads `VITE_API_KEY` (set in Vercel env) and sends on every API call, including the coach stream.
+- Coach Function URL is `AuthType=NONE` (required for streaming) + app-level `x-api-key` check via a FastAPI dep. `/health` stays public for the Lambda Web Adapter health probe. `COACH_AUTH_REQUIRED=0` bypasses for local runs.
+- Ingest endpoints: HAE checks `x-api-key`; Strava webhooks verify `X-Strava-Signature` (HMAC-SHA256 over `{t}.{raw_body}`, 5-min tolerance, key from `strava-oauth.signing_secret` → fallback `client_secret`); Withings notifications reject unknown userids when the `withings-oauth` secret carries `userid`/`user_id`/`userids`.
 
 ## Shared code = Lambda Layer
 
@@ -65,15 +65,30 @@ sam deploy --stack-name fitness-dashboard --capabilities CAPABILITY_IAM --resolv
 ## Scoring
 
 See `SCORING-ALGORITHMSfromClaudeChat.md` for the full reference. Key points:
-- **Recovery** = weighted composite of HRV/RHR/sleep/resp/SpO2/wrist_temp. Missing signals redistribute weight proportionally (Oura convention).
+- **Recovery** = weighted composite of HRV/RHR/sleep/resp/SpO2/wrist_temp. Missing signals redistribute weight proportionally (Oura convention). Sleep is treated as missing (not broken-0) when its `quality_flag != ok`, so truncated nights degrade HRV/RHR weighting rather than tanking the score.
 - **Strain** = 21 × (1 − e^(−TRIMP/300)), zone-weighted TRIMP (Edwards 1993).
-- **Sleep** = duration + efficiency + deep + REM + wake-disruption composite.
+- **Sleep** = Oura-style 4-component (35/25/20/20) by default. When `continuity_idx` is available (segments from unaggregated HAE present), upgrades to 5-component (30/20/15/15/20) adding continuity — Bevel/Whoop-style "restorative vs disturbances." `shared/sleep_quality.py` owns quality flags + segment math; see the Sleep pipeline section below.
 - Weights live in `fitness-user-config` (hot-swappable). Each daily score row snapshots the `recovery_weights_used` + `strain_coefficient` that produced it, so retrospective scores stay reproducible after tuning.
 - Baselines: rolling 14-day average, recomputed nightly.
 
+## Sleep pipeline
+
+- **Ingest** auto-detects which shape HAE is sending:
+  - Aggregated `{totalSleep, deep, rem, core, awake, sleepStart, sleepEnd}` (hours) → sums into minute fields.
+  - Unaggregated `[{startDate, endDate, value}]` → preserves timestamps as `segments[]` on the sleep row.
+  - Per-sample heart rate (timestamped points) → routed to a sidecar `hr#hae_samples` row used for sleep-window HR stats.
+- **Quality** (`shared/sleep_quality.py::evaluate_quality`) stamps every row with `quality_flag` ∈ {ok, partial, truncated, missing}, reasons list, and `confidence` 0–1. Ingest uses an optimistic check; compute re-checks with wrist-temp context and can downgrade.
+- **Compute** derives `arousal_count`, `onset_min`, `continuity_idx` from `segments[]`, and `avg_hr_sleep`/`min_hr_sleep` by intersecting `hr#hae_samples` with `sleep_start`/`sleep_end`. Missing segments or HR samples just mean those fields stay absent — no failure mode.
+- **Frontend** (RingDetail.tsx): hypnogram strip when segments exist, incomplete-night badge when `quality_flag !== 'ok'`, rows for wake-ups / onset / sleeping HR. Today.tsx dims the sleep ring to grey on truncated nights.
+- **No manual entry**: user explicitly rejected a manual-input path. Richer signals auto-activate when HAE exports unaggregated sleep + per-sample HR.
+
+## Telemetry + cost
+
+- **App telemetry**: `src/api.ts::track()` batches UI events (tab.view, chat.open, ring.open, *.log.open, fab.tap, …) and POSTs to `/api/event`. Backend writes to `fitness-events` (date pk, event_id sk, 90-day TTL). Weekly Sunday 6am PT compute cron rolls up into `user_config` key `event_rollup`.
+- **Infra cost**: `GET /api/infra-cost` hits AWS Cost Explorer (filtered to this stack's services in `us-west-2` via the `FITNESS_APP_SERVICES` allowlist in `shared/cost_service.py`), cached 6h in `user_config`. Surfaced on the Progress tab.
+- **Budget alarm**: `AWS::Budgets::Budget` with $20/mo default, emails `AlertEmail` parameter at 80% actual + 100% forecast. Filtered to the same service list + region. Pass `--parameter-overrides AlertEmail=...` on deploy to enable.
+
 ## Known gaps / deferred
 
-- Coach Function URL is open (no auth). Need to think about how header auth interacts with streaming before adding.
-- Withings/Strava ingest webhooks — rely on the URL being obscure; should be replaced with OAuth signature verification.
-- HealthKit sleep queries return truncated sessions; fallback (iOS Shortcut bridge) documented in scoring doc, not implemented.
 - 4 tests in `test_api_contract.py` hit live endpoints and will fail without network — deselect them for local runs.
+- Sleep pipeline is Band 2: truncation detection + 5-component score + sleep-window HR. Band 3 (Whoop-style sleep-need wired into the score + bed/wake consistency) is deferred; `compute_sleep_need` is already defined in `scoring.py` and can be layered on without touching the data model.
