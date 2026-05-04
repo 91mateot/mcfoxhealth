@@ -79,6 +79,61 @@ async function del<TResp>(path: string): Promise<TResp> {
   return res.json();
 }
 
+type EventProps = Record<string, string | number | boolean | null | undefined>;
+type PendingEvent = { action: string; props?: EventProps };
+
+const EVENT_FLUSH_MS = 2000;
+const EVENT_FLUSH_MAX = 20;
+const eventQueue: PendingEvent[] = [];
+let eventFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushEvents() {
+  if (eventFlushTimer) {
+    clearTimeout(eventFlushTimer);
+    eventFlushTimer = null;
+  }
+  if (eventQueue.length === 0) return;
+  const batch = eventQueue.splice(0, eventQueue.length);
+  const payload = JSON.stringify({ events: batch });
+  const url = `${API_BASE}/api/event`;
+  // Prefer sendBeacon for visibilitychange/pagehide paths — it survives
+  // teardown. Falls back to fetch(keepalive) when the browser either lacks
+  // sendBeacon or rejects the blob (e.g. when x-api-key is required and
+  // sendBeacon can't set custom headers). We still send through fetch for
+  // normal in-session flushes so the API key header travels.
+  fetch(url, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: payload,
+    keepalive: true,
+  }).catch(() => {
+    // Swallow — telemetry is best-effort, never block UX on it.
+  });
+}
+
+/** Record a user action. Buffered — batched every 2s or when 20 accumulate.
+ * Silent on failure. Valid action: snake_case with optional dots, e.g.
+ * "tab.switch" or "chat.open". */
+export function track(action: string, props?: EventProps) {
+  if (!action) return;
+  eventQueue.push({ action, props });
+  if (eventQueue.length >= EVENT_FLUSH_MAX) {
+    flushEvents();
+    return;
+  }
+  if (eventFlushTimer === null) {
+    eventFlushTimer = setTimeout(flushEvents, EVENT_FLUSH_MS);
+  }
+}
+
+if (typeof window !== "undefined") {
+  // Flush on tab hide so we don't lose the tail of a session.
+  window.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushEvents();
+  });
+  window.addEventListener("pagehide", flushEvents);
+}
+
 export function useToday(): SWRResponse<TodayResponse> {
   return useSWR<TodayResponse>("/api/today", fetcher, {
     refreshInterval: 60_000,

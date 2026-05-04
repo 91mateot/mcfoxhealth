@@ -17,7 +17,7 @@ import { WorkoutDetailModal } from "./modals/WorkoutDetail";
 import { WorkoutHistorySheet } from "./modals/WorkoutHistorySheet";
 import { InsightsModal } from "./modals/Insights";
 import type { Meal, Workout } from "./types";
-import { useToday, useWorkouts, useProgress, useNutrition, logMeal, logWorkout, submitJournal, todayISO } from "./api";
+import { useToday, useWorkouts, useProgress, useNutrition, logMeal, logWorkout, submitJournal, todayISO, track } from "./api";
 
 type TabId = "today" | "train" | "fuel" | "progress";
 
@@ -49,10 +49,14 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem("mateo-tab", tab);
+    track("tab.view", { tab });
   }, [tab]);
   useEffect(() => {
     localStorage.setItem("mateo-palette", palette);
   }, [palette]);
+  useEffect(() => {
+    track("session.start");
+  }, []);
 
   const C = PALETTES[palette];
 
@@ -71,11 +75,13 @@ export default function App() {
   const openLogMeal = (prefill?: string) => {
     setMealPrefill(typeof prefill === "string" ? prefill : "");
     setMealOpen(true);
+    track("meal.log.open", { prefilled: typeof prefill === "string" && prefill.length > 0 });
   };
 
   const openChat = (prompt?: string) => {
     setChatPrefill(prompt);
     setChatOpen(true);
+    track("chat.open", { prefilled: typeof prompt === "string" && prompt.length > 0 });
   };
 
   return (
@@ -106,12 +112,12 @@ export default function App() {
           C={C}
           data={today.data}
           nutrition={nutrition.data}
-          onRingTap={(k) => setSheetRing(k)}
+          onRingTap={(k) => { setSheetRing(k); track("ring.open", { which: k }); }}
           onOpenChat={openChat}
           onLogMeal={() => openLogMeal()}
-          onLogWorkout={() => setWorkoutOpen(true)}
-          onOpenJournal={() => setJournalOpen(true)}
-          onOpenJournalHistory={() => setJournalHistoryOpen(true)}
+          onLogWorkout={() => { setWorkoutOpen(true); track("workout.log.open", { source: "today" }); }}
+          onOpenJournal={() => { setJournalOpen(true); track("journal.open"); }}
+          onOpenJournalHistory={() => { setJournalHistoryOpen(true); track("journal.history.open"); }}
         />
       )}
 
@@ -120,9 +126,9 @@ export default function App() {
           C={C}
           today={today.data}
           workouts={workouts.data}
-          onLogWorkout={() => setWorkoutOpen(true)}
-          onOpenWorkout={(w) => setWorkoutDetail(w)}
-          onOpenWorkoutHistory={() => setWorkoutHistoryOpen(true)}
+          onLogWorkout={() => { setWorkoutOpen(true); track("workout.log.open", { source: "train" }); }}
+          onOpenWorkout={(w) => { setWorkoutDetail(w); track("workout.detail.open"); }}
+          onOpenWorkoutHistory={() => { setWorkoutHistoryOpen(true); track("workout.history.open"); }}
           week={week}
           setWeek={setWeek}
         />
@@ -134,8 +140,8 @@ export default function App() {
           today={today.data}
           nutrition={nutrition.data}
           onLogMeal={openLogMeal}
-          onOpenMeal={(m) => setMealDetail(m)}
-          onOpenMealHistory={() => setMealHistoryOpen(true)}
+          onOpenMeal={(m) => { setMealDetail(m); track("meal.detail.open"); }}
+          onOpenMealHistory={() => { setMealHistoryOpen(true); track("meal.history.open"); }}
         />
       )}
 
@@ -144,7 +150,7 @@ export default function App() {
           C={C}
           today={today.data}
           progress={progress.data}
-          onOpenInsights={() => setInsightsOpen(true)}
+          onOpenInsights={() => { setInsightsOpen(true); track("insights.open"); }}
         />
       )}
 
@@ -154,7 +160,7 @@ export default function App() {
 
       <PaletteSwitcher C={C} palette={palette} setPalette={setPalette} />
 
-      <TabBar C={C} tabs={tabs} active={tab} onChange={(id) => setTab(id as TabId)} onFabClick={() => openChat()} />
+      <TabBar C={C} tabs={tabs} active={tab} onChange={(id) => setTab(id as TabId)} onFabClick={() => { track("fab.tap"); openChat(); }} />
 
       <RingDetailSheet C={C} open={sheetRing !== null} which={sheetRing} onClose={() => setSheetRing(null)} today={today.data ?? null} />
       <LogMealModal

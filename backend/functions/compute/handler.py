@@ -48,7 +48,8 @@ def lambda_handler(event, context):
             _compute_baselines()
             return _compute_lifts()
         if "WeeklyCorrelations" in rule_arn or "weekly" in rule_arn.lower() or "correlation" in rule_arn.lower():
-            return _compute_correlations()
+            _compute_correlations()
+            return _compute_event_rollup()
         return _compute_baselines()
 
     action = event.get("action", "compute_day")
@@ -65,10 +66,57 @@ def lambda_handler(event, context):
         return _compute_correlations()
     elif action == "compute_lifts":
         return _compute_lifts()
+    elif action == "compute_event_rollup":
+        return _compute_event_rollup()
     elif action == "backfill_caffeine":
         return _backfill_caffeine_totals(int(event.get("days", 90)))
 
     return {"error": f"unknown action: {action}"}
+
+
+def _compute_event_rollup():
+    """Weekly rollup of app-action telemetry. Writes a single UserConfigTable
+    row (key=event_rollup) with per-action counts + last_seen across the
+    trailing 7 days. Used to answer "which features are rarely used" — a rough
+    observability signal for a single-user app."""
+    events_table = get_table("EVENTS_TABLE")
+    config_table = get_table("USER_CONFIG_TABLE")
+    today = local_now()
+
+    counts: dict = {}
+    last_seen: dict = {}
+    by_day: dict = {}
+    total = 0
+
+    for i in range(7):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+        rows = query_items(events_table, "date", d)
+        day_count = 0
+        for r in rows:
+            action = str(r.get("action") or "")
+            if not action:
+                continue
+            counts[action] = counts.get(action, 0) + 1
+            ts = str(r.get("ts") or "")
+            if ts > last_seen.get(action, ""):
+                last_seen[action] = ts
+            day_count += 1
+            total += 1
+        by_day[d] = day_count
+
+    put_item(
+        config_table,
+        {
+            "key": "event_rollup",
+            "window_days": 7,
+            "total_events": total,
+            "counts": counts,
+            "last_seen": last_seen,
+            "by_day": by_day,
+            "computed_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        },
+    )
+    return {"status": "event_rollup_written", "total_events": total, "actions": len(counts)}
 
 
 def _backfill_caffeine_totals(days: int):

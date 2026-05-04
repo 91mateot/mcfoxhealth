@@ -21,6 +21,7 @@ Globals:
         EXERCISES_TABLE: !Ref ExercisesTable
         CONVERSATIONS_TABLE: !Ref ConversationsTable
         FEEDBACK_TABLE: !Ref FeedbackTable
+        EVENTS_TABLE: !Ref EventsTable
         SECRETS_ARN: !Ref SecretsArn
         INGEST_API_KEY: !Ref IngestApiKey
 
@@ -260,6 +261,25 @@ Resources:
           Projection:
             ProjectionType: ALL
 
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-events
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: date
+          AttributeType: S
+        - AttributeName: event_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: date
+          KeyType: HASH
+        - AttributeName: event_id
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # ── Lambda Layer (shared Python package) ─────────────────────
   SharedLayer:
     Type: AWS::Serverless::LayerVersion
@@ -356,6 +376,8 @@ Resources:
             TableName: !Ref ExercisesTable
         - DynamoDBCrudPolicy:
             TableName: !Ref UserConfigTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref EventsTable
       Events:
         DailyBaselines:
           Type: Schedule
@@ -499,6 +521,8 @@ Resources:
             TableName: !Ref DailyScoresTable
         - DynamoDBCrudPolicy:
             TableName: !Ref FeedbackTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EventsTable
         - Statement:
             - Effect: Allow
               Action:
@@ -630,6 +654,12 @@ Resources:
           Properties:
             ApiId: !Ref HttpApi
             Path: /api/feedback
+            Method: POST
+        PostEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/event
             Method: POST
 
   CoachFunction:

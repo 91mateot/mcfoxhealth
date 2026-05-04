@@ -43,6 +43,7 @@ from shared.workout_service import (
     annotate_workout as svc_annotate_workout,
     summarize_workout as svc_summarize_workout,
 )
+from shared.event_service import record_event as svc_record_event
 from shared.feedback_service import save_feedback as svc_save_feedback
 
 secrets_client = boto3.client("secretsmanager")
@@ -131,6 +132,8 @@ def lambda_handler(event, context):
         return _post_calibration(event)
     if path == "/api/feedback" and method == "POST":
         return _post_feedback(event)
+    if path == "/api/event" and method == "POST":
+        return _post_event(event)
 
     return _resp(404, {"error": "not found"})
 
@@ -149,6 +152,27 @@ def _post_feedback(event):
     except ValueError as e:
         return _resp(400, {"error": str(e)})
     return _resp(200, result)
+
+
+def _post_event(event):
+    body = _parse_body(event)
+    if not body:
+        return _resp(400, {"error": "invalid JSON body"})
+    events = body.get("events") if isinstance(body.get("events"), list) else [body]
+    stored = []
+    for raw in events[:50]:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            stored.append(
+                svc_record_event(
+                    action=str(raw.get("action") or ""),
+                    props=raw.get("props") if isinstance(raw.get("props"), dict) else None,
+                )
+            )
+        except ValueError:
+            continue
+    return _resp(200, {"ok": True, "stored": len(stored)})
 
 
 def _post_calibration(event):
