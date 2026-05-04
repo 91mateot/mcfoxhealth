@@ -39,6 +39,16 @@ class FakeTable:
 
         self.items.append(unwrap(Item))
 
+    def get_item(self, Key=None, **_kw):
+        """Return the most recently put item matching the composite key.
+        Matches live DynamoDB semantics for the merge-guard path."""
+        if not Key:
+            return {}
+        for item in reversed(self.items):
+            if all(item.get(k) == v for k, v in Key.items()):
+                return {"Item": item}
+        return {}
+
 
 def _fresh_module():
     """Import a fresh copy of the handler with fake db wiring."""
@@ -53,6 +63,7 @@ def _fresh_module():
 
     db_mod.get_table = fake_get_table
     db_mod.put_item = lambda table, item: table.put_item(Item=item)
+    db_mod.get_item = lambda table, key: (table.get_item(Key=key) or {}).get("Item") or {}
 
     # Also patch these at the handler module level to pick up new behavior
     if "handler" in sys.modules:
@@ -301,3 +312,132 @@ def test_sum_int_kind_sums_intraday_samples():
     ]}}), None)
     steps = [i for i in t.items if i["metric_source"] == "steps#hae"]
     assert len(steps) == 1 and steps[0]["value"] == 7500
+
+
+# ─── Per-sample HR sidecar (HAE unaggregated heart rate) ─────────────
+
+def test_per_sample_hr_creates_sidecar_row():
+    """HAE unaggregated HR emits one point per sample with Min=Avg=Max=value
+    and a timestamp (clock component). Must write both the daily triple AND
+    a hr#hae_samples sidecar so compute can intersect with the sleep window."""
+    h, t = _fresh_module()
+    _patch_auth(h)
+    # Minimum 5 samples to trigger the sidecar write.
+    points = [
+        {"Min": 62, "Avg": 62, "Max": 62, "date": f"2026-05-04 08:00:{str(i).zfill(2)} -0700"}
+        for i in range(10, 20)
+    ]
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "heart_rate", "units": "bpm", "data": points}
+    ]}}), None)
+    sidecar = [i for i in t.items if i["metric_source"] == "hr#hae_samples"]
+    assert len(sidecar) == 1, "expected one hr#hae_samples row"
+    samples = sidecar[0].get("samples") or []
+    assert len(samples) == 10
+    assert all("ts" in s and "bpm" in s for s in samples)
+    # Triple aggregates also written (avg = 62 because all equal).
+    avg = [i for i in t.items if i["metric_source"] == "hr_avg#hae"]
+    assert len(avg) == 1 and avg[0]["value"] == 62
+
+
+def test_per_sample_hr_with_daily_rollup_point_does_not_pollute_sidecar():
+    """If HAE also sends a single daily rollup (no clock component in date),
+    that point must NOT land in the samples sidecar."""
+    h, t = _fresh_module()
+    _patch_auth(h)
+    points = [
+        {"Min": 50, "Avg": 72, "Max": 148, "date": "2026-05-04"},  # daily rollup
+    ]
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "heart_rate", "units": "bpm", "data": points}
+    ]}}), None)
+    sidecar = [i for i in t.items if i["metric_source"] == "hr#hae_samples"]
+    assert sidecar == []
+
+
+# ─── Unaggregated sleep must not clobber higher aggregated totals ───
+
+def test_unaggregated_sleep_partial_window_does_not_clobber_aggregated():
+    """If an aggregated full-night row is already on a date, an unaggregated
+    push with materially lower total_min (common when HAE only sends the
+    post-midnight slice) must NOT replace the full-night totals. Segments
+    should still land, just merged onto the higher-quality totals."""
+    h, t = _fresh_module()
+    _patch_auth(h)
+    # First — aggregated full night: 385m asleep (typical Apple output).
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "sleep_analysis", "units": "hr", "data": [
+            {"date": "2026-05-04", "totalSleep": 6.4, "asleep": 6.4,
+             "core": 3.55, "deep": 1.5, "rem": 1.38, "inBed": 6.5,
+             "sleepStart": "2026-05-03 23:30:00 -0700",
+             "sleepEnd":   "2026-05-04 05:55:00 -0700"}
+        ]}
+    ]}}), None)
+    pre = [i for i in t.items if i["metric_source"] == "sleep#hae"]
+    assert len(pre) == 1
+    assert pre[0]["total_min"] == 384  # 6.4 * 60
+
+    # Second — unaggregated push with only the post-midnight slice (284m).
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "sleep_analysis", "data": [
+            {"value": "Deep", "qty": 0.65,
+             "startDate": "2026-05-04 01:00:00 -0700",
+             "endDate":   "2026-05-04 01:39:00 -0700",
+             "sleepStart": "2026-05-04 01:00:00 -0700"},
+            {"value": "REM", "qty": 1.15,
+             "startDate": "2026-05-04 03:00:00 -0700",
+             "endDate":   "2026-05-04 04:09:00 -0700",
+             "sleepStart": "2026-05-04 01:00:00 -0700"},
+            {"value": "Core", "qty": 2.93,
+             "startDate": "2026-05-04 01:40:00 -0700",
+             "endDate":   "2026-05-04 04:36:00 -0700",
+             "sleepStart": "2026-05-04 01:00:00 -0700"},
+        ]}
+    ]}}), None)
+    post = [i for i in t.items if i["metric_source"] == "sleep#hae"]
+    # Latest row is what lives at that date — must still have 384m totals.
+    latest = post[-1]
+    assert latest["date"] == "2026-05-04"
+    assert latest["total_min"] == 384, f"got {latest['total_min']} — merge guard missed"
+    # But segments should be enriched onto the preserved aggregated totals.
+    assert latest.get("segments"), "segments should be attached even when merge preserves totals"
+    assert len(latest["segments"]) == 3
+
+
+def test_unaggregated_sleep_replaces_when_totals_comparable():
+    """Guard rails — the merge only preserves existing totals when they're
+    *materially* higher. A comparable-quality unaggregated push should
+    replace the existing row normally, so later corrections from Apple
+    still land."""
+    h, t = _fresh_module()
+    _patch_auth(h)
+    # First: aggregated 180m (short nap recorded as main event).
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "sleep_analysis", "units": "hr", "data": [
+            {"date": "2026-05-04", "totalSleep": 3.0, "asleep": 3.0,
+             "core": 2.0, "deep": 0.5, "rem": 0.5, "inBed": 3.2,
+             "sleepStart": "2026-05-03 23:30:00 -0700",
+             "sleepEnd":   "2026-05-04 02:42:00 -0700"}
+        ]}
+    ]}}), None)
+    # Then: unaggregated full night discovered (420m). Should replace.
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "sleep_analysis", "data": [
+            {"value": "Deep", "qty": 1.5,
+             "startDate": "2026-05-03 23:30:00 -0700",
+             "endDate":   "2026-05-04 01:00:00 -0700",
+             "sleepStart": "2026-05-03 23:30:00 -0700"},
+            {"value": "REM", "qty": 2.0,
+             "startDate": "2026-05-04 03:00:00 -0700",
+             "endDate":   "2026-05-04 05:00:00 -0700",
+             "sleepStart": "2026-05-03 23:30:00 -0700"},
+            {"value": "Core", "qty": 3.5,
+             "startDate": "2026-05-04 01:00:00 -0700",
+             "endDate":   "2026-05-04 04:30:00 -0700",
+             "sleepStart": "2026-05-03 23:30:00 -0700"},
+        ]}
+    ]}}), None)
+    latest = [i for i in t.items if i["metric_source"] == "sleep#hae"][-1]
+    # 1.5 + 2.0 + 3.5 = 7h = 420m — should fully replace the 180m row.
+    assert latest["total_min"] == 420
+    assert latest["deep_min"] == 90

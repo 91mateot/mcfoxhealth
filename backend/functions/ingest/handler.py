@@ -24,7 +24,7 @@ import boto3
 logger = logging.getLogger("ingest")
 logger.setLevel(logging.INFO)
 
-from shared.db import get_table, put_item, query_items
+from shared.db import get_item, get_table, put_item, query_items
 from shared.scoring import compute_trimp, compute_strain, classify_hr_zone, estimate_strain_simple, HR_ZONES, MAX_HR
 from shared.sleep_quality import evaluate_quality as _eval_sleep_quality
 from shared.timezone import local_today_str
@@ -290,10 +290,29 @@ def _handle_hae_metrics_array(data_list):
                 })
             for d, segs in by_date.items():
                 item = _normalize_sleep(segs, d)
-                if item:
-                    put_item(table, item)
-                    items_written += 1
-                    latest_date = max(latest_date or d, d)
+                if not item:
+                    continue
+                # Merge guard — HAE sometimes sends partial unaggregated sessions
+                # (e.g. only the post-midnight slice of an overnight) that would
+                # otherwise clobber the full-night aggregated totals already on
+                # this date. When the existing row's total_min is materially
+                # larger than what this unaggregated batch reports, keep the
+                # existing totals and only enrich with segments. "Materially"
+                # = more than 60m larger, which excludes rounding noise but
+                # still lets true night-long unaggregated exports replace the
+                # older aggregated row outright.
+                existing = get_item(table, {"date": d, "metric_source": "sleep#hae"}) or {}
+                existing_total = float(existing.get("total_min") or 0)
+                incoming_total = float(item.get("total_min") or 0)
+                if existing_total > incoming_total + 60 and existing_total > 0:
+                    merged = dict(existing)
+                    if item.get("segments"):
+                        merged["segments"] = item["segments"]
+                    merged["ingested_at"] = _now_iso()
+                    item = merged
+                put_item(table, item)
+                items_written += 1
+                latest_date = max(latest_date or d, d)
             continue
 
         mapping = HAE_NAME_MAP.get(name) or HAE_NAME_MAP.get(name_no_sep) or HAE_NAME_MAP.get(raw_name.replace("_", " "))
@@ -315,6 +334,7 @@ def _handle_hae_metrics_array(data_list):
                 if not d:
                     continue
                 slot = by_date_triple.setdefault(d, {"min": [], "avg": [], "max": []})
+                has_stats = False
                 for key_raw, slot_key in (("Min", "min"), ("min", "min"),
                                           ("Avg", "avg"), ("avg", "avg"),
                                           ("Max", "max"), ("max", "max")):
@@ -323,25 +343,41 @@ def _handle_hae_metrics_array(data_list):
                         continue
                     try:
                         slot[slot_key].append(float(v))
+                        has_stats = True
                     except (ValueError, TypeError):
                         continue
-                # Single-value fallback. Two cases collapse here:
-                #  - old HAE without Min/Avg/Max → treat as daily avg (original behavior)
-                #  - new HAE per-sample export → each point has its own timestamp.
-                # We tell them apart by checking whether date carries a clock
-                # component (per-sample rows have timestamps like
-                # "2026-05-03 23:45:10", daily rows are just "2026-05-03").
-                if not any(p.get(k) is not None for k in ("Min", "min", "Avg", "avg", "Max", "max")):
+                # Per-sample sidecar — collect whenever the date carries a clock
+                # component (per-sample rows look like "2026-05-03 23:45:10",
+                # daily rows are "2026-05-03"). HAE's unaggregated HR emits one
+                # point per sample as {Min, Avg, Max, date} with Min=Avg=Max =
+                # the sample value, so we can't require "no stats keys" like
+                # before — that silently dropped every per-sample reading.
+                sample_ts = p.get("date") or p.get("startDate") or ""
+                is_per_sample = isinstance(sample_ts, str) and len(sample_ts) > 10
+                sample_val = None
+                if has_stats:
+                    # Prefer Avg; fall back to Min/Max which equal Avg in the
+                    # per-sample shape anyway.
+                    for k in ("Avg", "avg", "Min", "min", "Max", "max"):
+                        if p.get(k) is not None:
+                            try:
+                                sample_val = float(p.get(k))
+                                break
+                            except (ValueError, TypeError):
+                                continue
+                else:
                     q = p.get("qty") or p.get("value")
                     if q is not None:
                         try:
-                            val = float(q)
-                            slot["avg"].append(val)
+                            sample_val = float(q)
+                            slot["avg"].append(sample_val)
                         except (ValueError, TypeError):
-                            val = None
-                        ts = p.get("date") or p.get("startDate") or ""
-                        if val is not None and isinstance(ts, str) and len(ts) > 10:
-                            by_date_samples.setdefault(d, []).append({"ts": ts, "bpm": round(val, 1)})
+                            sample_val = None
+                if sample_val is not None and is_per_sample:
+                    by_date_samples.setdefault(d, []).append({
+                        "ts": sample_ts,
+                        "bpm": round(sample_val, 1),
+                    })
             for d, slots in by_date_triple.items():
                 for slot_key, vals in slots.items():
                     if not vals:
