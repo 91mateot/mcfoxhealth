@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 import boto3
 
+from shared.cost_service import get_costs as _get_infra_costs
 from shared.db import get_table, get_item, put_item, query_items
 from shared.timezone import local_now, local_today_str
 from shared.conversation_service import (
@@ -73,6 +74,8 @@ def lambda_handler(event, context):
         return _get_progress()
     if path == "/api/insights":
         return _get_insights()
+    if path == "/api/infra-cost":
+        return _get_infra_cost(event)
     if path == "/api/conversation/latest":
         return _get_latest_conversation()
     if path == "/api/conversation/list":
@@ -88,6 +91,16 @@ def lambda_handler(event, context):
         return _mark_rest_day(event)
 
     return _resp(404, {"error": "not found"})
+
+
+def _get_infra_cost(event):
+    qs = event.get("queryStringParameters") or {}
+    force = str(qs.get("refresh") or "").lower() in ("1", "true", "yes")
+    try:
+        payload = _get_infra_costs(force=force)
+    except Exception as e:
+        return _resp(500, {"error": f"cost lookup failed: {e}"})
+    return _resp(200, payload)
 
 
 def _refresh_planned_workout():

@@ -35,6 +35,17 @@ Parameters:
     Description: API key for HealthAutoExport ingest endpoint
     Default: 'fitness-hae-2026'
     NoEcho: true
+  AlertEmail:
+    Type: String
+    Description: Email address to notify on budget threshold breaches. Leave blank to skip the Budget resource.
+    Default: ''
+  BudgetMonthlyUsd:
+    Type: Number
+    Description: Monthly USD budget for the stack. Alerts fire at 80% actual and 100% forecast.
+    Default: 20
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
 
 Resources:
 
@@ -412,7 +423,7 @@ Resources:
             TableName: !Ref BaselinesTable
         - DynamoDBReadPolicy:
             TableName: !Ref CorrelationsTable
-        - DynamoDBReadPolicy:
+        - DynamoDBCrudPolicy:
             TableName: !Ref UserConfigTable
         - DynamoDBReadPolicy:
             TableName: !Ref ExercisesTable
@@ -424,6 +435,11 @@ Resources:
                 - secretsmanager:GetSecretValue
               Resource:
                 - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:fitness-api-key-*'
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ce:GetCostAndUsage
+              Resource: '*'
       Events:
         GetToday:
           Type: HttpApi
@@ -491,6 +507,12 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/planned-workout/refresh
             Method: POST
+        GetInfraCost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/infra-cost
+            Method: GET
 
   NutritionFunction:
     Type: AWS::Serverless::Function
@@ -728,6 +750,54 @@ Resources:
           ExposeHeaders:
             - X-Conversation-Id
           MaxAge: 3600
+
+  # ── Cost guardrail ──────────────────────────────────────────
+  # Filtered to the services this stack uses so co-tenant workloads in the
+  # same account don't trip the alarm. Keep in sync with
+  # shared/cost_service.py FITNESS_APP_SERVICES. Email notifications don't
+  # need SNS — Budgets delivers direct.
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Condition: HasAlertEmail
+    Properties:
+      Budget:
+        BudgetName: !Sub '${AWS::StackName}-monthly'
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref BudgetMonthlyUsd
+          Unit: USD
+        CostFilters:
+          Service:
+            - AWS Lambda
+            - Amazon DynamoDB
+            - Amazon Bedrock
+            - Amazon API Gateway
+            - AWS Secrets Manager
+            - AmazonCloudWatch
+            - Amazon CloudWatch
+            - Amazon EventBridge
+            - AWS CloudFormation
+            - AWS CloudTrail
+            - Amazon Simple Storage Service
+            - AWS Key Management Service
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AlertEmail
 
 Outputs:
   ApiUrl:

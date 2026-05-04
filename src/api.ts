@@ -5,6 +5,7 @@ import type {
   NutritionResponse,
   NutritionHistoryResponse,
   ProgressResponse,
+  InfraCostResponse,
   InsightsResponse,
   Meal,
   MealInput,
@@ -151,6 +152,15 @@ export function useProgress(): SWRResponse<ProgressResponse> {
 
 export function useInsights(enabled = true): SWRResponse<InsightsResponse> {
   return useSWR<InsightsResponse>(enabled ? "/api/insights" : null, fetcher);
+}
+
+export function useInfraCost(enabled = true): SWRResponse<InfraCostResponse> {
+  return useSWR<InfraCostResponse>(enabled ? "/api/infra-cost" : null, fetcher, {
+    // Cost Explorer is slow + the backend already caches for 6h, so cheap
+    // to let this hook ride the cache rather than refetch aggressively.
+    revalidateOnFocus: false,
+    dedupingInterval: 60 * 60 * 1000,
+  });
 }
 
 export function useNutrition(date: string): SWRResponse<NutritionResponse> {

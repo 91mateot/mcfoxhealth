@@ -10,6 +10,7 @@ import {
   type TrendMetric,
   type TrendsResponse,
 } from "../types";
+import { useInfraCost } from "../api";
 import { Panel } from "../components/Panel";
 import { Chip } from "../components/Chip";
 import { BarRow } from "../components/BarRow";
@@ -31,7 +32,79 @@ export function ProgressScreen({ C, today, progress, onOpenInsights }: ProgressS
       <NowSection C={C} today={today} body={progress.now} />
       <TrendSection C={C} trends={progress.trend} onOpenInsights={onOpenInsights} />
       {progress.lifts && <LiftsSectionView C={C} lifts={progress.lifts} />}
+      <InfraCostSection C={C} />
     </div>
+  );
+}
+
+function InfraCostSection({ C }: { C: Palette }) {
+  const cost = useInfraCost();
+  if (cost.error) return null;
+  if (!cost.data) return null;
+
+  const mtd = cost.data.month_to_date;
+  const weekly = cost.data.weekly ?? [];
+  const maxWeek = Math.max(0.01, ...weekly.map((w) => w.total));
+  const breakdown = mtd.breakdown ?? [];
+  const fmt = (n: number) =>
+    n >= 10 ? `$${n.toFixed(2)}` : `$${n.toFixed(n < 0.01 ? 4 : 3)}`;
+
+  return (
+    <>
+      <SectionHead
+        C={C}
+        kicker="Infra"
+        title="AWS spend"
+        right={<Chip C={C} color={C.t3}>{cost.data.stale ? "stale" : cost.data.cached ? "cached" : "live"}</Chip>}
+      />
+      <Panel C={C}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+          <div>
+            <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO, letterSpacing: ".08em", textTransform: "uppercase" }}>
+              Month to date
+            </div>
+            <div style={{ fontSize: 24, fontWeight: 700, color: C.t, marginTop: 2 }}>{fmt(mtd.total)}</div>
+          </div>
+          <div style={{ fontSize: 10, color: C.t3, fontFamily: MONO }}>since {mtd.period_start}</div>
+        </div>
+
+        {breakdown.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
+            {breakdown.map((b) => (
+              <Chip key={b.service} C={C} color={C.t2}>
+                {b.service} {fmt(b.cost)}
+              </Chip>
+            ))}
+          </div>
+        )}
+
+        {weekly.length > 0 && (
+          <div style={{ marginTop: 6 }}>
+            <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO, letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 6 }}>
+              Last 4 weeks
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {weekly.map((w) => {
+                const pct = Math.round((w.total / maxWeek) * 100);
+                return (
+                  <div key={w.week_start} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ fontSize: 10, color: C.t3, fontFamily: MONO, width: 54 }}>{w.week_start.slice(5)}</div>
+                    <div style={{ flex: 1, height: 10, background: C.s3, borderRadius: 4, overflow: "hidden" }}>
+                      <div style={{ width: `${Math.max(2, pct)}%`, height: "100%", background: C.primary }} />
+                    </div>
+                    <div style={{ fontSize: 11, color: C.t2, fontFamily: MONO, minWidth: 58, textAlign: "right" }}>{fmt(w.total)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <div style={{ fontSize: 10, color: C.t3, fontFamily: MONO, marginTop: 10 }}>
+          unblended USD · Cost Explorer · refreshes every 6h
+        </div>
+      </Panel>
+    </>
   );
 }
 

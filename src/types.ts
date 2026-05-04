@@ -555,6 +555,31 @@ export interface ProgressResponse {
   lifts?: LiftsSection;
 }
 
+export interface InfraCostBreakdown {
+  service: string;
+  cost: number;
+}
+
+export interface InfraCostWeek {
+  week_start: string;
+  total: number;
+  breakdown: InfraCostBreakdown[];
+}
+
+export interface InfraCostResponse {
+  month_to_date: {
+    period_start: string;
+    total: number;
+    breakdown: InfraCostBreakdown[];
+  };
+  weekly: InfraCostWeek[];
+  computed_at: string;
+  cached?: boolean;
+  age_sec?: number;
+  stale?: boolean;
+  error?: string;
+}
+
 export interface JournalTag {
   id: string;
   label: string;
