@@ -41,6 +41,7 @@ from shared.scoring import (
     compute_daily_strain,
     compute_strain_target,
     compute_sleep_need,
+    compute_hr_dip_score,
     compute_acwr,
     DEFAULT_BASELINES,
 )
@@ -189,6 +190,8 @@ def _compute_day(date_str):
     continuity_idx_val = None
     avg_hr_sleep = None
     min_hr_sleep = None
+    hr_dip_idx_val = None
+    hr_dip_pct_val = None
 
     resp_item = metric_map.get("resp#hae") or metric_map.get("resp#manual")
     resp = resp_item["value"] if resp_item else None
@@ -256,13 +259,6 @@ def _compute_day(date_str):
             weights=weights,
         )
 
-    sleep_score_val = None
-    if sleep_min > 0 and sleep_quality_flag in ("ok", "partial"):
-        sleep_score_val = compute_sleep_score(
-            sleep_min, sleep_eff, deep_min, rem_min,
-            continuity_idx=continuity_idx_val,
-        )
-
     workouts = query_items(workouts_table, "date", date_str)
     strain_coef = (scoring_config or {}).get("strain_coefficient", 2.0)
     today_trimps = [float(w.get("trimp", 0) or 0) for w in workouts]
@@ -287,6 +283,22 @@ def _compute_day(date_str):
         wake_hours_last_7=wake_hours_last_7,
         today_strain=total_strain,
     )
+
+    # Sleep score — computed after sleep_need so duration grades against
+    # the user's personal need (totalMin) rather than a fixed 7.5h target.
+    duration_target_used = sleep_need.get("totalMin") or 450
+    hr_dip_result = compute_hr_dip_score(min_hr_sleep, baselines.get("rhr"))
+    if hr_dip_result is not None:
+        hr_dip_idx_val, hr_dip_pct_val = hr_dip_result
+
+    sleep_score_val = None
+    if sleep_min > 0 and sleep_quality_flag in ("ok", "partial"):
+        sleep_score_val = compute_sleep_score(
+            sleep_min, sleep_eff, deep_min, rem_min,
+            duration_target_min=duration_target_used,
+            continuity_idx=continuity_idx_val,
+            hr_dip_idx=hr_dip_idx_val,
+        )
 
     steps_item = metric_map.get("steps#hae") or metric_map.get("steps#manual")
     active_cal_item = metric_map.get("active_cal#hae") or metric_map.get("active_cal#manual")
@@ -356,7 +368,24 @@ def _compute_day(date_str):
             sleep_block["avg_hr_sleep"] = avg_hr_sleep
         if min_hr_sleep is not None:
             sleep_block["min_hr_sleep"] = min_hr_sleep
+        if hr_dip_idx_val is not None:
+            sleep_block["hr_dip_idx"] = hr_dip_idx_val
+        if hr_dip_pct_val is not None:
+            sleep_block["hr_dip_pct"] = hr_dip_pct_val
+        if sleep_score_val is not None:
+            sleep_block["duration_target_used"] = duration_target_used
         score_item["sleep"] = sleep_block
+
+    # Sleep Bank delta — actual asleep minutes minus tonight's need baseline
+    # (`baseMin`, which excludes acute debt + strain so the bank reflects the
+    # steady-state surplus/deficit, not noise from heavy training days).
+    # Only written when we have both a real asleep total and the need baseline.
+    if (
+        sleep_min > 0
+        and sleep_quality_flag in ("ok", "partial")
+        and sleep_need.get("baseMin")
+    ):
+        score_item["sleep_bank_delta"] = int(round(sleep_min - sleep_need["baseMin"]))
 
     put_item(scores_table, score_item)
 

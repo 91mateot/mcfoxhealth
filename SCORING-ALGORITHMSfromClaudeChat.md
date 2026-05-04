@@ -17,6 +17,12 @@ The system computes three primary scores (Recovery, Strain, Sleep) plus tracks N
 
 Recovery represents readiness to train. Uses Whoop-style HRV-heavy weighting (chosen over Bevel's more sleep-generous approach based on user preference).
 
+> **Note:** the pseudocode in this section is the original design spec. The
+> live implementation in `backend/shared/shared/scoring.py::compute_recovery`
+> has evolved — current default weights are
+> **HRV 40% / RHR 25% / Sleep 20% / Resp 5% / SpO2 5% / Wrist temp 5%**
+> (see `DEFAULT_WEIGHTS`). Code is the source of truth.
+
 ### Inputs
 
 | Input | Source | Key |
@@ -275,128 +281,104 @@ def estimate_strain_simple(exercise_minutes, active_calories,
 
 ## 3. Sleep Score (0–100%)
 
-Sleep quality composite score with duration weighted most heavily.
+Live implementation: `backend/shared/shared/scoring.py::compute_sleep_score`. Three
+progressive weighting modes — each new signal swaps in as the data becomes
+available so back-compat holds for pre-segment rows.
 
 ### Inputs
 
 | Input | Source | Key |
 |-------|--------|-----|
-| Sleep stages | Apple Health | `sleepAnalysis` samples (AsleepDeep, AsleepREM, AsleepCore, Awake) |
-| Total time in bed | Computed | Last sleep sample end - first sleep sample start |
-| Total time asleep | Computed | Sum of all non-Awake stage durations |
-| Sleep need | Configured | 7.5 hours (450 minutes) for Mateo |
+| Sleep stages (aggregated) | HAE `sleep_analysis` | `total_min`, `deep_min`, `rem_min`, `core_min`, `awake_min` |
+| Sleep stages (segments) | HAE unaggregated | `segments[]` with per-stage `{start, end, stage, dur_min}` |
+| Per-sample HR | HAE `heart_rate` (Summarize Data OFF) | `hr#hae_samples.samples[]` |
+| Resting HR | HAE `resting_heart_rate` | `rhr#hae` |
+| Personal sleep need | `compute_sleep_need` — 30-night median + acute debt + strain | `sleep_need.totalMin` |
 
-### Algorithm
+### Weighting modes
 
-```python
-def compute_sleep_score(total_asleep_min, total_in_bed_min, 
-                        deep_min, rem_min, awake_episodes,
-                        sleep_need_min=450):
-    """
-    Returns sleep score 0-100.
-    
-    Components:
-      Duration vs need:    40 points
-      Sleep efficiency:    25 points
-      Deep sleep:          15 points
-      REM sleep:           15 points
-      Wake disruption:      5 points
-    """
-    
-    # --- Duration (40 pts) ---
-    # Full points at or above sleep need, linear decay below
-    duration_ratio = min(total_asleep_min / sleep_need_min, 1.0)
-    duration_score = duration_ratio * 40
-    
-    # Bonus for exceeding need (up to 5 extra points, capped at 40)
-    if total_asleep_min > sleep_need_min:
-        excess_ratio = min((total_asleep_min - sleep_need_min) / 60, 1.0)
-        duration_score = min(40, duration_score + excess_ratio * 5)
-    
-    # --- Efficiency (25 pts) ---
-    # efficiency = time_asleep / time_in_bed
-    if total_in_bed_min > 0:
-        efficiency = total_asleep_min / total_in_bed_min
-    else:
-        efficiency = 0
-    
-    if efficiency >= 0.95:
-        eff_score = 25
-    elif efficiency >= 0.90:
-        eff_score = 20 + (efficiency - 0.90) / 0.05 * 5
-    elif efficiency >= 0.80:
-        eff_score = 12 + (efficiency - 0.80) / 0.10 * 8
-    else:
-        eff_score = max(0, efficiency / 0.80 * 12)
-    
-    # --- Deep Sleep (15 pts) ---
-    # Target: 60+ minutes (13-23% of total is healthy)
-    deep_ratio = min(deep_min / 60, 1.0)
-    deep_score = deep_ratio * 15
-    
-    # --- REM Sleep (15 pts) ---
-    # Target: 90+ minutes (20-25% of total is healthy)
-    rem_ratio = min(rem_min / 90, 1.0)
-    rem_score = rem_ratio * 15
-    
-    # --- Wake Disruption (5 pts) ---
-    # Fewer wake episodes = better
-    if awake_episodes <= 1:
-        wake_score = 5
-    elif awake_episodes <= 3:
-        wake_score = 3
-    elif awake_episodes <= 5:
-        wake_score = 1
-    else:
-        wake_score = 0
-    
-    total = duration_score + eff_score + deep_score + rem_score + wake_score
-    return round(max(0, min(100, total)))
+| Mode | Trigger | Weights (duration / eff / deep / REM / continuity / HR dip) |
+|------|---------|-------------------------------------------------------------|
+| 4-component (legacy Oura) | `continuity_idx is None` | 35 / 25 / 20 / 20 / — / — |
+| 5-component (Whoop-style) | `continuity_idx` provided | 30 / 20 / 15 / 15 / 20 / — |
+| 6-component (Bevel-style) | `continuity_idx` + `hr_dip_idx` provided | **25 / 15 / 15 / 15 / 15 / 15** |
 
+All component curves are linear with hard clamps:
 
-def compute_sleep_debt(last_7_nights, sleep_need_min=450):
-    """
-    Track cumulative sleep debt over 7 days.
-    
-    Args:
-        last_7_nights: list of total_asleep_min for each night
-    
-    Returns:
-        debt_minutes: positive = debt, negative = surplus
-        assessment: string
-    """
-    total_need = sleep_need_min * len(last_7_nights)
-    total_actual = sum(last_7_nights)
-    debt = total_need - total_actual
-    
-    if debt > 300:  # 5+ hours
-        assessment = "Critical — strongly recommend catch-up sleep"
-    elif debt > 180:  # 3+ hours
-        assessment = "Elevated — prioritize sleep this week"
-    elif debt > 0:
-        assessment = "Mild — manageable"
-    else:
-        assessment = "Surplus — well rested"
-    
-    return debt, assessment
-```
+- **Duration** — 0 at (target − 2h), 100 at target. Target is the user's
+  personal `sleep_need.totalMin` when available, else 450 min (7.5h).
+  This is the key B1 fix — a 6.4h night against a 6.4h need now scores
+  ~100 on duration, not 45.
+- **Efficiency** — 0 at 80%, 100 at 95%.
+- **Deep** — linear 0–60 min → 0–100 (target 60 min).
+- **REM** — linear 0–90 min → 0–100 (target 90 min).
+- **Continuity** — `100 − (arousals/hr × 20)` in `sleep_quality.py`.
+  Matches Whoop's published disturbance bins.
+- **HR dip** — see below.
+
+### Heart Rate Dip component
+
+`compute_hr_dip_score(min_hr_sleep, rhr_baseline)` returns the nocturnal
+autonomic-recovery signal. Dip % = `(rhr_baseline − min_hr_sleep) / rhr_baseline × 100`.
+
+Curve anchored to Bevel's observed labels (Mateo's 5/3 night: 16% dip → "Poor"
+on the night card, "Normal range" on the trend view):
+
+| Dip % | Score | Bevel label |
+|-------|-------|-------------|
+| ≤ 10% | 0 | Poor |
+| 16% | 60 | Poor → Normal |
+| 25%+ | 100 | Excellent |
+
+Piecewise linear between anchors; clamped 0–100. Returns `None` when
+inputs are missing or `min_hr_sleep ≥ baseline` (data looks off).
+
+### Sleep Bank
+
+Advisory rolling 14-day indicator — **not** a score input.
+
+- Per-day delta stored on `daily_scores.sleep_bank_delta = actual_min − sleep_need.baseMin`.
+  We use `baseMin` (median-of-30 baseline) instead of `totalMin` so the bank
+  reflects steady-state pattern, not noise from heavy training days where
+  strain+debt would bump the target.
+- `/api/today` rolls the last 14 days into `sleepBank.minutes` (sum of deltas).
+  Trend: surplus > +30m, deficit < −30m, else balanced.
+- Surfaced on Today as a thin card and on Progress as a "Bank ±Xm" chip
+  next to the sleep stages panel. No scoring effect; it's coaching context.
 
 ### Validation
 
-| Date | Duration | Efficiency | Deep | REM | Awake Eps | Computed | Bevel |
-|------|----------|------------|------|-----|-----------|----------|-------|
-| Apr 17 | 6h 20m | 99% | 1h 18m | 2h 22m | 1 | ~77% | 72% |
-| Apr 21 | 8h 43m | 87% | 58m | 1h 52m | 5 | ~72% | — |
-| Apr 25 | 7h 42m | 98% | 53m | 2h 16m | ~1 | ~90% | 90% |
+| Date | Duration | Need | Eff | Deep | REM | Arousals | HR dip | Mode | Computed | Bevel | Apple |
+|------|----------|------|-----|------|-----|----------|--------|------|----------|-------|-------|
+| 5/4  | 6h 15m   | 385m | 94.7% | 48m | 57m | — | — | 4-comp, live HAE aggregated | 66 | 89 | 88 |
+| 5/4 (hypothetical post-HAE-reconfigure, Apple's richer stages) | 6h 15m | 385m | 99% | 90m | 82m | 1 | 16% | 6-comp | ≈93 | 89 | 88 |
 
-### Note on Apple Health Sleep Data Truncation
+The HAE "Summarize Data = OFF" reconfigure closes most of the gap. The
+residual (~3–5 pts) is curve shape, not data. We don't target Bevel's or
+Apple's final number — we target **input parity** with Apple Health's raw
+deep/REM/efficiency minutes.
 
-The Apple Health query tool frequently returns incomplete sleep sessions (only 2-5 hours of samples instead of the full night). This is a known limitation. Workarounds:
+### HAE configuration required
 
-1. Use wider date ranges in the query
-2. Use UTC time ranges that span the full overnight window
-3. Fall back to Bevel's sleep data when available
-4. Consider building an iOS Shortcut that exports complete sleep sessions to JSON
+The 6-component mode only activates when HAE sends unaggregated data. On the
+phone:
+- Automated Exports → REST API automation → Summarize Data = **OFF**
+- Data Types: Sleep Analysis, Heart Rate, Heart Rate Variability,
+  Resting Heart Rate, Blood Oxygen Saturation, Respiratory Rate, Apple
+  Sleeping Wrist Temperature
+- iOS Shortcuts Personal Automation (Time of Day 6:30am + 10am) triggering
+  "Run Automation" on the HAE automation — iOS background execution alone
+  is unreliable.
+
+### Edge cases
+
+- `sleep_need.totalMin` unavailable (< 7 nights history) → duration_target
+  falls back to 450 min. Score still works; it's just not personal.
+- `min_hr_sleep` missing or ≥ `rhr_baseline` → HR dip returns None, score
+  falls back to 5-component weighting.
+- Quality gate (`sleep_quality.py::evaluate_quality`) can flag a night
+  truncated; truncated nights skip scoring entirely and their sleep inputs
+  to `compute_recovery` are nulled (redistributing weight).
 
 ---
 

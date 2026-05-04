@@ -241,6 +241,27 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
           <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO, marginLeft: 4 }}>
             {today.sleep.efficiency}% of time in bed was asleep
           </div>
+          {today.sleepBank && (
+            <div
+              style={{
+                marginLeft: "auto",
+                fontSize: 11,
+                fontFamily: MONO,
+                color:
+                  today.sleepBank.trend === "surplus"
+                    ? C.primary
+                    : today.sleepBank.trend === "deficit"
+                    ? C.danger
+                    : C.t3,
+                fontWeight: 700,
+                whiteSpace: "nowrap",
+              }}
+              title={`14-day bank: ${today.sleepBank.minutes}m across ${today.sleepBank.samples} nights`}
+            >
+              Bank {today.sleepBank.minutes >= 0 ? "+" : ""}
+              {today.sleepBank.minutes}m
+            </div>
+          )}
         </div>
         <div style={{ fontSize: 11, color: C.t3, lineHeight: 1.5, margin: "6px 0 10px" }}>
           Your body cycles through stages. <span style={{ color: "#6a84ff", fontWeight: 600 }}>Deep</span> rebuilds the body,

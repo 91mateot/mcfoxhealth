@@ -22,6 +22,7 @@ import boto3
 
 from shared.cost_service import get_costs as _get_infra_costs
 from shared.db import get_table, get_item, put_item, query_items
+from shared.scoring import sleep_component_breakdown
 from shared.timezone import local_now, local_today_str
 from shared.conversation_service import (
     get_latest as get_latest_conversation,
@@ -256,6 +257,42 @@ def _get_today():
     sleep_hours = sleep.get("total_min", 0) // 60
     sleep_minutes = sleep.get("total_min", 0) % 60
 
+    # Component breakdown for the RingDetail 2×3 card grid. Uses the same
+    # duration target the score was computed against, so the breakdown and
+    # top-line score stay in sync even after tuning.
+    sleep_component_scores = None
+    if sleep:
+        sleep_component_scores = sleep_component_breakdown(
+            total_min=sleep.get("total_min", 0),
+            efficiency=sleep.get("efficiency", 0),
+            deep_min=sleep.get("deep_min", 0),
+            rem_min=sleep.get("rem_min", 0),
+            duration_target_min=sleep.get("duration_target_used") or 450,
+            continuity_idx=sleep.get("continuity_idx"),
+            hr_dip_idx=sleep.get("hr_dip_idx"),
+        )
+
+    # Sleep Bank — rolling 14-day sum of (actual asleep − need baseline).
+    # Advisory only; does not feed into the score. Need baseline (baseMin)
+    # excludes acute debt + strain so the bank reflects steady-state pattern.
+    sleep_bank = None
+    bank_deltas = []
+    for i in range(14):
+        d = (today_dt - timedelta(days=i)).strftime("%Y-%m-%d")
+        row = get_item(scores_table, {"date": d}) or {}
+        delta = row.get("sleep_bank_delta")
+        if delta is not None:
+            bank_deltas.append(int(delta))
+    if bank_deltas:
+        bank_min = sum(bank_deltas)
+        if bank_min > 30:
+            trend = "surplus"
+        elif bank_min < -30:
+            trend = "deficit"
+        else:
+            trend = "balanced"
+        sleep_bank = {"minutes": bank_min, "trend": trend, "samples": len(bank_deltas)}
+
     # Freshness indicator: max ingested_at across every source that writes
     # today's data (HAE metrics, Strava workouts, logged meals/water).
     todays_metrics = query_items(metrics_table, "date", today_str)
@@ -314,7 +351,12 @@ def _get_today():
             "continuityIdx": sleep.get("continuity_idx"),
             "avgHrSleep": sleep.get("avg_hr_sleep"),
             "minHrSleep": sleep.get("min_hr_sleep"),
+            "hrDipIdx": sleep.get("hr_dip_idx"),
+            "hrDipPct": sleep.get("hr_dip_pct"),
+            "durationTargetUsed": sleep.get("duration_target_used"),
+            "componentScores": sleep_component_scores,
         },
+        "sleepBank": sleep_bank,
         "sleepNeedTonight": scores.get("sleep_need", {}),
         "hrv": scores.get("hrv"),
         "rhr": scores.get("rhr"),

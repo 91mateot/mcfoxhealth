@@ -1,5 +1,11 @@
 import { MONO, type Palette } from "../theme";
-import type { SleepQualityFlag, SleepSegment, TodayResponse } from "../types";
+import type {
+  SleepComponentLabel,
+  SleepComponentScores,
+  SleepQualityFlag,
+  SleepSegment,
+  TodayResponse,
+} from "../types";
 import { Sheet } from "../components/Sheet";
 
 export type RingKey = "recovery" | "strain" | "sleep" | "primer";
@@ -155,6 +161,19 @@ export function RingDetailSheet({ C, open, onClose, which, today }: RingDetailSh
       {which === "sleep" && today.sleep.segments && today.sleep.segments.length > 0 && (
         <Hypnogram C={C} segments={today.sleep.segments} />
       )}
+      {which === "sleep" && today.sleep.componentScores && (
+        <SleepComponentGrid
+          C={C}
+          scores={today.sleep.componentScores}
+          deepMin={today.sleep.deep}
+          remMin={today.sleep.rem}
+          hours={today.sleep.hours}
+          minutes={today.sleep.minutes}
+          efficiency={today.sleep.efficiency}
+          arousalCount={today.sleep.arousalCount}
+          hrDipPct={today.sleep.hrDipPct ?? null}
+        />
+      )}
       <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".12em", fontWeight: 700, padding: "0 4px 8px" }}>
         What it's made of
       </div>
@@ -288,6 +307,142 @@ function Hypnogram({ C, segments }: { C: Palette; segments: SleepSegment[] }) {
             {label}
           </span>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function SleepComponentGrid({
+  C,
+  scores,
+  deepMin,
+  remMin,
+  hours,
+  minutes,
+  efficiency,
+  arousalCount,
+  hrDipPct,
+}: {
+  C: Palette;
+  scores: SleepComponentScores;
+  deepMin: number;
+  remMin: number;
+  hours: number;
+  minutes: number;
+  efficiency: number;
+  arousalCount?: number;
+  hrDipPct: number | null;
+}) {
+  const labelColor = (label: SleepComponentLabel | null): string => {
+    switch (label) {
+      case "Excellent":
+        return C.primary;
+      case "Good":
+        return C.cyan;
+      case "Fair":
+        return C.warn;
+      case "Poor":
+        return C.danger;
+      default:
+        return C.t4;
+    }
+  };
+  const fmtHrMin = (min: number) =>
+    min <= 0 ? "—" : `${Math.floor(min / 60)}h ${min % 60}m`;
+  const cards: {
+    title: string;
+    value: string;
+    label: SleepComponentLabel | null;
+  }[] = [
+    {
+      title: "Duration",
+      value: hours > 0 || minutes > 0 ? `${hours}h ${minutes}m` : "—",
+      label: scores.duration.label,
+    },
+    {
+      title: "Efficiency",
+      value: efficiency > 0 ? `${Math.round(efficiency)}%` : "—",
+      label: scores.efficiency.label,
+    },
+    { title: "Deep", value: fmtHrMin(deepMin), label: scores.deep.label },
+    { title: "REM", value: fmtHrMin(remMin), label: scores.rem.label },
+    {
+      title: "Continuity",
+      value:
+        scores.continuity.score == null
+          ? "—"
+          : typeof arousalCount === "number"
+          ? `${arousalCount} wake-up${arousalCount === 1 ? "" : "s"}`
+          : `${Math.round(scores.continuity.score)}/100`,
+      label: scores.continuity.label,
+    },
+    {
+      title: "HR dip",
+      value:
+        hrDipPct == null
+          ? "—"
+          : `${Math.round(hrDipPct)}%`,
+      label: scores.hrDip.label,
+    },
+  ];
+  return (
+    <div style={{ padding: "0 4px 14px" }}>
+      <div
+        style={{
+          fontSize: 11,
+          color: C.t3,
+          textTransform: "uppercase",
+          letterSpacing: ".12em",
+          fontWeight: 700,
+          marginBottom: 8,
+        }}
+      >
+        Score breakdown
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+        {cards.map((card) => {
+          const col = labelColor(card.label);
+          return (
+            <div
+              key={card.title}
+              style={{
+                background: C.s,
+                border: `1px solid ${C.border}`,
+                borderRadius: 10,
+                padding: "10px 8px",
+                textAlign: "center",
+              }}
+            >
+              <div style={{ fontSize: 10.5, color: C.t4, fontWeight: 600, letterSpacing: ".02em" }}>
+                {card.title}
+              </div>
+              <div
+                style={{
+                  fontSize: 14,
+                  color: C.t,
+                  fontWeight: 800,
+                  fontFamily: MONO,
+                  marginTop: 4,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {card.value}
+              </div>
+              <div
+                style={{
+                  fontSize: 10,
+                  color: col,
+                  fontWeight: 700,
+                  marginTop: 4,
+                  textTransform: "uppercase",
+                  letterSpacing: ".08em",
+                }}
+              >
+                {card.label ?? "—"}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

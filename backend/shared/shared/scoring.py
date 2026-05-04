@@ -369,6 +369,41 @@ def compute_daily_strain(
 # ─── Sleep score ───────────────────────────────────────────────────────
 
 
+def compute_hr_dip_score(
+    min_hr_sleep: Optional[float],
+    rhr_baseline: Optional[float],
+) -> Optional[tuple]:
+    """Nocturnal heart-rate dip score.
+
+    HR dip % = (rhr_baseline - min_hr_sleep) / rhr_baseline * 100.
+    A larger dip = deeper parasympathetic state = better autonomic recovery.
+
+    Curve anchored against Bevel's framing (16% dip labeled "Poor" on the
+    nightly card, "Normal range" on the trend view):
+      10% → 0    (no meaningful dip)
+      16% → 60   (poor-but-in-population-range)
+      25% → 100  (excellent)
+    Piecewise linear between anchors; clamped 0-100.
+
+    Returns (score_0_100, dip_pct) or None if inputs are missing or
+    the "dip" would be negative (min HR ≥ baseline, data looks off).
+    """
+    if min_hr_sleep is None or rhr_baseline is None or rhr_baseline <= 0:
+        return None
+    if min_hr_sleep >= rhr_baseline:
+        return None
+    dip_pct = (rhr_baseline - min_hr_sleep) / rhr_baseline * 100
+    if dip_pct <= 10:
+        score = _clamp(0, 100, (dip_pct / 10) * 0)  # flat 0 up to 10%
+    elif dip_pct <= 16:
+        score = _clamp(0, 100, ((dip_pct - 10) / 6) * 60)
+    elif dip_pct <= 25:
+        score = _clamp(0, 100, 60 + ((dip_pct - 16) / 9) * 40)
+    else:
+        score = 100
+    return (round(score, 1), round(dip_pct, 1))
+
+
 def compute_sleep_score(
     total_min: float,
     efficiency: float,
@@ -378,27 +413,33 @@ def compute_sleep_score(
     efficiency_floor: float = 80.0,
     efficiency_ceiling: float = 95.0,
     continuity_idx: Optional[float] = None,
+    hr_dip_idx: Optional[float] = None,
 ) -> int:
     """Standalone sleep performance score 0-100.
 
-    Two weighting modes:
-      - Legacy (Oura 35/25/20/20) when `continuity_idx` is None — preserved
-        so older callers and pre-segment sleep rows still score consistently.
+    Three weighting modes (progressive layering — each new signal replaces
+    some legacy weight so no component ever exceeds its new allocation):
+      - 4-component (Oura 35/25/20/20) when only duration/efficiency/deep/rem
+        are available — preserved so pre-segment rows still score consistently.
       - 5-component (30/20/15/15/20) when `continuity_idx` is provided —
-        Bevel/Whoop-style "restorative + disturbances" model. Continuity
-        replaces some duration + efficiency weight because it captures
-        arousal fragmentation that those two miss.
+        Bevel/Whoop-style "restorative + disturbances" model.
+      - 6-component (25/15/15/15/15/15) when both `continuity_idx` and
+        `hr_dip_idx` are provided — adds nocturnal HR dip as the autonomic
+        recovery signal (matches Bevel's "Heart Rate Dip" card).
 
-      Duration:    0 at (target - 2h), 100 at target (default 7.5h)
+      Duration:    0 at (target - 2h), 100 at target. `duration_target_min`
+                   defaults to 450 min (7.5h) but should be passed the user's
+                   personal sleep_need.totalMin when available so a 6.4h
+                   night against a 6.4h need scores 100 on duration, not 45.
       Efficiency:  0 at 80%, 100 at 95%
       Deep:        target 60 min
       REM:         target 90 min
-      Continuity:  0-100 scalar from compute (arousal density + onset)
-
-    Default target 450 min matches DEFAULT_BASELINES.sleep_min and
-    compute_sleep_need.base_min — all three agree on 7.5h for Mateo.
+      Continuity:  0-100 scalar from compute (arousal density)
+      HR dip:      0-100 scalar from compute_hr_dip_score
     """
-    dur = _clamp(0, 100, ((total_min - (duration_target_min - 120)) / 120) * 100)
+    dur_target = max(120, int(duration_target_min))
+    dur_floor = max(0, dur_target - 120)
+    dur = _clamp(0, 100, ((total_min - dur_floor) / (dur_target - dur_floor)) * 100)
     eff_range = max(1e-6, efficiency_ceiling - efficiency_floor)
     eff = _clamp(0, 100, ((efficiency - efficiency_floor) / eff_range) * 100)
     deep = _clamp(0, 100, (deep_min / 60) * 100)
@@ -406,7 +447,63 @@ def compute_sleep_score(
     if continuity_idx is None:
         return int(round(0.35 * dur + 0.25 * eff + 0.20 * deep + 0.20 * rem))
     cont = _clamp(0, 100, continuity_idx)
-    return int(round(0.30 * dur + 0.20 * eff + 0.15 * deep + 0.15 * rem + 0.20 * cont))
+    if hr_dip_idx is None:
+        return int(round(0.30 * dur + 0.20 * eff + 0.15 * deep + 0.15 * rem + 0.20 * cont))
+    dip = _clamp(0, 100, hr_dip_idx)
+    return int(round(
+        0.25 * dur + 0.15 * eff + 0.15 * deep + 0.15 * rem + 0.15 * cont + 0.15 * dip
+    ))
+
+
+def _bucket_label(score: Optional[float]) -> Optional[str]:
+    """Bevel-style bucket label for a 0-100 sub-score. None when the
+    component has no data for that night (so the UI renders '—')."""
+    if score is None:
+        return None
+    if score >= 85:
+        return "Excellent"
+    if score >= 70:
+        return "Good"
+    if score >= 50:
+        return "Fair"
+    return "Poor"
+
+
+def sleep_component_breakdown(
+    total_min: float,
+    efficiency: float,
+    deep_min: float,
+    rem_min: float,
+    duration_target_min: int = 450,
+    efficiency_floor: float = 80.0,
+    efficiency_ceiling: float = 95.0,
+    continuity_idx: Optional[float] = None,
+    hr_dip_idx: Optional[float] = None,
+) -> dict:
+    """Return per-component 0-100 scores + category labels for the UI.
+
+    Uses the same formulas as compute_sleep_score so the breakdown is
+    always consistent with the top-line number. Components with None
+    inputs come back as {score: None, label: None} so the frontend can
+    render a dash card rather than hiding the slot.
+    """
+    dur_target = max(120, int(duration_target_min))
+    dur_floor = max(0, dur_target - 120)
+    dur = round(_clamp(0, 100, ((total_min - dur_floor) / (dur_target - dur_floor)) * 100), 1)
+    eff_range = max(1e-6, efficiency_ceiling - efficiency_floor)
+    eff = round(_clamp(0, 100, ((efficiency - efficiency_floor) / eff_range) * 100), 1)
+    deep = round(_clamp(0, 100, (deep_min / 60) * 100), 1)
+    rem = round(_clamp(0, 100, (rem_min / 90) * 100), 1)
+    cont = None if continuity_idx is None else round(_clamp(0, 100, continuity_idx), 1)
+    dip = None if hr_dip_idx is None else round(_clamp(0, 100, hr_dip_idx), 1)
+    return {
+        "duration":   {"score": dur,  "label": _bucket_label(dur)},
+        "efficiency": {"score": eff,  "label": _bucket_label(eff)},
+        "deep":       {"score": deep, "label": _bucket_label(deep)},
+        "rem":        {"score": rem,  "label": _bucket_label(rem)},
+        "continuity": {"score": cont, "label": _bucket_label(cont)},
+        "hrDip":      {"score": dip,  "label": _bucket_label(dip)},
+    }
 
 
 # ─── ACWR (Gabbett 2016 acute:chronic workload ratio) ─────────────────

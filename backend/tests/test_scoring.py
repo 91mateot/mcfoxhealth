@@ -14,6 +14,7 @@ import math
 from shared.scoring import (
     compute_recovery,
     compute_sleep_score,
+    compute_hr_dip_score,
     compute_strain,
     compute_daily_strain,
     compute_acwr,
@@ -86,6 +87,95 @@ def test_sleep_score_fragmented_short_night_low():
     would have tanked it harder."""
     score = compute_sleep_score(270, 80, 40, 50, continuity_idx=60)
     assert 20 <= score <= 60
+
+
+# ─── HR dip component ───────────────────────────────────────────────
+
+def test_hr_dip_missing_inputs_return_none():
+    assert compute_hr_dip_score(None, 64) is None
+    assert compute_hr_dip_score(50, None) is None
+    # min HR at or above baseline = no dip, data looks off
+    assert compute_hr_dip_score(64, 64) is None
+    assert compute_hr_dip_score(70, 64) is None
+
+
+def test_hr_dip_curve_anchors_match_bevel_framing():
+    """Curve anchored to Bevel's labels: 16% dip reads "Poor" (~60),
+    25%+ reads "Excellent" (100), <=10% reads flat 0."""
+    # 10% dip — below threshold, flat 0
+    score, pct = compute_hr_dip_score(57.6, 64)
+    assert pct == 10.0
+    assert score == 0
+
+    # 16% dip — matches Bevel's "Poor" label on 5/3, score ≈ 60
+    score, pct = compute_hr_dip_score(53.76, 64)
+    assert pct == 16.0
+    assert 59 <= score <= 61
+
+    # 25% dip — excellent, score = 100
+    score, pct = compute_hr_dip_score(48, 64)
+    assert pct == 25.0
+    assert score == 100
+
+    # 30% dip — clamped at 100
+    score, _ = compute_hr_dip_score(44.8, 64)
+    assert score == 100
+
+
+def test_hr_dip_monotonic():
+    """Bigger dip (lower min HR) → higher or equal score, always."""
+    prev = -1
+    for min_hr in [64, 60, 57, 54, 50, 48, 44]:
+        result = compute_hr_dip_score(min_hr, 64)
+        score = result[0] if result else 0
+        assert score >= prev
+        prev = score
+
+
+# ─── Duration-against-personal-need (B1 regression) ─────────────────
+
+def test_may_3_night_duration_vs_need():
+    """5/3 night live data: 375m asleep vs personal sleep_need.totalMin=385m.
+    With duration_target_min=385, duration scores ~95 (95% of need hit),
+    not the 37.5 it scored against the fixed 450m target. This is the
+    primary B1 regression — the duration curve re-anchored to the user's
+    actual need."""
+    # 4-component (no segments) — live state on 5/3 before HAE reconfigure
+    score_fixed = compute_sleep_score(375, 94.7, 48, 57, duration_target_min=450)
+    score_personal = compute_sleep_score(375, 94.7, 48, 57, duration_target_min=385)
+    # Fixed-target: 0.35*37.5 + 0.25*98 + 0.2*80 + 0.2*63.3 ≈ 66 (matches live)
+    assert 64 <= score_fixed <= 68
+    # Personal-need target: dur ≈ 91.7, score lands in mid-80s.
+    # 0.35*91.7 + 0.25*98 + 0.2*80 + 0.2*63.3 ≈ 85
+    assert 82 <= score_personal <= 88
+    assert score_personal > score_fixed + 15  # at least 15-pt improvement
+
+
+def test_sleep_score_6component_uses_hr_dip():
+    """When both continuity_idx and hr_dip_idx are provided, the 6-component
+    weighting kicks in (25/15/15/15/15/15)."""
+    # Same underlying night, just with HR dip added vs not
+    with_dip = compute_sleep_score(
+        450, 93, 90, 100, continuity_idx=100, hr_dip_idx=100
+    )
+    without_dip = compute_sleep_score(
+        450, 93, 90, 100, continuity_idx=100, hr_dip_idx=None
+    )
+    # A perfect HR dip + perfect everything else should be at or near 100.
+    assert with_dip >= 95
+    # Without dip, same inputs still near 100 because continuity=100 fills in.
+    assert without_dip >= 95
+
+
+def test_sleep_score_6component_poor_hr_dip_penalizes():
+    """A night with poor HR dip (score 20) should drop the 6-component
+    total below the same night's 5-component score, because the dip weight
+    (15%) lands on a low number rather than being absorbed by other signals."""
+    cont_only = compute_sleep_score(450, 93, 90, 100, continuity_idx=100)
+    with_poor_dip = compute_sleep_score(
+        450, 93, 90, 100, continuity_idx=100, hr_dip_idx=20
+    )
+    assert with_poor_dip < cont_only
 
 
 def test_apr_25_matches_whoop_proxy_strain():

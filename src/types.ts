@@ -36,6 +36,22 @@ export interface SleepSegment {
   dur_min: number;
 }
 
+export type SleepComponentLabel = "Excellent" | "Good" | "Fair" | "Poor";
+
+export interface SleepComponentScore {
+  score: number | null;
+  label: SleepComponentLabel | null;
+}
+
+export interface SleepComponentScores {
+  duration: SleepComponentScore;
+  efficiency: SleepComponentScore;
+  deep: SleepComponentScore;
+  rem: SleepComponentScore;
+  continuity: SleepComponentScore;
+  hrDip: SleepComponentScore;
+}
+
 export interface SleepStages {
   score: number;
   hours: number;
@@ -54,7 +70,21 @@ export interface SleepStages {
   continuityIdx?: number;
   avgHrSleep?: number;
   minHrSleep?: number;
+  /** Band-3 additions — nocturnal HR dip + personal-need-anchored duration. */
+  hrDipIdx?: number | null;
+  hrDipPct?: number | null;
+  durationTargetUsed?: number | null;
+  /** Per-component 0–100 score + bucket label for the detail-sheet grid. */
+  componentScores?: SleepComponentScores | null;
   segments?: SleepSegment[];
+}
+
+export interface SleepBank {
+  /** Rolling 14-day Σ(actual asleep − need baseline). Positive = surplus. */
+  minutes: number;
+  trend: "surplus" | "deficit" | "balanced";
+  /** How many of the 14 days had data — lets the UI dim if partial. */
+  samples: number;
 }
 
 export interface SleepNeed {
@@ -224,6 +254,9 @@ export interface TodayResponse {
   acwr?: ACWR;
   sleep: SleepStages;
   sleepNeedTonight: SleepNeed;
+  /** 14-day rolling sleep bank. Null when no daily_scores rows carry a
+   * sleep_bank_delta yet (first 2 weeks after deploy). */
+  sleepBank?: SleepBank | null;
   hrv: number | null;
   rhr: number | null;
   resp: number | null;

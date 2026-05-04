@@ -110,6 +110,9 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
         />
       </div>
 
+      {/* Sleep Bank — rolling 14-day surplus/deficit. Advisory only. */}
+      {data.sleepBank && <SleepBankCard C={C} bank={data.sleepBank} bedtimeBy={need.bedtimeBy} />}
+
       {/* Today's workout card */}
       {data.plannedWorkout && (
         <PlannedWorkoutCard C={C} planned={data.plannedWorkout} onSwap={onOpenChat} />
@@ -441,6 +444,46 @@ function StrainSoFar({ C, current, low, high }: { C: Palette; current: number; l
         {subline}
       </div>
     </div>
+  );
+}
+
+function SleepBankCard({
+  C,
+  bank,
+  bedtimeBy,
+}: {
+  C: Palette;
+  bank: NonNullable<TodayResponse["sleepBank"]>;
+  bedtimeBy?: string;
+}) {
+  const color =
+    bank.trend === "surplus" ? C.primary : bank.trend === "deficit" ? C.danger : C.t3;
+  const signed = bank.minutes >= 0 ? `+${bank.minutes}m` : `${bank.minutes}m`;
+  const hrs = Math.floor(Math.abs(bank.minutes) / 60);
+  const mins = Math.abs(bank.minutes) % 60;
+  const pretty = hrs > 0 ? `${bank.minutes < 0 ? "−" : "+"}${hrs}h ${mins}m` : signed;
+  const message =
+    bank.trend === "surplus"
+      ? "Ahead of your baseline — stay consistent."
+      : bank.trend === "deficit"
+      ? `Behind by ${pretty.replace(/^[−+]/, "")}. Aim for ${bedtimeBy ?? "an earlier bedtime"}.`
+      : "On pace with your baseline.";
+  return (
+    <Panel C={C} style={{ background: C.s, padding: "12px 14px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700 }}>
+            Sleep bank · last 14 days
+          </div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 3 }}>
+            <div style={{ fontSize: 22, fontWeight: 800, fontFamily: MONO, color, letterSpacing: "-.04em" }}>
+              {pretty}
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: C.t4, marginTop: 2 }}>{message}</div>
+        </div>
+      </div>
+    </Panel>
   );
 }
 
