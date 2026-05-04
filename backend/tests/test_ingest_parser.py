@@ -404,6 +404,48 @@ def test_unaggregated_sleep_partial_window_does_not_clobber_aggregated():
     assert len(latest["segments"]) == 3
 
 
+def test_unaggregated_merge_carries_over_sleep_start_end():
+    """When merge-guard preserves aggregated totals, the incoming segments'
+    start/end still need to land on the row so compute's HR-sidecar
+    intersection has a window to use. Regression: without this, a merged
+    row shows segments but no sleep_start/sleep_end, leaving avg_hr_sleep
+    and thus HR-dip silently None."""
+    h, t = _fresh_module()
+    _patch_auth(h)
+    # Seed with aggregated row that lacks sleep_start/sleep_end (simulates
+    # a legacy row or the manually-restored case we just hit).
+    t.items.append({
+        "date": "2026-05-04",
+        "metric_source": "sleep#hae",
+        "total_min": 385, "deep_min": 90, "rem_min": 83,
+        "core_min": 212, "awake_min": 5, "in_bed_min": 390,
+        "efficiency": 98.7, "quality_flag": "ok",
+        "quality_reasons": [], "confidence": 1,
+    })
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "sleep_analysis", "data": [
+            {"value": "Deep", "qty": 0.65,
+             "startDate": "2026-05-04 00:15:46 -0700",
+             "endDate":   "2026-05-04 00:54:46 -0700",
+             "sleepStart": "2026-05-04 00:15:46 -0700"},
+            {"value": "REM", "qty": 1.15,
+             "startDate": "2026-05-04 03:00:00 -0700",
+             "endDate":   "2026-05-04 04:09:00 -0700",
+             "sleepStart": "2026-05-04 00:15:46 -0700"},
+            {"value": "Core", "qty": 2.93,
+             "startDate": "2026-05-04 01:00:00 -0700",
+             "endDate":   "2026-05-04 04:59:58 -0700",
+             "sleepStart": "2026-05-04 00:15:46 -0700"},
+        ]}
+    ]}}), None)
+    latest = [i for i in t.items if i["metric_source"] == "sleep#hae"][-1]
+    # Merged — aggregated totals preserved.
+    assert latest["total_min"] == 385
+    # But sleep_start/sleep_end now come from the incoming segments.
+    assert latest.get("sleep_start") == "2026-05-04 00:15:46 -0700"
+    assert latest.get("sleep_end") == "2026-05-04 04:59:58 -0700"
+
+
 def test_unaggregated_sleep_replaces_when_totals_comparable():
     """Guard rails — the merge only preserves existing totals when they're
     *materially* higher. A comparable-quality unaggregated push should

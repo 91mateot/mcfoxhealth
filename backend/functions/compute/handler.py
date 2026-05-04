@@ -229,6 +229,17 @@ def _compute_day(date_str):
         hr_samples_item = metric_map.get("hr#hae_samples")
         sleep_start = sleep_item.get("sleep_start")
         sleep_end = sleep_item.get("sleep_end")
+        # Fall back to segment span when the top-level start/end are missing.
+        # This happens after the ingest merge guard preserves an older row
+        # that only had totals, then gets enriched with segments by a later
+        # unaggregated push.
+        if (not sleep_start or not sleep_end) and segments:
+            starts = [s.get("start") for s in segments if s.get("start")]
+            ends = [s.get("end") for s in segments if s.get("end")]
+            if starts and not sleep_start:
+                sleep_start = min(starts)
+            if ends and not sleep_end:
+                sleep_end = max(ends)
         if hr_samples_item and sleep_start and sleep_end:
             avg_hr_sleep, min_hr_sleep = _sleep_window_hr_stats(
                 hr_samples_item.get("samples") or [],

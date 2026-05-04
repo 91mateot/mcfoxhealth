@@ -308,6 +308,12 @@ def _handle_hae_metrics_array(data_list):
                     merged = dict(existing)
                     if item.get("segments"):
                         merged["segments"] = item["segments"]
+                    # Carry over incoming sleep_start/end when the existing
+                    # row was built from an aggregated push that didn't have
+                    # them. Compute's HR-sidecar intersection needs these.
+                    for k in ("sleep_start", "sleep_end"):
+                        if item.get(k) and not merged.get(k):
+                            merged[k] = item[k]
                     merged["ingested_at"] = _now_iso()
                     item = merged
                 put_item(table, item)
@@ -592,6 +598,12 @@ def _normalize_sleep(sleep, date_str):
         item["efficiency"] = round((total / in_bed) * 100, 1) if in_bed > 0 else 0
         if segments:
             item["segments"] = segments
+            starts = [s["start"] for s in segments if s.get("start")]
+            ends = [s["end"] for s in segments if s.get("end")]
+            if starts:
+                item["sleep_start"] = min(starts)
+            if ends:
+                item["sleep_end"] = max(ends)
     else:
         return None
 
