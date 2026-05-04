@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { FONT, MONO, type Palette } from "../theme";
 import type { PlannedWorkout } from "../types";
 import { Panel } from "../components/Panel";
 import { Btn } from "../components/Btn";
-import { markRestDay, refreshPlannedWorkout } from "../api";
+import { markRestDay, refreshPlannedWorkout, submitFeedback, todayISO } from "../api";
 
 interface Props {
   C: Palette;
@@ -31,10 +31,59 @@ const INTENSITY_LABELS: Record<string, string> = {
   hard: "hard",
 };
 
+interface ThumbButtonProps {
+  C: Palette;
+  active: boolean;
+  dim?: boolean;
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}
+
+function ThumbButton({ C, active, dim, label, onClick, children }: ThumbButtonProps) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      style={{
+        background: active ? C.s2 : "transparent",
+        border: `1px solid ${active ? C.primary : C.border}`,
+        borderRadius: 14,
+        width: 28,
+        height: 24,
+        padding: 0,
+        fontSize: 12,
+        lineHeight: 1,
+        cursor: "pointer",
+        opacity: dim ? 0.4 : 1,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function PlannedWorkoutCard({ C, planned, onSwap }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [resting, setResting] = useState(false);
+  const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [noteText, setNoteText] = useState("");
+
+  const targetId = planned ? `${todayISO()}#${planned.generatedAt}` : "";
+
+  // Reset local thumbs state whenever the proposal identity changes (Refresh
+  // or nightly regeneration) so the user can rate the new plan.
+  useEffect(() => {
+    setFeedback(null);
+    setNoteOpen(false);
+    setNoteText("");
+  }, [targetId]);
 
   if (!planned) return null;
 
@@ -76,6 +125,40 @@ export function PlannedWorkoutCard({ C, planned, onSwap }: Props) {
 
   const handleSwap = () => {
     onSwap(`I'd rather not do ${typeLabel.toLowerCase()} today — what else works?`);
+  };
+
+  const handleThumb = async (signal: "up" | "down") => {
+    const cleared = feedback === signal;
+    const next = cleared ? null : signal;
+    const prev = feedback;
+    setFeedback(next);
+
+    if (signal === "down" && !cleared) {
+      setNoteOpen(true);
+      setNoteText("");
+    } else if (noteOpen) {
+      setNoteOpen(false);
+      setNoteText("");
+    }
+
+    if (cleared) return;
+    try {
+      await submitFeedback(signal, "proposal", targetId);
+    } catch {
+      setFeedback(prev);
+    }
+  };
+
+  const sendNote = async () => {
+    const note = noteText.trim();
+    setNoteOpen(false);
+    setNoteText("");
+    if (!note) return;
+    try {
+      await submitFeedback("down", "proposal", targetId, note);
+    } catch {
+      // Thumbs-down signal already landed in handleThumb; swallow note failure.
+    }
   };
 
   return (
@@ -232,6 +315,116 @@ export function PlannedWorkoutCard({ C, planned, onSwap }: Props) {
               {resting ? "…" : "Rest day"}
             </Btn>
           )}
+        </div>
+      )}
+
+      {!matched && !isRestDay && (
+        <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 10, fontFamily: MONO, color: C.t4, letterSpacing: ".1em" }}>
+            PLAN FIT
+          </span>
+          <ThumbButton
+            C={C}
+            active={feedback === "up"}
+            dim={feedback !== null && feedback !== "up"}
+            label="Good fit"
+            onClick={() => handleThumb("up")}
+          >
+            👍
+          </ThumbButton>
+          <ThumbButton
+            C={C}
+            active={feedback === "down"}
+            dim={feedback !== null && feedback !== "down"}
+            label="Not a fit"
+            onClick={() => handleThumb("down")}
+          >
+            👎
+          </ThumbButton>
+          {feedback && (
+            <span style={{ fontSize: 10, fontFamily: MONO, color: C.t4 }}>
+              {feedback === "up" ? "thanks" : "noted"}
+            </span>
+          )}
+        </div>
+      )}
+
+      {noteOpen && (
+        <div
+          style={{
+            marginTop: 8,
+            background: C.s2,
+            border: `1px solid ${C.border}`,
+            borderRadius: 12,
+            padding: "8px 10px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+          }}
+        >
+          <label style={{ fontSize: 11, fontFamily: MONO, color: C.t3 }}>
+            What was off? (optional)
+          </label>
+          <input
+            value={noteText}
+            onChange={(e) => setNoteText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") sendNote();
+              if (e.key === "Escape") {
+                setNoteOpen(false);
+                setNoteText("");
+              }
+            }}
+            placeholder="Too intense, wrong muscle group, bad timing…"
+            autoFocus
+            style={{
+              background: "transparent",
+              border: `1px solid ${C.border}`,
+              borderRadius: 8,
+              padding: "6px 8px",
+              color: C.t,
+              fontFamily: FONT,
+              fontSize: 12,
+              outline: "none",
+            }}
+          />
+          <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+            <button
+              onClick={() => {
+                setNoteOpen(false);
+                setNoteText("");
+              }}
+              style={{
+                background: "transparent",
+                border: `1px solid ${C.border}`,
+                color: C.t2,
+                padding: "4px 10px",
+                borderRadius: 10,
+                fontFamily: FONT,
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              Skip
+            </button>
+            <button
+              onClick={sendNote}
+              style={{
+                background: C.primary,
+                border: "none",
+                color: "#0a0a0a",
+                padding: "4px 12px",
+                borderRadius: 10,
+                fontFamily: FONT,
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              Send
+            </button>
+          </div>
         </div>
       )}
 
