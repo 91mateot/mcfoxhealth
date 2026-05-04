@@ -1,5 +1,5 @@
 import { MONO, type Palette } from "../theme";
-import type { TodayResponse } from "../types";
+import type { SleepQualityFlag, SleepSegment, TodayResponse } from "../types";
 import { Sheet } from "../components/Sheet";
 
 export type RingKey = "recovery" | "strain" | "sleep" | "primer";
@@ -65,37 +65,73 @@ export function RingDetailSheet({ C, open, onClose, which, today }: RingDetailSh
         { k: "Optimal", v: String(today.strainTarget.optimal), sub: "midpoint", w: "", col: C.warn },
       ],
     },
-    sleep: {
-      title: "Sleep last night",
-      color: C.cyan,
-      hero: `${today.sleep.hours}:${String(today.sleep.minutes).padStart(2, "0")}`,
-      heroUnit: "",
-      what: "How much and how well you slept.",
-      blurb: `You slept ${today.sleep.hours}h ${today.sleep.minutes}m. ${today.sleep.efficiency}% of that was actually asleep.`,
-      rows: [
-        { k: "Total time asleep", v: `${today.sleep.hours}h ${today.sleep.minutes}m`, sub: "needed 7h 30m", w: "", col: C.cyan },
-        { k: "Sleep efficiency", v: `${today.sleep.efficiency}%`, sub: "how still you were", w: "good >90%", col: C.cyan },
+    sleep: (() => {
+      const s = today.sleep;
+      const rows: { k: string; v: string; sub: string; w: string; col: string }[] = [
+        { k: "Total time asleep", v: `${s.hours}h ${s.minutes}m`, sub: "needed 7h 30m", w: "", col: C.cyan },
+        { k: "Sleep efficiency", v: `${s.efficiency}%`, sub: "how still you were", w: "good >90%", col: C.cyan },
         {
           k: "Deep sleep",
-          v: `${Math.floor(today.sleep.deep / 60)}h ${today.sleep.deep % 60}m`,
+          v: `${Math.floor(s.deep / 60)}h ${s.deep % 60}m`,
           sub: "physical recovery",
           w: "healthy",
           col: "#3b5cff",
         },
         {
           k: "Dream sleep (REM)",
-          v: `${Math.floor(today.sleep.rem / 60)}h ${today.sleep.rem % 60}m`,
+          v: `${Math.floor(s.rem / 60)}h ${s.rem % 60}m`,
           sub: "memory & mood",
           w: "healthy",
           col: C.purple,
         },
-      ],
-    },
+      ];
+      if (typeof s.arousalCount === "number") {
+        rows.push({
+          k: "Wake-ups",
+          v: String(s.arousalCount),
+          sub: "brief stirs ignored",
+          w: "fewer = deeper",
+          col: C.cyan,
+        });
+      }
+      if (typeof s.onsetMin === "number") {
+        rows.push({
+          k: "Time to fall asleep",
+          v: `${Math.round(s.onsetMin)}m`,
+          sub: "from getting in bed",
+          w: "15m is typical",
+          col: C.cyan,
+        });
+      }
+      if (typeof s.avgHrSleep === "number") {
+        const low = typeof s.minHrSleep === "number" ? ` · low ${s.minHrSleep}` : "";
+        rows.push({
+          k: "Sleeping heart rate",
+          v: `${s.avgHrSleep} bpm`,
+          sub: `average while asleep${low}`,
+          w: "lower = restful",
+          col: C.cyan,
+        });
+      }
+      return {
+        title: "Sleep last night",
+        color: C.cyan,
+        hero: `${s.hours}:${String(s.minutes).padStart(2, "0")}`,
+        heroUnit: "",
+        what: "How much and how well you slept.",
+        blurb: `You slept ${s.hours}h ${s.minutes}m. ${s.efficiency}% of that was actually asleep.`,
+        rows,
+      };
+    })(),
   };
   const cfg = configs[which];
+  const sleepQuality = which === "sleep" ? today.sleep.qualityFlag : undefined;
 
   return (
     <Sheet C={C} open={open} onClose={onClose} title={cfg.title} height="78%">
+      {sleepQuality && sleepQuality !== "ok" && (
+        <SleepQualityBadge C={C} flag={sleepQuality} reasons={today.sleep.qualityReasons ?? []} />
+      )}
       <div style={{ textAlign: "center", padding: "12px 0 10px" }}>
         <div style={{ fontSize: 56, fontWeight: 800, color: cfg.color, fontFamily: MONO, letterSpacing: "-.05em", lineHeight: 1 }}>
           {cfg.hero}
@@ -116,6 +152,9 @@ export function RingDetailSheet({ C, open, onClose, which, today }: RingDetailSh
         {cfg.what}
       </div>
       <div style={{ fontSize: 12.5, color: C.t2, lineHeight: 1.6, padding: "0 4px 16px", textAlign: "center" }}>{cfg.blurb}</div>
+      {which === "sleep" && today.sleep.segments && today.sleep.segments.length > 0 && (
+        <Hypnogram C={C} segments={today.sleep.segments} />
+      )}
       <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".12em", fontWeight: 700, padding: "0 4px 8px" }}>
         What it's made of
       </div>
@@ -144,6 +183,113 @@ export function RingDetailSheet({ C, open, onClose, which, today }: RingDetailSh
         </div>
       ))}
     </Sheet>
+  );
+}
+
+function SleepQualityBadge({
+  C,
+  flag,
+  reasons,
+}: {
+  C: Palette;
+  flag: SleepQualityFlag;
+  reasons: string[];
+}) {
+  const label =
+    flag === "truncated"
+      ? "Incomplete night"
+      : flag === "partial"
+      ? "Partial data"
+      : flag === "missing"
+      ? "No sleep data"
+      : "Quality flag";
+  const why = reasons.includes("no_wrist_temp")
+    ? "Watch wasn't detected on your wrist — sleep totals may be missing."
+    : reasons.includes("stages_dont_sum")
+    ? "Sleep stages don't add up to the time in bed — HealthKit returned a partial window."
+    : reasons.includes("segments_short_span")
+    ? "Sleep segments cover less time than the reported total."
+    : "Sleep data looks incomplete. Score uses only HRV and resting pulse tonight.";
+  return (
+    <div
+      style={{
+        background: `${C.warn}18`,
+        border: `1px solid ${C.warn}55`,
+        borderRadius: 10,
+        padding: "8px 12px",
+        margin: "0 4px 10px",
+        fontSize: 11.5,
+        color: C.t2,
+        lineHeight: 1.4,
+      }}
+    >
+      <span style={{ color: C.warn, fontWeight: 700, marginRight: 6 }}>{label}</span>
+      {why}
+    </div>
+  );
+}
+
+function Hypnogram({ C, segments }: { C: Palette; segments: SleepSegment[] }) {
+  const sorted = [...segments].sort((a, b) => a.start.localeCompare(b.start));
+  if (sorted.length === 0) return null;
+  const total = sorted.reduce((sum, s) => sum + s.dur_min, 0);
+  if (total <= 0) return null;
+  const stageColor = (stage: SleepSegment["stage"]): string => {
+    switch (stage) {
+      case "deep":
+        return "#3b5cff";
+      case "rem":
+        return C.purple;
+      case "core":
+        return C.cyan;
+      case "awake":
+        return C.warn;
+      case "in_bed":
+        return C.t4;
+      default:
+        return C.t4;
+    }
+  };
+  return (
+    <div style={{ padding: "0 4px 14px" }}>
+      <div
+        style={{
+          fontSize: 11,
+          color: C.t3,
+          textTransform: "uppercase",
+          letterSpacing: ".12em",
+          fontWeight: 700,
+          marginBottom: 6,
+        }}
+      >
+        Sleep stages through the night
+      </div>
+      <div style={{ display: "flex", height: 26, borderRadius: 6, overflow: "hidden" }}>
+        {sorted.map((seg, i) => (
+          <div
+            key={i}
+            title={`${seg.stage} · ${Math.round(seg.dur_min)}m`}
+            style={{
+              width: `${(seg.dur_min / total) * 100}%`,
+              background: stageColor(seg.stage),
+            }}
+          />
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 10, marginTop: 6, flexWrap: "wrap", fontSize: 10, color: C.t4 }}>
+        {[
+          { label: "Deep", color: "#3b5cff" },
+          { label: "REM", color: C.purple },
+          { label: "Core", color: C.cyan },
+          { label: "Awake", color: C.warn },
+        ].map(({ label, color }) => (
+          <span key={label} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: color }} />
+            {label}
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }
 

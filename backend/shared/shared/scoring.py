@@ -373,14 +373,23 @@ def compute_sleep_score(
     duration_target_min: int = 450,
     efficiency_floor: float = 80.0,
     efficiency_ceiling: float = 95.0,
+    continuity_idx: Optional[float] = None,
 ) -> int:
     """Standalone sleep performance score 0-100.
-    Weights mirror Oura's published breakdown (35/25/20/20).
+
+    Two weighting modes:
+      - Legacy (Oura 35/25/20/20) when `continuity_idx` is None — preserved
+        so older callers and pre-segment sleep rows still score consistently.
+      - 5-component (30/20/15/15/20) when `continuity_idx` is provided —
+        Bevel/Whoop-style "restorative + disturbances" model. Continuity
+        replaces some duration + efficiency weight because it captures
+        arousal fragmentation that those two miss.
 
       Duration:    0 at (target - 2h), 100 at target (default 7.5h)
       Efficiency:  0 at 80%, 100 at 95%
       Deep:        target 60 min
       REM:         target 90 min
+      Continuity:  0-100 scalar from compute (arousal density + onset)
 
     Default target 450 min matches DEFAULT_BASELINES.sleep_min and
     compute_sleep_need.base_min — all three agree on 7.5h for Mateo.
@@ -390,7 +399,10 @@ def compute_sleep_score(
     eff = _clamp(0, 100, ((efficiency - efficiency_floor) / eff_range) * 100)
     deep = _clamp(0, 100, (deep_min / 60) * 100)
     rem = _clamp(0, 100, (rem_min / 90) * 100)
-    return int(round(0.35 * dur + 0.25 * eff + 0.20 * deep + 0.20 * rem))
+    if continuity_idx is None:
+        return int(round(0.35 * dur + 0.25 * eff + 0.20 * deep + 0.20 * rem))
+    cont = _clamp(0, 100, continuity_idx)
+    return int(round(0.30 * dur + 0.20 * eff + 0.15 * deep + 0.15 * rem + 0.20 * cont))
 
 
 # ─── ACWR (Gabbett 2016 acute:chronic workload ratio) ─────────────────

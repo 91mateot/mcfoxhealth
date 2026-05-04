@@ -15,6 +15,12 @@ from datetime import datetime, timedelta, timezone
 from shared.db import get_table, put_item, get_item, query_items
 from shared.insight_templates import PAIRS as NUMERIC_PAIRS, confidence_tier, render_insight
 from shared.pearson import linreg, pearson_r
+from shared.sleep_quality import (
+    arousal_count_from_segments,
+    continuity_index,
+    evaluate_quality as _eval_sleep_quality,
+    onset_min_from_segments,
+)
 from shared.lift_compute import (
     detect_prs as _detect_prs_shared,
     detect_stall as _detect_stall_shared,
@@ -173,14 +179,15 @@ def _compute_day(date_str):
     rem_min = 0
     core_min = 0
     awake_min = 0
-
-    if sleep_item:
-        sleep_min = sleep_item.get("total_min", 0)
-        sleep_eff = sleep_item.get("efficiency", 0)
-        deep_min = sleep_item.get("deep_min", 0)
-        rem_min = sleep_item.get("rem_min", 0)
-        core_min = sleep_item.get("core_min", 0)
-        awake_min = sleep_item.get("awake_min", 0)
+    segments = []
+    sleep_quality_flag = "missing"
+    sleep_quality_reasons: list = []
+    sleep_confidence = 0.0
+    arousal_count = None
+    onset_min = None
+    continuity_idx_val = None
+    avg_hr_sleep = None
+    min_hr_sleep = None
 
     resp_item = metric_map.get("resp#hae") or metric_map.get("resp#manual")
     resp = resp_item["value"] if resp_item else None
@@ -191,16 +198,56 @@ def _compute_day(date_str):
     wrist_temp_item = metric_map.get("wrist_temp#hae")
     wrist_temp = wrist_temp_item["value"] if wrist_temp_item else None
 
+    if sleep_item:
+        sleep_min = sleep_item.get("total_min", 0)
+        sleep_eff = sleep_item.get("efficiency", 0)
+        deep_min = sleep_item.get("deep_min", 0)
+        rem_min = sleep_item.get("rem_min", 0)
+        core_min = sleep_item.get("core_min", 0)
+        awake_min = sleep_item.get("awake_min", 0)
+        segments = sleep_item.get("segments") or []
+
+        # Re-run quality with the stricter wrist-temp check now that we
+        # have the sibling metric row available. This can downgrade a row
+        # that ingest optimistically flagged "ok".
+        q = _eval_sleep_quality(sleep_item, has_wrist_temp_today=(wrist_temp is not None))
+        sleep_quality_flag = q["quality_flag"]
+        sleep_quality_reasons = q["quality_reasons"]
+        sleep_confidence = q["confidence"]
+
+        if segments:
+            arousal_count = arousal_count_from_segments(segments)
+            onset_min = onset_min_from_segments(segments)
+            continuity_idx_val = continuity_index(arousal_count, float(sleep_min or 0))
+
+        # Sleep-window HR: intersect per-sample HR with sleep_start/sleep_end
+        # when both are available. Falls back cleanly to None otherwise.
+        hr_samples_item = metric_map.get("hr#hae_samples")
+        sleep_start = sleep_item.get("sleep_start")
+        sleep_end = sleep_item.get("sleep_end")
+        if hr_samples_item and sleep_start and sleep_end:
+            avg_hr_sleep, min_hr_sleep = _sleep_window_hr_stats(
+                hr_samples_item.get("samples") or [],
+                sleep_start,
+                sleep_end,
+            )
+
     scoring_config = _get_scoring_config()
     weights = scoring_config.get("recovery_weights") if scoring_config else None
+
+    # When sleep quality is truncated/missing, pass None to compute_recovery so
+    # its existing weight-redistribution path at scoring.py:227 treats sleep
+    # as missing rather than feeding a broken 0/low value into the composite.
+    sleep_min_for_recovery = sleep_min if sleep_quality_flag in ("ok", "partial") else None
+    sleep_eff_for_recovery = sleep_eff if sleep_quality_flag in ("ok", "partial") else None
 
     recovery_result = None
     if hrv is not None or rhr is not None:
         recovery_result = compute_recovery(
             hrv=hrv,
             rhr=rhr,
-            sleep_min=sleep_min,
-            sleep_efficiency=sleep_eff,
+            sleep_min=sleep_min_for_recovery,
+            sleep_efficiency=sleep_eff_for_recovery,
             resp=resp,
             spo2=spo2,
             wrist_temp=wrist_temp,
@@ -209,8 +256,11 @@ def _compute_day(date_str):
         )
 
     sleep_score_val = None
-    if sleep_min > 0:
-        sleep_score_val = compute_sleep_score(sleep_min, sleep_eff, deep_min, rem_min)
+    if sleep_min > 0 and sleep_quality_flag in ("ok", "partial"):
+        sleep_score_val = compute_sleep_score(
+            sleep_min, sleep_eff, deep_min, rem_min,
+            continuity_idx=continuity_idx_val,
+        )
 
     workouts = query_items(workouts_table, "date", date_str)
     strain_coef = (scoring_config or {}).get("strain_coefficient", 2.0)
@@ -284,14 +334,28 @@ def _compute_day(date_str):
     score_item["caffeine_total"] = caffeine_total
 
     if sleep_item:
-        score_item["sleep"] = {
+        sleep_block = {
             "total_min": sleep_min,
             "efficiency": sleep_eff,
             "deep_min": deep_min,
             "rem_min": rem_min,
             "core_min": core_min,
             "awake_min": awake_min,
+            "quality_flag": sleep_quality_flag,
+            "quality_reasons": sleep_quality_reasons,
+            "confidence": sleep_confidence,
         }
+        if arousal_count is not None:
+            sleep_block["arousal_count"] = arousal_count
+        if onset_min is not None:
+            sleep_block["onset_min"] = onset_min
+        if continuity_idx_val is not None:
+            sleep_block["continuity_idx"] = continuity_idx_val
+        if avg_hr_sleep is not None:
+            sleep_block["avg_hr_sleep"] = avg_hr_sleep
+        if min_hr_sleep is not None:
+            sleep_block["min_hr_sleep"] = min_hr_sleep
+        score_item["sleep"] = sleep_block
 
     put_item(scores_table, score_item)
 
@@ -678,15 +742,13 @@ def _get_sleep_history(date_str, days=30):
     return rows
 
 
-def _parse_wake_hour(ts):
-    """Extract decimal hour-of-day (local) from a timestamp string."""
+def _parse_hae_ts(ts):
+    """Parse an HAE timestamp string into a datetime. Returns None on bad
+    input. HAE emits 'YYYY-MM-DD HH:MM:SS -0700'; ISO forms also accepted."""
     if not ts:
         return None
     try:
-        # Accept both "2026-04-30 09:07:13 -0700" and ISO formats.
         s = str(ts).strip()
-        # Normalize the HealthAutoExport format to ISO-ish for fromisoformat.
-        # "2026-04-30 09:07:13 -0700" → "2026-04-30T09:07:13-07:00"
         if " " in s and "T" not in s:
             parts = s.split(" ")
             date_part = parts[0]
@@ -694,16 +756,46 @@ def _parse_wake_hour(ts):
             tz_part = ""
             if len(parts) >= 3:
                 tz = parts[2]
-                # "-0700" → "-07:00"
                 if len(tz) == 5 and tz[0] in "+-":
                     tz_part = tz[:3] + ":" + tz[3:]
                 else:
                     tz_part = tz
             s = f"{date_part}T{time_part}{tz_part}"
-        parsed = datetime.fromisoformat(s)
-        return parsed.hour + parsed.minute / 60
+        return datetime.fromisoformat(s)
     except Exception:
         return None
+
+
+def _parse_wake_hour(ts):
+    """Extract decimal hour-of-day (local) from a timestamp string."""
+    parsed = _parse_hae_ts(ts)
+    if parsed is None:
+        return None
+    return parsed.hour + parsed.minute / 60
+
+
+def _sleep_window_hr_stats(samples: list, sleep_start: str, sleep_end: str):
+    """Intersect per-sample HR readings with the [sleep_start, sleep_end]
+    window and return (avg_hr, min_hr) rounded to 1 decimal. Returns
+    (None, None) when fewer than 5 in-window samples exist — too sparse
+    to trust. Mirrors what Bevel/Whoop expose as "sleeping heart rate"."""
+    start = _parse_hae_ts(sleep_start)
+    end = _parse_hae_ts(sleep_end)
+    if start is None or end is None:
+        return None, None
+    in_window = []
+    for s in samples or []:
+        ts = _parse_hae_ts(s.get("ts"))
+        if ts is None:
+            continue
+        if start <= ts <= end:
+            try:
+                in_window.append(float(s.get("bpm") or 0))
+            except (ValueError, TypeError):
+                continue
+    if len(in_window) < 5:
+        return None, None
+    return round(sum(in_window) / len(in_window), 1), round(min(in_window), 1)
 
 
 # ─── Scoring config loader (hot-swappable via user-config) ──────────────

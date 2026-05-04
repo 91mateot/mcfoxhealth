@@ -26,6 +26,7 @@ logger.setLevel(logging.INFO)
 
 from shared.db import get_table, put_item, query_items
 from shared.scoring import compute_trimp, compute_strain, classify_hr_zone, estimate_strain_simple, HR_ZONES, MAX_HR
+from shared.sleep_quality import evaluate_quality as _eval_sleep_quality
 from shared.timezone import local_today_str
 
 secrets_client = boto3.client("secretsmanager")
@@ -271,15 +272,22 @@ def _handle_hae_metrics_array(data_list):
                 d = _coerce_date(anchor)
                 if not d:
                     continue
+                start_ts = p.get("startDate") or p.get("sleepStart") or p.get("date")
+                end_ts = p.get("endDate") or p.get("sleepEnd")
                 dur = (
                     p.get("duration_min")
                     or p.get("duration")
                     or (float(p.get("qty", 0)) * 60 if p.get("qty") else None)
-                    or _minutes_between(p.get("startDate") or p.get("sleepStart"), p.get("endDate") or p.get("sleepEnd"))
+                    or _minutes_between(start_ts, end_ts)
                     or 0
                 )
                 value = p.get("value") or p.get("type") or p.get("stage") or ""
-                by_date.setdefault(d, []).append({"value": value, "duration_min": float(dur)})
+                by_date.setdefault(d, []).append({
+                    "value": value,
+                    "duration_min": float(dur),
+                    "startDate": start_ts,
+                    "endDate": end_ts,
+                })
             for d, segs in by_date.items():
                 item = _normalize_sleep(segs, d)
                 if item:
@@ -295,10 +303,13 @@ def _handle_hae_metrics_array(data_list):
 
         # Triple expansion: HAE exports heart_rate entries with Min/Avg/Max per day.
         # Emit three rows: hr_min#hae, hr_avg#hae, hr_max#hae (metric_source "hr#hae" becomes the prefix).
+        # Also opportunistically collect per-sample HR points (timestamp + qty)
+        # into a sidecar row so compute can intersect with the sleep window.
         if kind == "triple":
             prefix = metric_source.rsplit("#", 1)[0]  # "hr"
             src_suffix = metric_source.split("#", 1)[1]  # "hae"
             by_date_triple = {}
+            by_date_samples = {}  # date → [{ts, bpm}] — only populated if HAE sends per-sample HR
             for p in points:
                 d = _coerce_date(p.get("date") or p.get("startDate") or p.get("endDate") or "")
                 if not d:
@@ -314,14 +325,23 @@ def _handle_hae_metrics_array(data_list):
                         slot[slot_key].append(float(v))
                     except (ValueError, TypeError):
                         continue
-                # Single-value fallback (older HAE exports)
+                # Single-value fallback. Two cases collapse here:
+                #  - old HAE without Min/Avg/Max → treat as daily avg (original behavior)
+                #  - new HAE per-sample export → each point has its own timestamp.
+                # We tell them apart by checking whether date carries a clock
+                # component (per-sample rows have timestamps like
+                # "2026-05-03 23:45:10", daily rows are just "2026-05-03").
                 if not any(p.get(k) is not None for k in ("Min", "min", "Avg", "avg", "Max", "max")):
                     q = p.get("qty") or p.get("value")
                     if q is not None:
                         try:
-                            slot["avg"].append(float(q))
+                            val = float(q)
+                            slot["avg"].append(val)
                         except (ValueError, TypeError):
-                            pass
+                            val = None
+                        ts = p.get("date") or p.get("startDate") or ""
+                        if val is not None and isinstance(ts, str) and len(ts) > 10:
+                            by_date_samples.setdefault(d, []).append({"ts": ts, "bpm": round(val, 1)})
             for d, slots in by_date_triple.items():
                 for slot_key, vals in slots.items():
                     if not vals:
@@ -341,6 +361,22 @@ def _handle_hae_metrics_array(data_list):
                     })
                     items_written += 1
                     latest_date = max(latest_date or d, d)
+            # Per-sample sidecar for heart rate. Only written when HAE actually
+            # sends per-sample points (many timestamps/day); otherwise empty.
+            # Compute intersects these with the sleep window for avg_hr_sleep.
+            for d, samples in by_date_samples.items():
+                if len(samples) < 5:
+                    # Fewer than 5 timestamped samples in a day isn't worth
+                    # storing — probably a single summary point misidentified.
+                    continue
+                put_item(table, {
+                    "date": d,
+                    "metric_source": f"{prefix}#hae_samples",
+                    "samples": samples,
+                    "ingested_at": _now_iso(),
+                })
+                items_written += 1
+                latest_date = max(latest_date or d, d)
             continue
 
         # Standard numeric aggregation (avg / sum_int / sum / last)
@@ -445,7 +481,14 @@ def _minutes_between(start, end):
 
 
 def _normalize_sleep(sleep, date_str):
-    """Normalize HAE sleep data into a single health-metrics item."""
+    """Normalize HAE sleep data into a single health-metrics item.
+
+    Accepts two shapes:
+      - dict: already-aggregated stage totals (used by internal callers)
+      - list: per-segment records from HAE unaggregated mode, with
+        start/end timestamps. Segment objects are preserved on the
+        returned row so compute can derive arousal count + onset latency.
+    """
     item = {
         "date": date_str,
         "metric_source": "sleep#hae",
@@ -464,21 +507,40 @@ def _normalize_sleep(sleep, date_str):
         item["efficiency"] = round((total / in_bed) * 100, 1) if in_bed > 0 else 0
     elif isinstance(sleep, list):
         stage_totals = {"deep": 0, "rem": 0, "core": 0, "awake": 0, "inBed": 0, "asleep": 0}
+        segments = []
         for entry in sleep:
-            val = entry.get("value", "").lower().replace(" ", "")
+            raw_val = entry.get("value", "")
+            val = raw_val.lower().replace(" ", "")
             dur = entry.get("duration_min", entry.get("duration", 0))
             if "deep" in val:
                 stage_totals["deep"] += dur
+                stage = "deep"
             elif "rem" in val:
                 stage_totals["rem"] += dur
+                stage = "rem"
             elif "core" in val or "light" in val:
                 stage_totals["core"] += dur
+                stage = "core"
             elif "awake" in val:
                 stage_totals["awake"] += dur
+                stage = "awake"
             elif "inbed" in val:
                 stage_totals["inBed"] += dur
+                stage = "in_bed"
             elif "asleep" in val:
                 stage_totals["asleep"] += dur
+                stage = "asleep"
+            else:
+                continue
+            start = entry.get("start") or entry.get("startDate") or entry.get("sleepStart")
+            end = entry.get("end") or entry.get("endDate") or entry.get("sleepEnd")
+            if start:
+                segments.append({
+                    "start": str(start),
+                    "end": str(end) if end else None,
+                    "stage": stage,
+                    "dur_min": round(float(dur), 1),
+                })
 
         total = stage_totals["deep"] + stage_totals["rem"] + stage_totals["core"]
         if stage_totals["asleep"] and not total:
@@ -492,9 +554,12 @@ def _normalize_sleep(sleep, date_str):
         in_bed = stage_totals["inBed"] or (total + stage_totals["awake"])
         item["in_bed_min"] = round(in_bed)
         item["efficiency"] = round((total / in_bed) * 100, 1) if in_bed > 0 else 0
+        if segments:
+            item["segments"] = segments
     else:
         return None
 
+    _stamp_quality(item)
     return item
 
 
@@ -517,7 +582,7 @@ def _normalize_sleep_aggregated(p, date_str):
     if not (total_min or deep_min or rem_min or core_min):
         return None
 
-    return {
+    item = {
         "date": date_str,
         "metric_source": "sleep#hae",
         "total_min": total_min,
@@ -532,6 +597,25 @@ def _normalize_sleep_aggregated(p, date_str):
         "sleep_end": p.get("sleepEnd"),
         "ingested_at": _now_iso(),
     }
+    _stamp_quality(item)
+    return item
+
+
+def _stamp_quality(item: dict) -> None:
+    """Attach quality_flag, quality_reasons, confidence to a sleep row
+    built by one of the normalizers. Mutates in place.
+
+    We can't query the wrist-temp table from inside ingest (the caller
+    processes metrics in a single pass and the wrist-temp row may or may
+    not have been written yet). So we trust-but-verify here: assume
+    watch-was-on-wrist unless segments clearly contradict. Compute later
+    re-checks against the actual wrist-temp row and can downgrade a row
+    that passed ingest but fails the stricter daily check.
+    """
+    q = _eval_sleep_quality(item, has_wrist_temp_today=True)
+    item["quality_flag"] = q["quality_flag"]
+    item["quality_reasons"] = q["quality_reasons"]
+    item["confidence"] = q["confidence"]
 
 
 def _handle_withings(event):

@@ -62,6 +62,32 @@ def test_apr_25_sleep_exceeds_need():
     assert 94 <= score <= 99, f"Apr 25 sleep score {score} outside 94-99 band"
 
 
+def test_sleep_score_back_compat_without_continuity():
+    """Old callers that don't pass continuity_idx still use the 4-component
+    Oura weighting (35/25/20/20). Behavior unchanged from pre-rebuild."""
+    legacy = compute_sleep_score(450, 93, 90, 100)
+    # Expected legacy formula: 0.35*100 + 0.25*86.67 + 0.20*100 + 0.20*100
+    # = 35 + 21.67 + 20 + 20 ≈ 96.67 → rounds to 97
+    assert 94 <= legacy <= 99
+
+
+def test_sleep_score_5component_rewards_continuity():
+    """With continuity_idx provided, the 5-component weighting kicks in.
+    A fragmented night scores lower than a continuous one at the same
+    duration/efficiency/stages."""
+    continuous = compute_sleep_score(450, 93, 90, 100, continuity_idx=100)
+    fragmented = compute_sleep_score(450, 93, 90, 100, continuity_idx=40)
+    assert continuous > fragmented
+
+
+def test_sleep_score_fragmented_short_night_low():
+    """Short + fragmented night (e.g., 4.5h with 4 arousals) scores in the
+    low-middle band, not a flat zero — the old duration-dominated formula
+    would have tanked it harder."""
+    score = compute_sleep_score(270, 80, 40, 50, continuity_idx=60)
+    assert 20 <= score <= 60
+
+
 def test_apr_25_matches_whoop_proxy_strain():
     """Apr 25 strain target 10.2 ±1. Pull day (TRIMP ~100) + walk (TRIMP ~30) = ~130.
     With A=2.0: 2 * ln(131) ~= 9.75, rounds to 9.8 — within tolerance of 10.2."""

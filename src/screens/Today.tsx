@@ -90,14 +90,22 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
         <StrainRing C={C} data={data} onClick={() => onRingTap("strain")} />
         <BigRing
           C={C}
-          val={data.sleep.score}
+          val={data.sleep.qualityFlag === "truncated" ? 0 : data.sleep.score}
           max={100}
-          color={C.cyan}
+          color={data.sleep.qualityFlag === "truncated" ? C.t3 : C.cyan}
           label="Sleep"
-          display={data.sleep.score}
-          unit={`${data.sleep.hours}h ${data.sleep.minutes}m`}
-          tag={data.sleep.score >= 80 ? "Solid" : data.sleep.score >= 60 ? "Ok" : "Low"}
-          tagC={C.cyan}
+          display={data.sleep.qualityFlag === "truncated" ? "—" : data.sleep.score}
+          unit={data.sleep.qualityFlag === "truncated" ? "incomplete" : `${data.sleep.hours}h ${data.sleep.minutes}m`}
+          tag={
+            data.sleep.qualityFlag === "truncated"
+              ? "Data"
+              : data.sleep.score >= 80
+              ? "Solid"
+              : data.sleep.score >= 60
+              ? "Ok"
+              : "Low"
+          }
+          tagC={data.sleep.qualityFlag === "truncated" ? C.t3 : C.cyan}
           onClick={() => onRingTap("sleep")}
         />
       </div>

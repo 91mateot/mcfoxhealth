@@ -26,6 +26,16 @@ export interface StrainTarget {
   reason: string;
 }
 
+export type SleepQualityFlag = "ok" | "partial" | "truncated" | "missing";
+
+export interface SleepSegment {
+  /** HAE timestamp e.g. "2026-05-03 23:30:00 -0700". Preserved verbatim. */
+  start: string;
+  end?: string | null;
+  stage: "deep" | "rem" | "core" | "awake" | "in_bed" | "asleep";
+  dur_min: number;
+}
+
 export interface SleepStages {
   score: number;
   hours: number;
@@ -35,6 +45,16 @@ export interface SleepStages {
   rem: number;
   core: number;
   awake: number;
+  /** Band-2 additions. Optional for back-compat with older score rows. */
+  qualityFlag?: SleepQualityFlag;
+  qualityReasons?: string[];
+  confidence?: number;
+  arousalCount?: number;
+  onsetMin?: number;
+  continuityIdx?: number;
+  avgHrSleep?: number;
+  minHrSleep?: number;
+  segments?: SleepSegment[];
 }
 
 export interface SleepNeed {
