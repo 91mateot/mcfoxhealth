@@ -991,6 +991,8 @@ def _get_latest_conversation():
             "t": m.get("t", ""),
             "text": m.get("text", ""),
         }
+        if m.get("id"):
+            row["id"] = m["id"]
         if m.get("imgCount"):
             row["imgCount"] = int(m["imgCount"])
         messages.append(row)
@@ -1041,6 +1043,8 @@ def _get_conversation_by_id(conversation_id):
             "t": m.get("t", ""),
             "text": m.get("text", ""),
         }
+        if m.get("id"):
+            row["id"] = m["id"]
         if m.get("imgCount"):
             row["imgCount"] = int(m["imgCount"])
         messages.append(row)

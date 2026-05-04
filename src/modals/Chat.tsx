@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { mutate } from "swr";
 import { FONT, MONO, type Palette } from "../theme";
 import type { ChatImage, ChatMessage, ConversationListItem, TodayResponse } from "../types";
@@ -9,6 +9,7 @@ import {
   fetchConversationById,
   fetchConversationList,
   fetchLatestConversation,
+  submitFeedback,
   todayISO,
 } from "../api";
 import { compressImage } from "../lib/images";
@@ -50,6 +51,42 @@ function relativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+interface ThumbButtonProps {
+  C: Palette;
+  active: boolean;
+  dim?: boolean | string;
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}
+
+function ThumbButton({ C, active, dim, label, onClick, children }: ThumbButtonProps) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      style={{
+        background: active ? C.s2 : "transparent",
+        border: `1px solid ${active ? C.primary : C.border}`,
+        borderRadius: 14,
+        width: 28,
+        height: 24,
+        padding: 0,
+        fontSize: 12,
+        lineHeight: 1,
+        cursor: "pointer",
+        opacity: dim ? 0.4 : 1,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalProps) {
   const [msgs, setMsgs] = useState<ChatMessage[]>(() => [DEFAULT_GREETING()]);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -64,6 +101,8 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [openingThreadId, setOpeningThreadId] = useState<string | null>(null);
+  const [feedbackNoteFor, setFeedbackNoteFor] = useState<string | null>(null);
+  const [feedbackNoteText, setFeedbackNoteText] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -214,10 +253,16 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
 
     const replyStamp = nowStamp();
     let streamed = "";
-    let started = false;
+    let replyId: string | null = null;
 
     const controller = new AbortController();
     abortRef.current = controller;
+
+    const renderReply = () => {
+      const reply: ChatMessage = { from: "coach", t: replyStamp, text: streamed };
+      if (replyId) reply.id = replyId;
+      setMsgs([...next, reply]);
+    };
 
     try {
       await askCoachStream(
@@ -225,16 +270,15 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
         today,
         (chunk) => {
           streamed += chunk;
-          if (!started) {
-            started = true;
-            setMsgs([...next, { from: "coach", t: replyStamp, text: streamed }]);
-          } else {
-            setMsgs([...next, { from: "coach", t: replyStamp, text: streamed }]);
-          }
+          renderReply();
         },
         {
           conversationId,
           onConversationId: (id) => setConversationId(id),
+          onFeedbackId: (id) => {
+            replyId = id;
+            renderReply();
+          },
           signal: controller.signal,
         },
       );
@@ -258,6 +302,52 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
     } finally {
       setThinking(false);
       abortRef.current = null;
+    }
+  };
+
+  const applyFeedback = (msgId: string, next: "up" | "down" | undefined) => {
+    setMsgs((prev) =>
+      prev.map((m) => (m.id === msgId ? { ...m, feedback: next } : m)),
+    );
+  };
+
+  const handleThumb = async (msgId: string, signal: "up" | "down") => {
+    const current = msgs.find((m) => m.id === msgId)?.feedback;
+    const cleared = current === signal;
+    const next = cleared ? undefined : signal;
+    applyFeedback(msgId, next);
+
+    if (signal === "down" && !cleared) {
+      setFeedbackNoteFor(msgId);
+      setFeedbackNoteText("");
+    } else if (feedbackNoteFor === msgId) {
+      setFeedbackNoteFor(null);
+      setFeedbackNoteText("");
+    }
+
+    if (cleared) {
+      // No DELETE endpoint yet — a cleared vote is a local-only state; the
+      // last persisted signal will linger on the server until the user votes
+      // again. Acceptable for v1.
+      return;
+    }
+    try {
+      await submitFeedback(signal, "coach_msg", msgId);
+    } catch {
+      applyFeedback(msgId, current);
+    }
+  };
+
+  const submitFeedbackNote = async (msgId: string) => {
+    const note = feedbackNoteText.trim();
+    setFeedbackNoteFor(null);
+    setFeedbackNoteText("");
+    if (!note) return;
+    try {
+      await submitFeedback("down", "coach_msg", msgId, note);
+    } catch {
+      // Keep the thumbs-down signal even if the note upload fails —
+      // the vote itself already landed in an earlier submit.
     }
   };
 
@@ -436,84 +526,201 @@ export function ChatModal({ C, open, onClose, initialPrompt, today }: ChatModalP
       )}
 
       <div ref={scrollRef} style={{ padding: "6px 0 10px" }}>
-        {msgs.map((m, i) => (
-          <div
-            key={i}
-            style={{
-              display: "flex",
-              justifyContent: m.from === "me" ? "flex-end" : "flex-start",
-              marginBottom: 8,
-            }}
-          >
-            <div
-              style={{
-                maxWidth: "82%",
-                background: m.from === "me" ? C.primary : C.s,
-                color: m.from === "me" ? "#0a0a0a" : C.t,
-                border: m.from === "me" ? "none" : `1px solid ${C.border}`,
-                padding: m.images && m.images.length > 0 ? "6px 6px 9px" : "9px 13px",
-                borderRadius: m.from === "me" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
-                fontSize: 12.5,
-                lineHeight: 1.5,
-                fontWeight: m.from === "me" ? 600 : 500,
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {m.images && m.images.length > 0 && (
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: m.images.length === 1 ? "1fr" : "1fr 1fr",
-                    gap: 4,
-                    marginBottom: m.text ? 6 : 4,
-                  }}
-                >
-                  {m.images.map((img, j) => (
-                    <img
-                      key={j}
-                      src={img.dataUrl}
-                      alt=""
-                      style={{
-                        width: "100%",
-                        aspectRatio: "1 / 1",
-                        objectFit: "cover",
-                        borderRadius: 10,
-                        display: "block",
-                      }}
-                    />
-                  ))}
-                </div>
-              )}
-              {!(m.images && m.images.length > 0) && m.imgCount && m.imgCount > 0 && (
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontFamily: MONO,
-                    color: m.from === "me" ? "#0a0a0aa0" : C.t4,
-                    marginBottom: 4,
-                    fontStyle: "italic",
-                  }}
-                >
-                  📷 {m.imgCount} image{m.imgCount === 1 ? "" : "s"}
-                </div>
-              )}
-              {m.text && <div style={{ padding: m.images && m.images.length > 0 ? "0 7px" : 0 }}>{m.text}</div>}
+        {msgs.map((m, i) => {
+          const canRateCoach = m.from === "coach" && !!m.id && !!m.text;
+          const noteOpen = canRateCoach && feedbackNoteFor === m.id;
+          return (
+            <div key={i} style={{ marginBottom: 8 }}>
               <div
                 style={{
-                  fontSize: 11,
-                  fontFamily: MONO,
-                  color: m.from === "me" ? "#0a0a0aa0" : C.t4,
-                  marginTop: 4,
-                  fontWeight: 500,
-                  textAlign: m.from === "me" ? "right" : "left",
-                  padding: m.images && m.images.length > 0 ? "0 7px" : 0,
+                  display: "flex",
+                  justifyContent: m.from === "me" ? "flex-end" : "flex-start",
                 }}
               >
-                {m.t}
+                <div
+                  style={{
+                    maxWidth: "82%",
+                    background: m.from === "me" ? C.primary : C.s,
+                    color: m.from === "me" ? "#0a0a0a" : C.t,
+                    border: m.from === "me" ? "none" : `1px solid ${C.border}`,
+                    padding: m.images && m.images.length > 0 ? "6px 6px 9px" : "9px 13px",
+                    borderRadius: m.from === "me" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
+                    fontSize: 12.5,
+                    lineHeight: 1.5,
+                    fontWeight: m.from === "me" ? 600 : 500,
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {m.images && m.images.length > 0 && (
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: m.images.length === 1 ? "1fr" : "1fr 1fr",
+                        gap: 4,
+                        marginBottom: m.text ? 6 : 4,
+                      }}
+                    >
+                      {m.images.map((img, j) => (
+                        <img
+                          key={j}
+                          src={img.dataUrl}
+                          alt=""
+                          style={{
+                            width: "100%",
+                            aspectRatio: "1 / 1",
+                            objectFit: "cover",
+                            borderRadius: 10,
+                            display: "block",
+                          }}
+                        />
+                      ))}
+                    </div>
+                  )}
+                  {!(m.images && m.images.length > 0) && m.imgCount && m.imgCount > 0 && (
+                    <div
+                      style={{
+                        fontSize: 11,
+                        fontFamily: MONO,
+                        color: m.from === "me" ? "#0a0a0aa0" : C.t4,
+                        marginBottom: 4,
+                        fontStyle: "italic",
+                      }}
+                    >
+                      📷 {m.imgCount} image{m.imgCount === 1 ? "" : "s"}
+                    </div>
+                  )}
+                  {m.text && <div style={{ padding: m.images && m.images.length > 0 ? "0 7px" : 0 }}>{m.text}</div>}
+                  <div
+                    style={{
+                      fontSize: 11,
+                      fontFamily: MONO,
+                      color: m.from === "me" ? "#0a0a0aa0" : C.t4,
+                      marginTop: 4,
+                      fontWeight: 500,
+                      textAlign: m.from === "me" ? "right" : "left",
+                      padding: m.images && m.images.length > 0 ? "0 7px" : 0,
+                    }}
+                  >
+                    {m.t}
+                  </div>
+                </div>
               </div>
+              {canRateCoach && (
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 6,
+                    marginTop: 4,
+                    paddingLeft: 4,
+                    alignItems: "center",
+                  }}
+                >
+                  <ThumbButton
+                    C={C}
+                    active={m.feedback === "up"}
+                    dim={m.feedback && m.feedback !== "up"}
+                    label="Helpful"
+                    onClick={() => handleThumb(m.id!, "up")}
+                  >
+                    👍
+                  </ThumbButton>
+                  <ThumbButton
+                    C={C}
+                    active={m.feedback === "down"}
+                    dim={m.feedback && m.feedback !== "down"}
+                    label="Not helpful"
+                    onClick={() => handleThumb(m.id!, "down")}
+                  >
+                    👎
+                  </ThumbButton>
+                  {m.feedback && (
+                    <span style={{ fontSize: 10, fontFamily: MONO, color: C.t4 }}>
+                      {m.feedback === "up" ? "thanks" : "noted"}
+                    </span>
+                  )}
+                </div>
+              )}
+              {noteOpen && (
+                <div
+                  style={{
+                    marginTop: 6,
+                    background: C.s,
+                    border: `1px solid ${C.border}`,
+                    borderRadius: 12,
+                    padding: "8px 10px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                  }}
+                >
+                  <label style={{ fontSize: 11, fontFamily: MONO, color: C.t3 }}>
+                    What was off? (optional)
+                  </label>
+                  <input
+                    value={feedbackNoteText}
+                    onChange={(e) => setFeedbackNoteText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") submitFeedbackNote(m.id!);
+                      if (e.key === "Escape") {
+                        setFeedbackNoteFor(null);
+                        setFeedbackNoteText("");
+                      }
+                    }}
+                    placeholder="Too generic, wrong date, missed context…"
+                    autoFocus
+                    style={{
+                      background: "transparent",
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 8,
+                      padding: "6px 8px",
+                      color: C.t,
+                      fontFamily: FONT,
+                      fontSize: 12,
+                      outline: "none",
+                    }}
+                  />
+                  <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                    <button
+                      onClick={() => {
+                        setFeedbackNoteFor(null);
+                        setFeedbackNoteText("");
+                      }}
+                      style={{
+                        background: "transparent",
+                        border: `1px solid ${C.border}`,
+                        color: C.t2,
+                        padding: "4px 10px",
+                        borderRadius: 10,
+                        fontFamily: FONT,
+                        fontSize: 11,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Skip
+                    </button>
+                    <button
+                      onClick={() => submitFeedbackNote(m.id!)}
+                      style={{
+                        background: C.primary,
+                        border: "none",
+                        color: "#0a0a0a",
+                        padding: "4px 12px",
+                        borderRadius: 10,
+                        fontFamily: FONT,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Send
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
-          </div>
-        ))}
+          );
+        })}
         {thinking && (
           <div style={{ display: "flex", marginBottom: 8 }}>
             <div

@@ -144,6 +144,14 @@ export interface ChatMessage {
   from: "coach" | "me";
   t: string;
   text: string;
+  /** Stable id assigned server-side. Present on new messages and any
+   * message loaded from history after 2026-05. Older rows omit it. */
+  id?: string;
+  /** Current thumbs signal for this message. Kept client-side; not
+   * hydrated from the GET — we only track thumbs that were set during
+   * this session. Future reads could be added if aggregated feedback
+   * surfaces somewhere. */
+  feedback?: "up" | "down";
   /** Attached images — only user messages carry these. */
   images?: ChatImage[];
   /** Set on historical turns loaded from storage — bytes were stripped. */

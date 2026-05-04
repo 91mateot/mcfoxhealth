@@ -27,6 +27,7 @@ from shared.conversation_service import (
     messages_for_bedrock,
     append_turn,
     maybe_summarize,
+    new_message_id,
 )
 from shared.nutrition_service import (
     log_meal as svc_log_meal,
@@ -638,6 +639,9 @@ async def coach_endpoint(request: Request):
     persisted_history = messages_for_bedrock(thread)
     initial_history = persisted_history + latest_user_bedrock
 
+    user_msg_id = latest_user_raw.get("id") or new_message_id()
+    assistant_msg_id = new_message_id()
+
     def stream():
         history = list(initial_history)
         assistant_text_accum: list[str] = []
@@ -729,7 +733,8 @@ async def coach_endpoint(request: Request):
                     pass
 
             if stop_reason != "tool_use":
-                _persist_turn(thread, latest_user_raw, assistant_text_accum)
+                _persist_turn(thread, latest_user_raw, assistant_text_accum, user_msg_id, assistant_msg_id)
+                yield _feedback_trailer(assistant_msg_id)
                 return
 
             history.append({"role": "assistant", "content": assistant_content})
@@ -744,18 +749,26 @@ async def coach_endpoint(request: Request):
                     "content": json.dumps(result, default=str),
                 })
             if not tool_results:
-                _persist_turn(thread, latest_user_raw, assistant_text_accum)
+                _persist_turn(thread, latest_user_raw, assistant_text_accum, user_msg_id, assistant_msg_id)
+                yield _feedback_trailer(assistant_msg_id)
                 return
             history.append({"role": "user", "content": tool_results})
 
-        _persist_turn(thread, latest_user_raw, assistant_text_accum)
+        _persist_turn(thread, latest_user_raw, assistant_text_accum, user_msg_id, assistant_msg_id)
         yield "\n[coach: tool loop depth exceeded]"
+        yield _feedback_trailer(assistant_msg_id)
 
     headers = {"X-Conversation-Id": thread.get("conversation_id", "")}
     return StreamingResponse(stream(), media_type="text/plain", headers=headers)
 
 
-def _persist_turn(thread: dict, user_raw: dict, assistant_text_accum: list) -> None:
+def _persist_turn(
+    thread: dict,
+    user_raw: dict,
+    assistant_text_accum: list,
+    user_msg_id: str,
+    assistant_msg_id: str,
+) -> None:
     assistant_text = "".join(assistant_text_accum).strip()
     if not assistant_text and not (user_raw.get("text") or user_raw.get("images")):
         return
@@ -764,17 +777,30 @@ def _persist_turn(thread: dict, user_raw: dict, assistant_text_accum: list) -> N
         "t": user_raw.get("t", ""),
         "text": user_raw.get("text", ""),
         "images": user_raw.get("images") or [],
+        "id": user_msg_id,
     }
     assistant_msg = {
         "from": "coach",
         "t": _stamp_now(),
         "text": assistant_text,
+        "id": assistant_msg_id,
     }
     append_turn(thread, user_msg, assistant_msg)
     try:
         maybe_summarize(thread, bedrock, MODEL_ID)
     except Exception:
         logger.exception("maybe_summarize failed")
+
+
+# Sentinel the client strips before rendering. Frontend parses the tail of the
+# stream, extracts the assistant message id, and attaches it to the last bubble
+# so the thumbs UI can target it.
+_FEEDBACK_TRAILER_PREFIX = "\x1e<<FEEDBACK_ID:"
+_FEEDBACK_TRAILER_SUFFIX = ">>"
+
+
+def _feedback_trailer(msg_id: str) -> str:
+    return f"{_FEEDBACK_TRAILER_PREFIX}{msg_id}{_FEEDBACK_TRAILER_SUFFIX}"
 
 
 def _stamp_now() -> str:

@@ -20,6 +20,7 @@ Globals:
         CALIBRATION_TABLE: !Ref CalibrationTable
         EXERCISES_TABLE: !Ref ExercisesTable
         CONVERSATIONS_TABLE: !Ref ConversationsTable
+        FEEDBACK_TABLE: !Ref FeedbackTable
         SECRETS_ARN: !Ref SecretsArn
         INGEST_API_KEY: !Ref IngestApiKey
 
@@ -221,6 +222,33 @@ Resources:
         - AttributeName: user_id
           KeyType: HASH
         - AttributeName: conversation_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: by-updated
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: updated_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  FeedbackTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fitness-feedback
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: target_key
+          AttributeType: S
+        - AttributeName: updated_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: target_key
           KeyType: RANGE
       GlobalSecondaryIndexes:
         - IndexName: by-updated
@@ -469,6 +497,8 @@ Resources:
             TableName: !Ref ExercisesTable
         - DynamoDBCrudPolicy:
             TableName: !Ref DailyScoresTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref FeedbackTable
         - Statement:
             - Effect: Allow
               Action:
@@ -595,6 +625,12 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/calibration/reference
             Method: GET
+        PostFeedback:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/feedback
+            Method: POST
 
   CoachFunction:
     Type: AWS::Serverless::Function

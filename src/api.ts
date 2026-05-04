@@ -448,8 +448,17 @@ export async function fetchConversationById(id: string): Promise<LatestConversat
 export interface AskCoachOptions {
   conversationId?: string | null;
   onConversationId?: (id: string) => void;
+  /** Called once with the assistant message id when the coach emits its
+   * end-of-turn trailer. Use it to attach the id to the last coach bubble
+   * so thumbs feedback has a stable target. */
+  onFeedbackId?: (id: string) => void;
   signal?: AbortSignal;
 }
+
+// Mirrors backend/functions/coach/app.py:_feedback_trailer. The record-
+// separator prefix makes the marker impossible to collide with real
+// assistant text.
+const FEEDBACK_TRAILER_RE = /\x1e<<FEEDBACK_ID:([^>]+)>>\s*$/;
 
 export async function askCoachStream(
   messages: ChatMessage[],
@@ -487,17 +496,60 @@ export async function askCoachStream(
   const returnedId = res.headers.get("X-Conversation-Id") || res.headers.get("x-conversation-id");
   if (returnedId && opts?.onConversationId) opts.onConversationId(returnedId);
 
+  const emitBuffered = (buffer: string, flush: boolean): string => {
+    // Hold back the tail while a trailer might still be arriving. Once we
+    // see the full marker (or the stream ends), strip it and report the id.
+    if (flush) {
+      const match = FEEDBACK_TRAILER_RE.exec(buffer);
+      if (match) {
+        const visible = buffer.slice(0, match.index);
+        if (visible) onToken(visible);
+        if (opts?.onFeedbackId) opts.onFeedbackId(match[1]);
+        return "";
+      }
+      if (buffer) onToken(buffer);
+      return "";
+    }
+    // Not flushing yet: emit everything up to the last possible marker start.
+    const sep = buffer.lastIndexOf("\x1e");
+    if (sep === -1) {
+      if (buffer) onToken(buffer);
+      return "";
+    }
+    const emit = buffer.slice(0, sep);
+    if (emit) onToken(emit);
+    return buffer.slice(sep);
+  };
+
   if (!res.body) {
     const text = await res.text();
-    if (text) onToken(text);
+    emitBuffered(text, true);
     return;
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
+  let tail = "";
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
     const chunk = decoder.decode(value, { stream: true });
-    if (chunk) onToken(chunk);
+    if (!chunk) continue;
+    tail = emitBuffered(tail + chunk, false);
   }
+  emitBuffered(tail + decoder.decode(), true);
+}
+
+export async function submitFeedback(
+  signal: "up" | "down",
+  targetType: "coach_msg" | "proposal",
+  targetId: string,
+  note?: string,
+): Promise<{ ok: boolean }> {
+  const body: Record<string, unknown> = {
+    signal,
+    target_type: targetType,
+    target_id: targetId,
+  };
+  if (note && note.trim()) body.note = note.trim();
+  return post<{ ok: boolean }>("/api/feedback", body);
 }

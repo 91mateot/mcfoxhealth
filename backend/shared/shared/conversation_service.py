@@ -9,6 +9,7 @@ a turn threshold.
 import json
 import logging
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -40,6 +41,11 @@ def _parse_iso(s: str) -> Optional[datetime]:
 
 def _new_id() -> str:
     return f"conv_{int(time.time() * 1000)}"
+
+
+def new_message_id() -> str:
+    """Stable per-message ID used as a feedback target."""
+    return f"msg_{uuid.uuid4().hex[:16]}"
 
 
 def _blank_thread() -> dict:
@@ -162,6 +168,7 @@ def strip_images_for_storage(msg: dict) -> dict:
         "from": msg.get("from", "coach"),
         "t": msg.get("t", ""),
         "text": (msg.get("text") or "")[:8000],  # defensive truncation
+        "id": msg.get("id") or new_message_id(),
     }
     imgs = msg.get("images")
     if isinstance(imgs, list) and imgs:
