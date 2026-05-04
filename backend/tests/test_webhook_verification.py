@@ -178,6 +178,35 @@ def test_withings_rejects_unknown_userid_when_allowlist_set(monkeypatch):
     assert "ignored" in resp["body"]
 
 
+def test_withings_userid_key_matches_withings_native_field(monkeypatch):
+    """The secret written by Withings OAuth uses `userid` (not `user_id`).
+    Confirm the native key name is respected as an allowlist source."""
+    handler = _fresh_handler(monkeypatch)
+    monkeypatch.setattr(handler, "_get_secret", lambda _n: {
+        "access_token": "tok",
+        "expires_at": int(time.time()) + 3600,
+        "userid": "42",  # Withings-native snake-less casing
+    })
+    called = {"n": 0}
+
+    def fake_getmeas(_tok, _s, _e):
+        called["n"] += 1
+        return {"status": 0, "body": {"measuregrps": []}}
+
+    monkeypatch.setattr(handler, "_withings_getmeas", fake_getmeas)
+
+    event = {
+        "rawPath": "/ingest/withings",
+        "requestContext": {"http": {"method": "POST"}},
+        "headers": {"content-type": "application/x-www-form-urlencoded"},
+        "body": "userid=42&appli=1&startdate=1&enddate=2",
+        "isBase64Encoded": False,
+    }
+    resp = handler._handle_withings(event)
+    assert resp["statusCode"] == 200
+    assert called["n"] == 1  # passed the allowlist, reached getmeas
+
+
 def test_withings_accepts_when_no_allowlist_configured(monkeypatch):
     """Backwards-compat path: if the secret has no user_id/userids fields,
     we don't reject on userid (older deployments may not have recorded it)."""

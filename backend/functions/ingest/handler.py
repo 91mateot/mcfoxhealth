@@ -571,13 +571,16 @@ def _handle_withings(event):
     if not secret:
         return _resp(500, {"error": "missing withings credentials"})
 
-    # Userid allowlist — the secret may carry `user_id` or `userids` (list).
-    # Absent → skip the check (backwards-compatible; notification-drive flows
-    # without a linked user recorded still work). Present → reject mismatches.
+    # Userid allowlist — Withings puts the linked user on `userid` (Withings'
+    # own field name, kept verbatim in our secret by the OAuth handshake).
+    # We also accept `user_id` (snake-case) and `userids` (list) for flexibility.
+    # Absent → skip the check (backwards-compatible; older deploys without a
+    # recorded userid still work). Present → reject mismatches.
     notif_userid = str(body.get("userid") or "").strip()
     allowed: list[str] = []
-    if secret.get("user_id"):
-        allowed.append(str(secret["user_id"]))
+    for scalar_key in ("userid", "user_id"):
+        if secret.get(scalar_key):
+            allowed.append(str(secret[scalar_key]))
     if isinstance(secret.get("userids"), list):
         allowed.extend(str(u) for u in secret["userids"])
     if allowed and notif_userid and notif_userid not in allowed:
