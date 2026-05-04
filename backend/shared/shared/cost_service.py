@@ -85,13 +85,20 @@ def _reduce_services(totals: dict) -> list:
 def _ce_by_service(start: str, end: str, granularity: str = "MONTHLY") -> list:
     """Call Cost Explorer and return a list of {period_start, totals: {service: usd}}.
     Start is inclusive, end is exclusive (CE convention). Filtered to the
-    fitness-app service allowlist so co-tenant workloads don't pollute totals."""
+    fitness-app service allowlist AND the us-west-2 region so co-tenant
+    workloads don't pollute totals. The region filter is what keeps
+    us-east-1 CloudWatch VendedLog spend from other workloads out of here."""
     resp = _ce().get_cost_and_usage(
         TimePeriod={"Start": start, "End": end},
         Granularity=granularity,
         Metrics=["UnblendedCost"],
         GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
-        Filter={"Dimensions": {"Key": "SERVICE", "Values": FITNESS_APP_SERVICES}},
+        Filter={
+            "And": [
+                {"Dimensions": {"Key": "SERVICE", "Values": FITNESS_APP_SERVICES}},
+                {"Dimensions": {"Key": "REGION", "Values": ["us-west-2"]}},
+            ]
+        },
     )
     out = []
     for result in resp.get("ResultsByTime", []):

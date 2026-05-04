@@ -781,6 +781,8 @@ Resources:
             - AWS CloudTrail
             - Amazon Simple Storage Service
             - AWS Key Management Service
+          Region:
+            - us-west-2
       NotificationsWithSubscribers:
         - Notification:
             NotificationType: ACTUAL

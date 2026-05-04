@@ -75,12 +75,18 @@ def test_compute_costs_mtd_breakdown(monkeypatch):
     services = [b["service"] for b in out["month_to_date"]["breakdown"]]
     assert services == ["Bedrock", "Lambda", "DynamoDB"]
 
-    # Both calls should be service-filtered so co-tenant workloads don't pollute.
+    # Both calls should be filtered to fitness services AND us-west-2 so
+    # co-tenant workloads (esp. us-east-1 CloudWatch VendedLog) can't pollute.
     for call in captured:
-        filt = call.get("Filter", {}).get("Dimensions", {})
-        assert filt.get("Key") == "SERVICE"
-        assert "AWS Lambda" in filt.get("Values", [])
-        assert "Amazon Bedrock" in filt.get("Values", [])
+        clauses = call.get("Filter", {}).get("And", [])
+        dims = {
+            clause["Dimensions"]["Key"]: clause["Dimensions"]["Values"]
+            for clause in clauses
+            if "Dimensions" in clause
+        }
+        assert "AWS Lambda" in dims.get("SERVICE", [])
+        assert "Amazon Bedrock" in dims.get("SERVICE", [])
+        assert dims.get("REGION") == ["us-west-2"]
 
 
 def test_compute_costs_tail_bucketed_into_other(monkeypatch):
