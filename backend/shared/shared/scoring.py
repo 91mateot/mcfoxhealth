@@ -371,11 +371,14 @@ def compute_daily_strain(
 
 def compute_hr_dip_score(
     min_hr_sleep: Optional[float],
-    rhr_baseline: Optional[float],
+    rhr_reference: Optional[float],
 ) -> Optional[tuple]:
     """Nocturnal heart-rate dip score.
 
-    HR dip % = (rhr_baseline - min_hr_sleep) / rhr_baseline * 100.
+    HR dip % = (rhr_reference - min_hr_sleep) / rhr_reference * 100.
+    Callers should pass today's actual resting HR when available (Bevel's
+    framing — "how much lower than you were today") and fall back to the
+    rolling RHR baseline only when today's isn't reported.
     A larger dip = deeper parasympathetic state = better autonomic recovery.
 
     Curve anchored against Bevel's framing (16% dip labeled "Poor" on the
@@ -388,11 +391,11 @@ def compute_hr_dip_score(
     Returns (score_0_100, dip_pct) or None if inputs are missing or
     the "dip" would be negative (min HR ≥ baseline, data looks off).
     """
-    if min_hr_sleep is None or rhr_baseline is None or rhr_baseline <= 0:
+    if min_hr_sleep is None or rhr_reference is None or rhr_reference <= 0:
         return None
-    if min_hr_sleep >= rhr_baseline:
+    if min_hr_sleep >= rhr_reference:
         return None
-    dip_pct = (rhr_baseline - min_hr_sleep) / rhr_baseline * 100
+    dip_pct = (rhr_reference - min_hr_sleep) / rhr_reference * 100
     if dip_pct <= 10:
         score = _clamp(0, 100, (dip_pct / 10) * 0)  # flat 0 up to 10%
     elif dip_pct <= 16:

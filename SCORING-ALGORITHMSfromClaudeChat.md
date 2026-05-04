@@ -318,8 +318,13 @@ All component curves are linear with hard clamps:
 
 ### Heart Rate Dip component
 
-`compute_hr_dip_score(min_hr_sleep, rhr_baseline)` returns the nocturnal
-autonomic-recovery signal. Dip % = `(rhr_baseline − min_hr_sleep) / rhr_baseline × 100`.
+`compute_hr_dip_score(min_hr_sleep, rhr_reference)` returns the nocturnal
+autonomic-recovery signal. Dip % = `(rhr_reference − min_hr_sleep) / rhr_reference × 100`.
+
+The reference is **today's actual `rhr#hae`** when HAE reported one, falling
+back to the 14-day rolling baseline only when it didn't. This matches Bevel's
+"how much lower than you were today" framing rather than comparing against a
+stale baseline.
 
 Curve anchored to Bevel's observed labels (Mateo's 5/3 night: 16% dip → "Poor"
 on the night card, "Normal range" on the trend view):

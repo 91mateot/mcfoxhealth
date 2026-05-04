@@ -298,7 +298,12 @@ def _compute_day(date_str):
     # Sleep score — computed after sleep_need so duration grades against
     # the user's personal need (totalMin) rather than a fixed 7.5h target.
     duration_target_used = sleep_need.get("totalMin") or 450
-    hr_dip_result = compute_hr_dip_score(min_hr_sleep, baselines.get("rhr"))
+    # HR dip reference — use today's daytime RHR when HAE reported one, so
+    # the dip is "how much lower than you were today" rather than "how much
+    # lower than a stale 14-day baseline." Falls back to the baseline only
+    # when today's RHR is missing. Matches Bevel's framing.
+    dip_reference = rhr if rhr is not None else baselines.get("rhr")
+    hr_dip_result = compute_hr_dip_score(min_hr_sleep, dip_reference)
     if hr_dip_result is not None:
         hr_dip_idx_val, hr_dip_pct_val = hr_dip_result
 
