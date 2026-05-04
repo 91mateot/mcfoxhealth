@@ -199,8 +199,12 @@ def test_sleep_unaggregated_segments_parses():
         ]}
     ]}}), None)
     sleep = [i for i in t.items if i["metric_source"] == "sleep#hae"]
-    assert len(sleep) == 1  # grouped by sleepStart's date
+    assert len(sleep) == 1  # one session, keyed to wake-up morning
     s = sleep[0]
+    # Session crosses midnight — both segments land on the wake-up morning
+    # (4/18) under the new session-based keying, matching the aggregated
+    # convention. Previously these would have split: Deep → 4/17, REM → 4/18.
+    assert s["date"] == "2026-04-18"
     # qty is in hours, _normalize_sleep expects minutes — multiplied 60 in the parser
     assert s["deep_min"] == 90
     assert s["rem_min"] == 120
@@ -402,6 +406,56 @@ def test_unaggregated_sleep_partial_window_does_not_clobber_aggregated():
     # But segments should be enriched onto the preserved aggregated totals.
     assert latest.get("segments"), "segments should be attached even when merge preserves totals"
     assert len(latest["segments"]) == 3
+
+
+def test_overnight_segments_all_land_on_wake_morning():
+    """Regression: previously segments got keyed by sleepStart's date, so an
+    overnight crossing midnight would split — some segments to the pre-
+    midnight date, some to the post-midnight date — matching neither
+    Apple nor the aggregated row convention. Now they all share sleepStart
+    and land on the wake-up morning together."""
+    h, t = _fresh_module()
+    _patch_auth(h)
+    # Reproduces the 5/3→5/4 fan-out: stages spanning 23:30–05:00.
+    common_start = "2026-05-03 23:30:00 -0700"
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "sleep_analysis", "data": [
+            # 3 pre-midnight segments
+            {"value": "Core", "qty": 0.25,
+             "startDate": "2026-05-03 23:30:00 -0700",
+             "endDate":   "2026-05-03 23:45:00 -0700",
+             "sleepStart": common_start},
+            {"value": "Deep", "qty": 0.5,
+             "startDate": "2026-05-03 23:45:00 -0700",
+             "endDate":   "2026-05-04 00:15:00 -0700",
+             "sleepStart": common_start},
+            {"value": "Core", "qty": 0.2,
+             "startDate": "2026-05-04 00:15:00 -0700",
+             "endDate":   "2026-05-04 00:27:00 -0700",
+             "sleepStart": common_start},
+            # 3 post-midnight segments
+            {"value": "REM", "qty": 1.0,
+             "startDate": "2026-05-04 03:00:00 -0700",
+             "endDate":   "2026-05-04 04:00:00 -0700",
+             "sleepStart": common_start},
+            {"value": "Core", "qty": 1.5,
+             "startDate": "2026-05-04 00:27:00 -0700",
+             "endDate":   "2026-05-04 01:57:00 -0700",
+             "sleepStart": common_start},
+            {"value": "Deep", "qty": 1.0,
+             "startDate": "2026-05-04 01:57:00 -0700",
+             "endDate":   "2026-05-04 02:57:00 -0700",
+             "sleepStart": common_start},
+        ]}
+    ]}}), None)
+    sleep_rows = [i for i in t.items if i["metric_source"] == "sleep#hae"]
+    # Exactly one row — the whole session clusters onto the wake morning.
+    assert len(sleep_rows) == 1
+    s = sleep_rows[0]
+    assert s["date"] == "2026-05-04", f"expected wake-morning 5/4, got {s['date']}"
+    assert len(s.get("segments", [])) == 6
+    assert s["deep_min"] == 90   # 0.5h + 1.0h = 90m
+    assert s["rem_min"] == 60    # 1.0h
 
 
 def test_unaggregated_merge_carries_over_sleep_start_end():

@@ -263,17 +263,22 @@ def _handle_hae_metrics_array(data_list):
                         put_item(table, item)
                         items_written += 1
                         latest_date = max(latest_date or d, d)
-            # Collect per-stage segments (unaggregated) grouped by sleepStart's date
-            by_date = {}
+            # Group segments into sessions using HAE's own `sleepStart`
+            # field — every segment of the same overnight shares the same
+            # sleepStart timestamp, so it's the reliable session key. Then
+            # map each session to its wake-up morning (max endDate's date)
+            # so overnights that cross midnight land on one date key, not two.
+            # Falls back to gap-based clustering when sleepStart is absent
+            # (older HAE versions) with a generous 180-min threshold so real
+            # wake-ups inside a night don't split the session.
+            segs_raw = []
             for p in points:
                 if any(k in p for k in ("totalSleep", "asleep", "inBed")):
                     continue  # already handled above
-                anchor = p.get("sleepStart") or p.get("startDate") or p.get("date") or ""
-                d = _coerce_date(anchor)
-                if not d:
-                    continue
                 start_ts = p.get("startDate") or p.get("sleepStart") or p.get("date")
                 end_ts = p.get("endDate") or p.get("sleepEnd")
+                if not start_ts or not end_ts:
+                    continue
                 dur = (
                     p.get("duration_min")
                     or p.get("duration")
@@ -282,12 +287,50 @@ def _handle_hae_metrics_array(data_list):
                     or 0
                 )
                 value = p.get("value") or p.get("type") or p.get("stage") or ""
-                by_date.setdefault(d, []).append({
+                segs_raw.append({
                     "value": value,
                     "duration_min": float(dur),
                     "startDate": start_ts,
                     "endDate": end_ts,
+                    "sleepStart": p.get("sleepStart"),
                 })
+            # Cluster by sleepStart when present (preferred), falling back to
+            # gap-based clustering (180min threshold) for legacy shapes.
+            segs_raw.sort(key=lambda s: s.get("startDate") or "")
+            sessions_map = {}
+            gap_cluster = []
+            last_end_min = None
+            for seg in segs_raw:
+                key = seg.get("sleepStart")
+                if key:
+                    sessions_map.setdefault(key, []).append(seg)
+                    continue
+                # Legacy fallback: gap-based clustering.
+                start_min = _parse_ts_min(seg["startDate"])
+                end_min = _parse_ts_min(seg["endDate"])
+                if start_min is None or end_min is None:
+                    continue
+                if gap_cluster and last_end_min is not None and start_min - last_end_min > 180:
+                    sessions_map[f"_gap_{len(sessions_map)}"] = gap_cluster
+                    gap_cluster = []
+                gap_cluster.append(seg)
+                last_end_min = max(last_end_min or end_min, end_min)
+            if gap_cluster:
+                sessions_map[f"_gap_{len(sessions_map)}"] = gap_cluster
+            # Map each session to its wake-up morning.
+            by_date = {}
+            for session in sessions_map.values():
+                end_dates = [s["endDate"] for s in session if s.get("endDate")]
+                if not end_dates:
+                    continue
+                wake_date = _coerce_date(max(end_dates))
+                if not wake_date:
+                    continue
+                # If multiple sessions land on the same wake date (rare —
+                # e.g. a nap + a night), keep the longer one. The shorter
+                # gets dropped rather than merged to avoid garbled totals.
+                if wake_date not in by_date or len(session) > len(by_date[wake_date]):
+                    by_date[wake_date] = session
             for d, segs in by_date.items():
                 item = _normalize_sleep(segs, d)
                 if not item:
@@ -504,7 +547,19 @@ def _coerce_date(s):
 
 def _minutes_between(start, end):
     """Compute minute duration between two HAE datetime strings (various formats)."""
-    if not start or not end:
+    a = _parse_ts_min(start)
+    b = _parse_ts_min(end)
+    if a is None or b is None:
+        return None
+    return round(b - a)
+
+
+def _parse_ts_min(ts):
+    """Parse an HAE timestamp into an absolute minute count for ordering +
+    gap arithmetic. Returns None on unparseable input. Handles the 4 formats
+    HAE has shipped historically: naive local, ISO with zone, ISO Z, and
+    'YYYY-MM-DD HH:MM:SS ±HHMM'."""
+    if not ts or not isinstance(ts, str):
         return None
     fmts = [
         "%Y-%m-%d %H:%M:%S %z",
@@ -514,9 +569,8 @@ def _minutes_between(start, end):
     ]
     for fmt in fmts:
         try:
-            a = datetime.strptime(start, fmt)
-            b = datetime.strptime(end, fmt)
-            return round((b - a).total_seconds() / 60)
+            dt = datetime.strptime(ts, fmt)
+            return dt.timestamp() / 60
         except Exception:
             continue
     return None
