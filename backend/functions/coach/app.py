@@ -15,10 +15,11 @@ Tool loop:
 import json
 import logging
 import os
+import time
 from typing import Optional
 
 import boto3
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from shared.coach_context import build_system_prompt
@@ -55,6 +56,40 @@ logger.setLevel(logging.INFO)
 bedrock = boto3.client("bedrock-runtime", region_name="us-west-2")
 MODEL_ID = os.environ.get("COACH_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
 MAX_TOOL_ROUNDS = 6
+
+# x-api-key auth on the Function URL. The URL is AuthType=NONE + streaming,
+# so IAM/SigV4 isn't practical (browser can't sign). Custom header is viable
+# because the frontend streams via fetch+ReadableStream (not EventSource).
+# Lookup mirrors api/handler.py _verify_api_key: Secrets Manager first
+# (5-minute cache), env var fallback. Auth can be disabled by setting
+# COACH_AUTH_REQUIRED=0 for local runs.
+_secrets_client = boto3.client("secretsmanager", region_name="us-west-2")
+_api_key_cache = {"value": None, "ts": 0}
+_API_KEY_CACHE_TTL = 300
+
+
+def _load_api_key() -> str:
+    now = int(time.time())
+    if _api_key_cache["value"] is None or now - _api_key_cache["ts"] > _API_KEY_CACHE_TTL:
+        try:
+            resp = _secrets_client.get_secret_value(SecretId="fitness-api-key")
+            _api_key_cache["value"] = json.loads(resp["SecretString"]).get("api_key", "")
+        except Exception:
+            _api_key_cache["value"] = os.environ.get("INGEST_API_KEY", "")
+        _api_key_cache["ts"] = now
+    return _api_key_cache["value"] or ""
+
+
+def require_api_key(x_api_key: Optional[str] = Header(default=None, alias="x-api-key")) -> None:
+    """Verify the caller sent the shared API key. Streams are expensive (Bedrock
+    tokens), so auth runs before any Bedrock invocation. Bypass for local with
+    COACH_AUTH_REQUIRED=0."""
+    if os.environ.get("COACH_AUTH_REQUIRED", "1") in ("0", "false", "False"):
+        return
+    expected = _load_api_key()
+    if not expected or not x_api_key or x_api_key != expected:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
 
 app = FastAPI()
 # CORS is handled by the Lambda Function URL's own Cors config — do not add
@@ -607,7 +642,11 @@ def _to_bedrock_messages(messages: list) -> list:
 
 
 @app.post("/api/coach")
-async def coach_endpoint(request: Request):
+async def coach_endpoint(
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+):
+    require_api_key(x_api_key)
     try:
         body = await request.json()
     except Exception:

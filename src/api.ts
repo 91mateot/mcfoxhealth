@@ -552,7 +552,7 @@ export async function askCoachStream(
 
   const res = await fetch(COACH_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
     signal: opts?.signal,
   });
