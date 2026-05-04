@@ -187,10 +187,24 @@ def test_hrv_above_baseline_green():
     assert _hrv_score(50, 42) >= 75
 
 
-def test_hrv_at_baseline_neutral():
-    """At baseline, HRV scores right around neutral — not penalizing, not rewarding."""
+def test_hrv_at_baseline_scores_recovered():
+    """At baseline, HRV should score ~70 (recovered), not 50.
+    Whoop/Oura/Altini consensus: being at your personal baseline is the
+    healthy state, not the midpoint of a 0-100 scale."""
     s = _hrv_score(42, 42)
-    assert 40 <= s <= 60
+    assert 65 <= s <= 80, f"HRV at baseline scored {s}, expected 65-80"
+
+
+def test_day_at_baseline_scores_green():
+    """Every signal at its baseline → recovered (green). Was 62/yellow
+    before P1 curve recalibration; now should be in the green band."""
+    result = compute_recovery(
+        hrv=48, rhr=64, sleep_min=450, sleep_efficiency=90,
+        resp=14.5, spo2=96.5, wrist_temp=32.5,
+        baselines={"hrv": 48, "rhr": 64},
+    )
+    assert result["score"] >= 70, f"day-at-baseline scored {result['score']}, expected ≥70"
+    assert result["zone"] == "green"
 
 
 def test_hrv_crashed_red():

@@ -83,57 +83,61 @@ def _hrv_score(hrv: Optional[float], baseline: float) -> Optional[float]:
     """HRV vs baseline. Altini methodology: individual baseline deviation,
     not absolute thresholds. Higher HRV = more parasympathetic tone = better.
 
-    Curve (piecewise linear, calibrated so:
-      baseline deviations of ±10% matter more than +15% elevations).
+    Curve (piecewise linear). Day-at-baseline anchors at ~72 (recovered),
+    matching Whoop/Oura convention where "at your personal baseline" reads
+    as green, not yellow. Plews 2013 / Altini argue the neutral state is
+    recovered — 50 would systematically feel punitive.
 
-      > +15%    → 80–100   (well above baseline)
-      +5…+15%   → 55–80    (mild positive)
-      ±5%       → 40–55    (neutral)
-      −5…−15%   → 15–40    (yellow)
-      < −15%    → 0–15     (deep red)
+      > +15%    → 90–100   (well above baseline)
+      +5…+15%   → 80–90    (mild positive)
+      ±5%       → 65–80    (baseline band — center ≈72)
+      −5…−15%   → 25–65    (yellow)
+      −30…−15%  → 0–25     (deep red)
+      < −30%    → 0        (crashed)
     """
     if hrv is None:
         return None
     pct = (hrv - baseline) / baseline
     if pct > 0.15:
-        return _clamp(0, 100, 80 + (pct - 0.15) * 100)
+        return _clamp(0, 100, 90 + (pct - 0.15) * 100)
     if pct > 0.05:
-        return _clamp(0, 100, 55 + (pct - 0.05) * 250)
+        return _clamp(0, 100, 80 + (pct - 0.05) * 100)
     if pct > -0.05:
-        return _clamp(0, 100, 40 + (pct + 0.05) * 150)
+        return _clamp(0, 100, 65 + (pct + 0.05) * 150)
     if pct > -0.15:
-        return _clamp(0, 100, 15 + (pct + 0.15) * 250)
-    return _clamp(0, 100, (pct + 0.30) * 100)
+        return _clamp(0, 100, 25 + (pct + 0.15) * 400)
+    return _clamp(0, 100, (pct + 0.30) * (25 / 0.15))
 
 
 def _rhr_score(rhr: Optional[float], baseline: float) -> Optional[float]:
     """Resting heart rate vs baseline. Lower = better autonomic recovery.
 
-    Whoop-calibrated piecewise curve (derived from Mateo's calibration run
-    Apr 25: RHR 70 vs baseline 64, +9.4%, should yield ~11 to match
-    Whoop-proxy recovery 38%).
+    Piecewise linear, continuous across all boundaries. Day-at-baseline
+    anchors at 70 (recovered, matching Whoop/Oura convention). Apr 25
+    calibration (RHR +9.4% → ~7) still falls inside the weakest-link cap
+    that keeps composite ≤42 for that day.
 
-      < −5%     → 85–100 (excellent)
-      0…−5%     → 60–85  (good)
-      0…+3%     → 40–55  (neutral)
-      +3…+6%    → 20–35  (elevated / caution)
-      +6…+10%   → 4–20   (high stress / fatigue)
-      > +10%    → 0–5    (illness / severe)
+      < −5%     → 85–100  (below baseline, excellent)
+      −5…0%     → 70–85   (mildly below / neutral)
+      0…+3%     → 45–70   (slight elevation)
+      +3…+6%    → 20–45   (elevated / caution)
+      +6…+10%   → 5–20    (high stress / fatigue)
+      > +10%    → 0–5     (illness / severe)
     """
     if rhr is None:
         return None
     pct = (rhr - baseline) / baseline
     if pct < -0.05:
-        return _clamp(0, 100, 85 + abs(pct + 0.05) * 400)
+        return _clamp(0, 100, 85 + abs(pct + 0.05) * 300)
     if pct < 0.00:
-        return _clamp(0, 100, 60 + abs(pct) * 500)
+        return _clamp(0, 100, 70 + abs(pct) * 300)
     if pct < 0.03:
-        return _clamp(0, 100, 55 - pct * 500)
+        return _clamp(0, 100, 70 - pct * (25 / 0.03))
     if pct < 0.06:
-        return _clamp(0, 100, 35 - (pct - 0.03) * 500)
+        return _clamp(0, 100, 45 - (pct - 0.03) * (25 / 0.03))
     if pct < 0.10:
-        return _clamp(0, 100, 20 - (pct - 0.06) * 400)
-    return _clamp(0, 100, 5 - (pct - 0.10) * 100)
+        return _clamp(0, 100, 20 - (pct - 0.06) * (15 / 0.04))
+    return _clamp(0, 100, 5 - (pct - 0.10) * 50)
 
 
 def _sleep_component(sleep_min: Optional[float], efficiency: Optional[float]) -> Optional[float]:

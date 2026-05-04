@@ -10,6 +10,7 @@ Triggered by:
 import json
 import logging
 import os
+import statistics
 from datetime import datetime, timedelta, timezone
 
 from shared.db import get_table, put_item, get_item, query_items
@@ -425,11 +426,14 @@ def _compute_baselines():
             elif src.startswith("wrist_temp#"):
                 wrist_temp_vals.append(v)
 
+    # Median, not mean — robust to single-night outliers (illness,
+    # truncated HAE exports, reta dose changes). Altini's recommended
+    # method for rolling HRV/RHR baselines.
     def avg1(vals, default):
-        return round(sum(vals) / len(vals), 1) if vals else default
+        return round(statistics.median(vals), 1) if vals else default
 
     def avgi(vals, default):
-        return round(sum(vals) / len(vals)) if vals else default
+        return round(statistics.median(vals)) if vals else default
 
     baselines = {
         "type": "current",
