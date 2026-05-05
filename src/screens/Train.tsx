@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import { MONO, type Palette } from "../theme";
 import type { TodayResponse, Workout, WorkoutsResponse } from "../types";
 import { Ring } from "../components/Ring";
@@ -7,6 +8,7 @@ import { BarRow } from "../components/BarRow";
 import { Stat } from "../components/Stat";
 import { SectionHead } from "../components/SectionHead";
 import { Btn } from "../components/Btn";
+import { todayISO, track } from "../api";
 
 interface TrainScreenProps {
   C: Palette;
@@ -124,11 +126,7 @@ export function TrainScreen({ C, today, workouts, onLogWorkout, onOpenWorkout, o
           </div>
         </Panel>
       ) : (
-        <Panel C={C} style={{ padding: 6 }}>
-          {list.slice(0, 6).map((x, i) => (
-            <WorkoutRow key={i} C={C} w={x} last={i === Math.min(list.length, 6) - 1} onTap={() => onOpenWorkout(x)} />
-          ))}
-        </Panel>
+        <RecentSessions C={C} list={list} onOpenWorkout={onOpenWorkout} />
       )}
 
       <div style={{ marginTop: 4, marginBottom: 8 }}>
@@ -137,6 +135,112 @@ export function TrainScreen({ C, today, workouts, onLogWorkout, onOpenWorkout, o
         </Btn>
       </div>
     </div>
+  );
+}
+
+function RecentSessions({
+  C,
+  list,
+  onOpenWorkout,
+}: {
+  C: Palette;
+  list: Workout[];
+  onOpenWorkout: (w: Workout) => void;
+}) {
+  const today = todayISO();
+  // Group by ISO date, preserving the API's date-desc order. Multi-session
+  // days get a single header row; today is always expanded, prior days
+  // collapse by default so the tab doesn't fill with weeks of walks.
+  const groups = useMemo(() => {
+    const byDate = new Map<string, Workout[]>();
+    for (const w of list) {
+      const arr = byDate.get(w.date) ?? [];
+      arr.push(w);
+      byDate.set(w.date, arr);
+    }
+    return Array.from(byDate.entries()).slice(0, 7); // last 7 days max
+  }, [list]);
+
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set([today]));
+  const toggle = (date: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(date)) next.delete(date);
+      else next.add(date);
+      track("workout.day.toggle", { date, opened: !prev.has(date) });
+      return next;
+    });
+  };
+
+  return (
+    <Panel C={C} style={{ padding: 6 }}>
+      {groups.map(([date, items], gi) => {
+        const isToday = date === today;
+        const open = expanded.has(date);
+        const totalMin = items.reduce((a, x) => a + (x.dur ?? 0), 0);
+        const totalStrain = items.reduce((a, x) => a + (x.strain ?? 0), 0);
+        const headerLabel = isToday ? "Today" : `${items[0].day} ${date.slice(5)}`;
+        return (
+          <div key={date} style={{ borderBottom: gi === groups.length - 1 ? "none" : `1px solid ${C.border}` }}>
+            <button
+              onClick={() => toggle(date)}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                width: "100%",
+                padding: "8px 10px",
+                background: "transparent",
+                border: "none",
+                cursor: "pointer",
+                textAlign: "left",
+                fontFamily: "inherit",
+                color: "inherit",
+              }}
+              aria-expanded={open}
+            >
+              <span
+                style={{
+                  display: "inline-block",
+                  width: 10,
+                  fontFamily: MONO,
+                  fontSize: 10,
+                  color: C.t3,
+                  transform: open ? "rotate(90deg)" : "none",
+                  transition: "transform .12s",
+                }}
+              >
+                ▸
+              </span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: isToday ? C.t : C.t2, letterSpacing: ".02em" }}>
+                {headerLabel}
+              </span>
+              <span style={{ fontSize: 11, color: C.t4, fontFamily: MONO }}>
+                · {items.length} {items.length === 1 ? "session" : "sessions"}
+              </span>
+              <span style={{ flex: 1 }} />
+              <span style={{ fontSize: 11, color: C.t3, fontFamily: MONO }}>{totalMin}m</span>
+              <span style={{ fontSize: 11, color: C.warn, fontFamily: MONO, fontWeight: 700, minWidth: 30, textAlign: "right" }}>
+                {totalStrain.toFixed(1)}
+              </span>
+            </button>
+            {open && (
+              <div>
+                {items.map((x, i) => (
+                  <WorkoutRow
+                    key={x.strava_id || `${date}-${i}`}
+                    C={C}
+                    w={x}
+                    last={i === items.length - 1}
+                    onTap={() => onOpenWorkout(x)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </Panel>
   );
 }
 

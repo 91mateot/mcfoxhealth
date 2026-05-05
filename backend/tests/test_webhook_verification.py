@@ -1,13 +1,12 @@
-"""Webhook authentication tests for /ingest/strava and /ingest/withings.
+"""Webhook authentication tests for /ingest/withings.
 
-Strava signs event POSTs with X-Strava-Signature (HMAC-SHA256 of `t.body`).
-Withings doesn't sign, but we reject notifications for unknown userids when
-an allowlist is configured. These tests exercise the handler verification
-paths without hitting AWS.
+Withings doesn't sign notifications, but we reject them for unknown userids
+when an allowlist is configured. Strava webhooks have no per-request
+signature — auth is the verify_token handshake at subscription time + URL
+secrecy + an activity re-fetch on every event — so there's nothing for us
+to verify per-POST.
 """
 
-import hashlib
-import hmac
 import importlib.util
 import json
 import os
@@ -41,119 +40,6 @@ def _fresh_handler(monkeypatch):
     handler.put_item = lambda *_a, **_k: None
     handler.get_table = lambda _env: None
     return handler
-
-
-def _sign_strava_body(secret: str, ts: int, raw_body: str) -> str:
-    return hmac.new(
-        secret.encode("utf-8"),
-        f"{ts}.{raw_body}".encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-
-
-def _strava_event(raw_body: str, headers: dict | None = None) -> dict:
-    return {
-        "rawPath": "/ingest/strava",
-        "requestContext": {"http": {"method": "POST"}},
-        "headers": headers or {},
-        "body": raw_body,
-        "isBase64Encoded": False,
-    }
-
-
-def test_strava_webhook_rejects_missing_signature(monkeypatch):
-    handler = _fresh_handler(monkeypatch)
-    monkeypatch.setattr(handler, "_get_secret", lambda _n: {"client_secret": "topsecret"})
-
-    body = json.dumps({"object_type": "activity", "aspect_type": "create", "object_id": 123})
-    resp = handler._handle_strava(_strava_event(body))
-    assert resp["statusCode"] == 401
-
-
-def test_strava_webhook_accepts_valid_signature(monkeypatch):
-    handler = _fresh_handler(monkeypatch)
-    secret_val = "topsecret"
-    monkeypatch.setattr(handler, "_get_secret", lambda _n: {
-        "client_secret": secret_val,
-        "access_token": "tok",
-        "expires_at": int(time.time()) + 3600,
-    })
-
-    body = json.dumps({"object_type": "activity", "aspect_type": "create", "object_id": 123})
-    ts = int(time.time())
-    sig = _sign_strava_body(secret_val, ts, body)
-    resp = handler._handle_strava(_strava_event(body, {
-        "x-strava-signature": f"t={ts},v1={sig}",
-    }))
-    # Verification passes → handler proceeds; the stubbed _strava_get returns
-    # 502, which is what we expect here. 401 would mean verification failed.
-    assert resp["statusCode"] != 401
-
-
-def test_strava_webhook_rejects_expired_timestamp(monkeypatch):
-    handler = _fresh_handler(monkeypatch)
-    secret_val = "topsecret"
-    monkeypatch.setattr(handler, "_get_secret", lambda _n: {"client_secret": secret_val})
-
-    body = json.dumps({"object_type": "activity", "aspect_type": "create", "object_id": 1})
-    ts = int(time.time()) - 3600  # 1h ago, well outside 5min tolerance
-    sig = _sign_strava_body(secret_val, ts, body)
-    resp = handler._handle_strava(_strava_event(body, {
-        "x-strava-signature": f"t={ts},v1={sig}",
-    }))
-    assert resp["statusCode"] == 401
-
-
-def test_strava_webhook_rejects_tampered_body(monkeypatch):
-    handler = _fresh_handler(monkeypatch)
-    secret_val = "topsecret"
-    monkeypatch.setattr(handler, "_get_secret", lambda _n: {"client_secret": secret_val})
-
-    original = json.dumps({"object_type": "activity", "aspect_type": "create", "object_id": 1})
-    tampered = json.dumps({"object_type": "activity", "aspect_type": "create", "object_id": 9999})
-    ts = int(time.time())
-    # Sign the original, send the tampered body.
-    sig = _sign_strava_body(secret_val, ts, original)
-    resp = handler._handle_strava(_strava_event(tampered, {
-        "x-strava-signature": f"t={ts},v1={sig}",
-    }))
-    assert resp["statusCode"] == 401
-
-
-def test_strava_webhook_prefers_signing_secret_when_present(monkeypatch):
-    """If the secret carries an explicit signing_secret, we use that over
-    client_secret. Otherwise we fall back. Both shapes should verify."""
-    handler = _fresh_handler(monkeypatch)
-    monkeypatch.setattr(handler, "_get_secret", lambda _n: {
-        "client_secret": "wrong_key",
-        "signing_secret": "right_key",
-        "access_token": "tok",
-        "expires_at": int(time.time()) + 3600,
-    })
-
-    body = json.dumps({"object_type": "activity", "aspect_type": "create", "object_id": 1})
-    ts = int(time.time())
-    sig = _sign_strava_body("right_key", ts, body)
-    resp = handler._handle_strava(_strava_event(body, {
-        "x-strava-signature": f"t={ts},v1={sig}",
-    }))
-    assert resp["statusCode"] != 401
-
-
-def test_strava_webhook_verification_bypass_flag(monkeypatch):
-    """Setting STRAVA_WEBHOOK_VERIFY=0 skips the signature check. Useful for
-    local invocation only; not enabled in prod."""
-    monkeypatch.setenv("STRAVA_WEBHOOK_VERIFY", "0")
-    handler = _fresh_handler(monkeypatch)
-    monkeypatch.setattr(handler, "_get_secret", lambda _n: {
-        "client_secret": "x",
-        "access_token": "tok",
-        "expires_at": int(time.time()) + 3600,
-    })
-
-    body = json.dumps({"object_type": "activity", "aspect_type": "create", "object_id": 1})
-    resp = handler._handle_strava(_strava_event(body))  # no signature header
-    assert resp["statusCode"] != 401
 
 
 def test_withings_rejects_unknown_userid_when_allowlist_set(monkeypatch):

@@ -28,7 +28,7 @@ SCORING-ALGORITHMSfromClaudeChat.md   Reference-quality scoring doc
 
 ## Five Lambdas
 
-- **ingest** — `POST /ingest/{health,withings,strava}`; HAE uses `x-api-key`, Strava verifies `X-Strava-Signature` HMAC, Withings checks a `userid` allowlist from the OAuth secret.
+- **ingest** — `POST /ingest/{health,withings,strava}`; HAE uses `x-api-key`, Strava trusts the verify_token handshake + URL secrecy (no per-request signature — Strava doesn't send one), Withings checks a `userid` allowlist from the OAuth secret.
 - **compute** — Daily cron 2am PT (baselines, scores, sleep quality), weekly cron Sun 6am PT (correlations + event rollup).
 - **api** — `GET /api/*` reads (today, progress, workouts, nutrition, insights, conversations, infra-cost).
 - **nutrition** — `POST/PATCH/DELETE /api/{meal,water,journal,workout,favorites,calibration,feedback,event}` writes.
@@ -39,7 +39,7 @@ SCORING-ALGORITHMSfromClaudeChat.md   Reference-quality scoring doc
 - Every `/api/*` request requires `x-api-key` header. Value lives in Secrets Manager (`fitness-api-key`) with env-var fallback (`INGEST_API_KEY`).
 - Frontend reads `VITE_API_KEY` (set in Vercel env) and sends on every API call, including the coach stream.
 - Coach Function URL is `AuthType=NONE` (required for streaming) + app-level `x-api-key` check via a FastAPI dep. `/health` stays public for the Lambda Web Adapter health probe. `COACH_AUTH_REQUIRED=0` bypasses for local runs.
-- Ingest endpoints: HAE checks `x-api-key`; Strava webhooks verify `X-Strava-Signature` (HMAC-SHA256 over `{t}.{raw_body}`, 5-min tolerance, key from `strava-oauth.signing_secret` → fallback `client_secret`); Withings notifications reject unknown userids when the `withings-oauth` secret carries `userid`/`user_id`/`userids`.
+- Ingest endpoints: HAE checks `x-api-key`; Strava webhooks aren't per-POST signed — security is the GET verify_token handshake at subscription time + URL secrecy + the activity re-fetch on every event (a spoofed POST with an unknown id 200s as ignored); Withings notifications reject unknown userids when the `withings-oauth` secret carries `userid`/`user_id`/`userids`.
 
 ## Shared code = Lambda Layer
 

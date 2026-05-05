@@ -7,8 +7,6 @@ Ingest Lambda — handles incoming health data from three sources:
 """
 
 import base64
-import hashlib
-import hmac
 import json
 import logging
 import os
@@ -961,83 +959,16 @@ def _handle_strava_verify(event):
     return _resp(403, {"error": "verification failed"})
 
 
-_STRAVA_SIG_TOLERANCE_SEC = 300
-
-
-def _raw_body(event) -> str:
-    """Return the decoded request body exactly as Strava signed it — no JSON
-    round-trip, no whitespace canonicalization. Returns "" when absent."""
-    body = event.get("body") or ""
-    if event.get("isBase64Encoded"):
-        try:
-            body = base64.b64decode(body).decode("utf-8")
-        except Exception:
-            return ""
-    return body if isinstance(body, str) else ""
-
-
-def _verify_strava_signature(event, secret: dict) -> tuple[bool, str]:
-    """Verify X-Strava-Signature on a webhook POST. Returns (ok, reason).
-
-    Header format: `X-Strava-Signature: t=<unix>,v1=<hex>`. We HMAC-SHA256
-    `{t}.{raw_body}` with the Strava signing secret. 5-minute tolerance.
-
-    Signing key preference: `signing_secret` from strava-oauth (explicit),
-    falling back to `client_secret` (the only shared secret Strava exposes
-    for an app and the conventional value for this header)."""
-    headers = event.get("headers") or {}
-    # API Gateway v2 lower-cases header names; belt-and-suspenders on mixed case.
-    sig_header = headers.get("x-strava-signature") or headers.get("X-Strava-Signature") or ""
-    if not sig_header:
-        return False, "missing signature header"
-
-    parts: dict = {}
-    for token in sig_header.split(","):
-        if "=" in token:
-            k, v = token.split("=", 1)
-            parts[k.strip()] = v.strip()
-    ts = parts.get("t")
-    provided = parts.get("v1")
-    if not ts or not provided:
-        return False, "malformed signature header"
-    try:
-        ts_int = int(ts)
-    except ValueError:
-        return False, "non-numeric timestamp"
-
-    drift = abs(int(time.time()) - ts_int)
-    if drift > _STRAVA_SIG_TOLERANCE_SEC:
-        return False, f"timestamp outside tolerance ({drift}s)"
-
-    signing_key = (secret or {}).get("signing_secret") or (secret or {}).get("client_secret") or ""
-    if not signing_key:
-        return False, "no strava signing secret configured"
-
-    raw = _raw_body(event)
-    expected = hmac.new(
-        signing_key.encode("utf-8"),
-        f"{ts}.{raw}".encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    if hmac.compare_digest(expected, provided):
-        return True, "ok"
-    return False, "signature mismatch"
-
-
 def _handle_strava(event):
-    """Process Strava webhook event — fetch activity and compute strain."""
-    # Webhook POSTs are signed by Strava with HMAC-SHA256 — verify before we
-    # hit the Strava API to refresh tokens / fetch the activity, so a spoofed
-    # webhook can't force token work or a spurious strain write. Verification
-    # can be bypassed with STRAVA_WEBHOOK_VERIFY=0 for local testing.
-    verify_on = os.environ.get("STRAVA_WEBHOOK_VERIFY", "1") not in ("0", "false", "False")
-    strava_secret = _get_secret("strava-oauth") or {}
-    if verify_on:
-        ok, reason = _verify_strava_signature(event, strava_secret)
-        if not ok:
-            logger.warning("rejected strava webhook: %s", reason)
-            return _resp(401, {"error": "signature verification failed"})
+    """Process Strava webhook event — fetch activity and compute strain.
 
+    Strava webhooks don't carry a per-request signature; the auth model is
+    the verify_token handshake at subscription time (see _strava_verify) +
+    the secrecy of the webhook URL. We re-fetch the activity from Strava's
+    API before writing, so a spoofed POST can't inject fake data — at worst
+    it triggers a token refresh + a 200 ignore for unknown ids.
+    """
+    strava_secret = _get_secret("strava-oauth") or {}
     body = _parse_body(event)
     if not body:
         return _resp(400, {"error": "invalid body"})
