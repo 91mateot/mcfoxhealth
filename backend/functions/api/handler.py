@@ -272,26 +272,32 @@ def _get_today():
             hr_dip_idx=sleep.get("hr_dip_idx"),
         )
 
-    # Sleep Bank — rolling 14-day sum of (actual asleep − need baseline).
-    # Advisory only; does not feed into the score. Need baseline (baseMin)
-    # excludes acute debt + strain so the bank reflects steady-state pattern.
+    # Sleep Bank — last 7 nights, exponentially decayed, of (actual − target).
+    # Matches Bevel's published formula: 7d window with recent nights weighted
+    # higher. Decay factor 0.85/day means today=1.00, yesterday=0.85, day-7≈0.32.
+    # Target comes from compute via sleep_bank_delta (which uses fixed target +
+    # strainMin per scoring config) so this layer just sums + decays.
     sleep_bank = None
-    bank_deltas = []
-    for i in range(14):
+    bank_weighted_sum = 0.0
+    samples = 0
+    decay = 0.85
+    for i in range(7):
         d = (today_dt - timedelta(days=i)).strftime("%Y-%m-%d")
         row = get_item(scores_table, {"date": d}) or {}
         delta = row.get("sleep_bank_delta")
-        if delta is not None:
-            bank_deltas.append(int(delta))
-    if bank_deltas:
-        bank_min = sum(bank_deltas)
+        if delta is None:
+            continue
+        bank_weighted_sum += float(delta) * (decay ** i)
+        samples += 1
+    if samples:
+        bank_min = int(round(bank_weighted_sum))
         if bank_min > 30:
             trend = "surplus"
         elif bank_min < -30:
             trend = "deficit"
         else:
             trend = "balanced"
-        sleep_bank = {"minutes": bank_min, "trend": trend, "samples": len(bank_deltas)}
+        sleep_bank = {"minutes": bank_min, "trend": trend, "samples": samples}
 
     # Freshness indicator: max ingested_at across every source that writes
     # today's data (HAE metrics, Strava workouts, logged meals/water).

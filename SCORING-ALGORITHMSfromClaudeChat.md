@@ -340,16 +340,30 @@ inputs are missing or `min_hr_sleep ≥ baseline` (data looks off).
 
 ### Sleep Bank
 
-Advisory rolling 14-day indicator — **not** a score input.
+Advisory rolling 7-day indicator with exponential decay — **not** a score
+input. Matches Bevel's published formula (7d trailing, recent nights weighted
+higher) with a Whoop-style strain term added to the per-night target.
 
-- Per-day delta stored on `daily_scores.sleep_bank_delta = actual_min − sleep_need.baseMin`.
-  We use `baseMin` (median-of-30 baseline) instead of `totalMin` so the bank
-  reflects steady-state pattern, not noise from heavy training days where
-  strain+debt would bump the target.
-- `/api/today` rolls the last 14 days into `sleepBank.minutes` (sum of deltas).
-  Trend: surplus > +30m, deficit < −30m, else balanced.
+- Per-day delta stored on `daily_scores.sleep_bank_delta = actual_min − (sleep_target_min + sleep_need.strainMin)`.
+  We use a **fixed personal target**, not a rolling median, because Van Dongen
+  et al. 2003 found that adaptive baselines hide chronic undersleep — debt
+  accumulates linearly across 7–14 days, so a baseline that drifts toward
+  whatever you actually do will mask real impairment. The strain adjustment
+  (Tanaka & Watanabe 2002, ~1.5 min/strain point) accounts for the fact that
+  hard training days warrant longer recovery sleep.
+- `sleep_target_min` lives in `fitness-user-config` (key="scoring") and is
+  hot-swappable. Default 450m (7.5h, matches DEFAULT_BASELINES.sleep_min).
+- `/api/today` rolls the last 7 days into `sleepBank.minutes` with
+  exponential decay (factor 0.85/day → today=1.0, day-7≈0.32). Trend:
+  surplus > +30m, deficit < −30m, else balanced.
 - Surfaced on Today as a thin card and on Progress as a "Bank ±Xm" chip
   next to the sleep stages panel. No scoring effect; it's coaching context.
+
+**Why we skip rolling debt as an input to the target:** debt would
+double-count — the bank itself is the integrated debt, so feeding a debt-
+derived term back into its target creates a feedback loop. Bevel's
+published formula avoids this; Whoop caps debt at ~4 nights specifically
+to bound the loop. Cleaner to skip it entirely.
 
 ### Validation
 

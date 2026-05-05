@@ -392,16 +392,17 @@ def _compute_day(date_str):
             sleep_block["duration_target_used"] = duration_target_used
         score_item["sleep"] = sleep_block
 
-    # Sleep Bank delta — actual asleep minutes minus tonight's need baseline
-    # (`baseMin`, which excludes acute debt + strain so the bank reflects the
-    # steady-state surplus/deficit, not noise from heavy training days).
-    # Only written when we have both a real asleep total and the need baseline.
-    if (
-        sleep_min > 0
-        and sleep_quality_flag in ("ok", "partial")
-        and sleep_need.get("baseMin")
-    ):
-        score_item["sleep_bank_delta"] = int(round(sleep_min - sleep_need["baseMin"]))
+    # Sleep Bank delta — actual asleep minus (fixed target + strain adjustment).
+    # Bevel uses 7-day exp-decay vs. fixed personal goal; Whoop adds a strain
+    # term (~1.5 min/strain pt, Tanaka & Watanabe). Skipping debtMin avoids
+    # the double-counting loop where the bank's own deficit feeds the target.
+    # Target lives in user_config (key="scoring", field="sleep_target_min")
+    # so it's hot-swappable; defaults to 450m (7.5h, matches our other anchors).
+    sleep_target_min = int(scoring_config.get("sleep_target_min") or 450) if scoring_config else 450
+    if sleep_min > 0 and sleep_quality_flag in ("ok", "partial"):
+        target_with_strain = sleep_target_min + sleep_need.get("strainMin", 0)
+        score_item["sleep_bank_delta"] = int(round(sleep_min - target_with_strain))
+        score_item["sleep_target_used"] = sleep_target_min
 
     put_item(scores_table, score_item)
 
