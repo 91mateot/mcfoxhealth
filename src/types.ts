@@ -80,10 +80,10 @@ export interface SleepStages {
 }
 
 export interface SleepBank {
-  /** Rolling 14-day Σ(actual asleep − need baseline). Positive = surplus. */
+  /** Rolling 7-night sum of actual asleep minus need baseline. Positive = surplus. */
   minutes: number;
   trend: "surplus" | "deficit" | "balanced";
-  /** How many of the 14 days had data — lets the UI dim if partial. */
+  /** How many of the 7 nights had data — lets the UI dim if partial. */
   samples: number;
 }
 
@@ -254,8 +254,8 @@ export interface TodayResponse {
   acwr?: ACWR;
   sleep: SleepStages;
   sleepNeedTonight: SleepNeed;
-  /** 14-day rolling sleep bank. Null when no daily_scores rows carry a
-   * sleep_bank_delta yet (first 2 weeks after deploy). */
+  /** 7-night rolling sleep bank. Null when no daily_scores rows carry a
+   * sleep_bank_delta yet. */
   sleepBank?: SleepBank | null;
   hrv: number | null;
   rhr: number | null;

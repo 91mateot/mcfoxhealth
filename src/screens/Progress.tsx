@@ -256,7 +256,7 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
                 fontWeight: 700,
                 whiteSpace: "nowrap",
               }}
-              title={`14-day bank: ${today.sleepBank.minutes}m across ${today.sleepBank.samples} nights`}
+              title={`7-night bank: ${today.sleepBank.minutes}m across ${today.sleepBank.samples} nights`}
             >
               Bank {today.sleepBank.minutes >= 0 ? "+" : ""}
               {today.sleepBank.minutes}m
@@ -831,4 +831,3 @@ function bmiLabel(bmi: number): string {
   if (bmi < 30) return "athletic range";
   return "high BMI";
 }
-

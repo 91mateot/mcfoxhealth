@@ -38,6 +38,7 @@ export const COACH_URL =
     || `${API_BASE}/api/coach`;
 
 const API_KEY = (import.meta.env.VITE_API_KEY as string | undefined)?.trim() || "";
+const PACIFIC_TIME_ZONE = "America/Los_Angeles";
 
 function authHeaders(extra?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { ...(extra ?? {}) };
@@ -174,12 +175,38 @@ export function useNutritionHistory(enabled = true, days = 7): SWRResponse<Nutri
   );
 }
 
+type PacificDatePart = "year" | "month" | "day" | "hour";
+
+function pacificDateParts(date = new Date()): Record<PacificDatePart, string> {
+  const parts: Record<PacificDatePart, string> = {
+    year: "",
+    month: "",
+    day: "",
+    hour: "",
+  };
+  for (const part of new Intl.DateTimeFormat("en-US", {
+    timeZone: PACIFIC_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date)) {
+    if (part.type === "year" || part.type === "month" || part.type === "day" || part.type === "hour") {
+      parts[part.type] = part.value;
+    }
+  }
+  return parts;
+}
+
 export function todayISO(): string {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+  const { year, month, day } = pacificDateParts();
+  return `${year}-${month}-${day}`;
+}
+
+function pacificHour(): number {
+  const hour = Number(pacificDateParts().hour);
+  return Number.isFinite(hour) ? hour : new Date().getHours();
 }
 
 /** Local tag inference mirroring backend/shared/shared/nutrition_service.py:guess_tag.
@@ -252,7 +279,7 @@ export async function lookupBarcode(barcode: string): Promise<MealEstimate | nul
     return null;
   }
 
-  const tag = guessTag(new Date().getHours());
+  const tag = guessTag(pacificHour());
   const servingSize = p.serving_size || (servingQty ? `${servingQty}g` : "1 serving");
 
   return {

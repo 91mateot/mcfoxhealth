@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FONT, type Palette } from "../theme";
 
 interface SheetProps {
@@ -13,6 +13,17 @@ interface SheetProps {
 export function Sheet({ C, open, onClose, title, children, height = "70%" }: SheetProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const lastFocusedRef = useRef<HTMLElement | null>(null);
+  const [mounted, setMounted] = useState(open);
+
+  useEffect(() => {
+    if (open) {
+      setMounted(true);
+      return;
+    }
+    if (!mounted) return;
+    const timeout = window.setTimeout(() => setMounted(false), 320);
+    return () => window.clearTimeout(timeout);
+  }, [open, mounted]);
 
   useEffect(() => {
     if (!open) return;
@@ -27,6 +38,8 @@ export function Sheet({ C, open, onClose, title, children, height = "70%" }: She
       lastFocusedRef.current?.focus?.();
     };
   }, [open, onClose]);
+
+  if (!mounted) return null;
 
   return (
     <div

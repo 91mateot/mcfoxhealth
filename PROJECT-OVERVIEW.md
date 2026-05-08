@@ -96,6 +96,7 @@ Read top-to-bottom: phone + integrations push data into AWS, the React PWA reads
 - SWR for data fetching (60s refresh on Today, on-demand elsewhere)
 - `vite-plugin-pwa` → service worker, offline shell, iOS standalone install
 - No CSS framework — inline styles using palette tokens from `src/theme.ts` (3 themes: Lime/Zine/Graphite)
+- `DESIGN.md` is the frontend design contract; read it before UI, theming, or component work
 - `@zxing/browser` for barcode scanning in LogMeal
 
 ### Backend

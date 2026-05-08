@@ -110,7 +110,7 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
         />
       </div>
 
-      {/* Sleep Bank — rolling 14-day surplus/deficit. Advisory only. */}
+      {/* Sleep Bank — rolling 7-night surplus/deficit. Advisory only. */}
       {data.sleepBank && <SleepBankCard C={C} bank={data.sleepBank} bedtimeBy={need.bedtimeBy} />}
 
       {/* Today's workout card */}
@@ -473,7 +473,7 @@ function SleepBankCard({
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700 }}>
-            Sleep bank · last 14 days
+            Sleep bank · last 7 nights
           </div>
           <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 3 }}>
             <div style={{ fontSize: 22, fontWeight: 800, fontFamily: MONO, color, letterSpacing: "-.04em" }}>

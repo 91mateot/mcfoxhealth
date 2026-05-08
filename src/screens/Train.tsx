@@ -17,11 +17,9 @@ interface TrainScreenProps {
   onLogWorkout: () => void;
   onOpenWorkout: (w: Workout) => void;
   onOpenWorkoutHistory: () => void;
-  week: number;
-  setWeek: (n: number) => void;
 }
 
-export function TrainScreen({ C, today, workouts, onLogWorkout, onOpenWorkout, onOpenWorkoutHistory, week, setWeek }: TrainScreenProps) {
+export function TrainScreen({ C, today, workouts, onLogWorkout, onOpenWorkout, onOpenWorkoutHistory }: TrainScreenProps) {
   const list = workouts.workouts ?? [];
   const weekStrain = today.recoveryWeek.reduce((a, d) => a + (d.strain ?? 0), 0);
   const recent = list.slice(0, 5);
@@ -31,7 +29,7 @@ export function TrainScreen({ C, today, workouts, onLogWorkout, onOpenWorkout, o
 
   return (
     <div>
-      <SectionHead C={C} kicker="This week" title="Training" right={<WeekScrubber C={C} week={week} setWeek={setWeek} />} />
+      <SectionHead C={C} kicker="This week" title="Training" right={<Chip C={C}>Live week</Chip>} />
 
       <Panel C={C}>
         <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
@@ -311,40 +309,5 @@ function WorkoutRow({ C, w, last, onTap }: { C: Palette; w: Workout; last: boole
         <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO }}>strain</div>
       </div>
     </button>
-  );
-}
-
-function WeekScrubber({ C, week, setWeek }: { C: Palette; week: number; setWeek: (n: number) => void }) {
-  const label = week === 0 ? "This week" : week === -1 ? "Last week" : `${Math.abs(week)} wks ago`;
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 4, background: C.s2, borderRadius: 12, padding: 3 }}>
-      <button
-        onClick={() => setWeek(week - 1)}
-        aria-label="Previous week"
-        style={{ width: 26, height: 26, borderRadius: 9, background: "none", border: "none", color: C.t2, cursor: "pointer", fontSize: 14 }}
-      >
-        ‹
-      </button>
-      <div style={{ fontSize: 11, color: C.t2, fontFamily: MONO, fontWeight: 700, minWidth: 72, textAlign: "center" }}>
-        {label}
-      </div>
-      <button
-        onClick={() => week < 0 && setWeek(week + 1)}
-        disabled={week >= 0}
-        aria-label="Next week"
-        style={{
-          width: 26,
-          height: 26,
-          borderRadius: 9,
-          background: "none",
-          border: "none",
-          color: week < 0 ? C.t2 : C.t4,
-          cursor: week < 0 ? "pointer" : "default",
-          fontSize: 14,
-        }}
-      >
-        ›
-      </button>
-    </div>
   );
 }

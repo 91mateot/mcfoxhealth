@@ -77,6 +77,8 @@ export function JournalSheet({ C, open, onClose, onSave, todayEntry, tagsToday }
   const [text, setText] = useState("");
   const [prompts, setPrompts] = useState<JournalPrompt[] | null>(null);
   const [promptsLoading, setPromptsLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Reset/prefill whenever the sheet opens or slot flips. Pre-fill from the
   // matching saved slot so tapping the card mid-day is editable, not a
@@ -85,6 +87,8 @@ export function JournalSheet({ C, open, onClose, onSave, todayEntry, tagsToday }
     if (!open) return;
     const nextSlot = currentSlot();
     setSlot(nextSlot);
+    setSaving(false);
+    setSaveError(null);
 
     const saved = nextSlot === "evening" ? todayEntry?.evening : todayEntry?.morning;
     // For morning: fall back to the raw tag list on today's row so supplement
@@ -132,7 +136,7 @@ export function JournalSheet({ C, open, onClose, onSave, todayEntry, tagsToday }
     setSel(next);
   };
 
-  const save = () => {
+  const save = async () => {
     const filledPrompts = (prompts ?? []).filter((p) => (p.q || "").trim());
     const payload: JournalSubmission = {
       slot,
@@ -145,8 +149,17 @@ export function JournalSheet({ C, open, onClose, onSave, todayEntry, tagsToday }
     if (slot === "morning") {
       payload.soreness = soreness;
     }
-    onSave(payload);
-    onClose();
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await onSave(payload);
+      onClose();
+    } catch (e) {
+      const detail = e instanceof Error && e.message ? ` (${e.message})` : "";
+      setSaveError(`Couldn't save journal${detail}. Try again.`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const title = slot === "evening" ? "Evening reflection" : "Journal · last night";
@@ -287,12 +300,18 @@ export function JournalSheet({ C, open, onClose, onSave, todayEntry, tagsToday }
         />
       </div>
 
+      {saveError && (
+        <div style={{ fontSize: 11, color: C.warn, marginTop: 8, fontFamily: MONO }}>
+          {saveError}
+        </div>
+      )}
+
       <div style={{ marginTop: 18, display: "flex", gap: 8 }}>
         <Btn C={C} onClick={onClose} full>
           Skip
         </Btn>
-        <Btn C={C} primary full onClick={save}>
-          {primaryCta}
+        <Btn C={C} primary full onClick={save} disabled={saving}>
+          {saving ? "Saving…" : primaryCta}
         </Btn>
       </div>
     </Sheet>

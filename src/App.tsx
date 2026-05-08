@@ -32,7 +32,6 @@ export default function App() {
     const saved = localStorage.getItem("mateo-tab");
     return saved && VALID_TABS.includes(saved as TabId) ? (saved as TabId) : "today";
   });
-  const [week, setWeek] = useState(0);
   const [sheetRing, setSheetRing] = useState<RingKey | null>(null);
   const [mealOpen, setMealOpen] = useState(false);
   const [mealPrefill, setMealPrefill] = useState("");
@@ -71,6 +70,11 @@ export default function App() {
     { id: "fuel", label: "Fuel" },
     { id: "progress", label: "Progress" },
   ];
+  const tabResources = { today, progress, workouts, nutrition };
+  const tabError = getTabError(tab, tabResources);
+  const hasTabError = tabError != null;
+  const tabLoading = !hasTabError && isLoadingTab(tab, tabResources);
+  const tabHasData = hasTabData(tab, tabResources);
 
   const openLogMeal = (prefill?: string) => {
     setMealPrefill(typeof prefill === "string" ? prefill : "");
@@ -103,8 +107,12 @@ export default function App() {
         position: "relative",
       }}
     >
-      {today.error && (
-        <ErrorBanner C={C} message="Couldn't load today's data." onRetry={() => today.mutate()} />
+      {hasTabError && (
+        <ErrorBanner
+          C={C}
+          message={errorMessage(tab, tabError)}
+          onRetry={() => retryTab(tab, tabResources)}
+        />
       )}
 
       {today.data && tab === "today" && (
@@ -129,8 +137,6 @@ export default function App() {
           onLogWorkout={() => { setWorkoutOpen(true); track("workout.log.open", { source: "train" }); }}
           onOpenWorkout={(w) => { setWorkoutDetail(w); track("workout.detail.open"); }}
           onOpenWorkoutHistory={() => { setWorkoutHistoryOpen(true); track("workout.history.open"); }}
-          week={week}
-          setWeek={setWeek}
         />
       )}
 
@@ -154,7 +160,11 @@ export default function App() {
         />
       )}
 
-      {(!today.data || isLoadingTab(tab, { today, progress, workouts, nutrition })) && (
+      {hasTabError && !tabHasData && (
+        <ErrorState C={C} message={errorMessage(tab, tabError)} onRetry={() => retryTab(tab, tabResources)} />
+      )}
+
+      {tabLoading && (
         <LoadingSkeleton C={C} />
       )}
 
@@ -169,11 +179,7 @@ export default function App() {
         prefill={mealPrefill}
         onClose={() => setMealOpen(false)}
         onAdd={async (m) => {
-          try {
-            await logMeal(m);
-          } catch (err) {
-            console.error("logMeal failed", err);
-          }
+          await logMeal(m);
         }}
       />
       <LogWorkoutModal
@@ -183,11 +189,7 @@ export default function App() {
         onAdd={async ({ type, notes }) => {
           const text = [type, notes].filter((s) => s && s.trim()).join(" — ");
           if (!text) return;
-          try {
-            await logWorkout(text);
-          } catch (err) {
-            console.error("logWorkout failed", err);
-          }
+          await logWorkout(text);
         }}
       />
       <ChatModal C={C} open={chatOpen} onClose={() => setChatOpen(false)} initialPrompt={chatPrefill} today={today.data} />
@@ -198,11 +200,7 @@ export default function App() {
         todayEntry={today.data?.journal ?? null}
         tagsToday={today.data?.journalTagsToday ?? []}
         onSave={async (data) => {
-          try {
-            await submitJournal(data);
-          } catch (err) {
-            console.error("submitJournal failed", err);
-          }
+          await submitJournal(data);
         }}
       />
       <JournalHistorySheet
@@ -242,6 +240,21 @@ export default function App() {
   );
 }
 
+type TabResources = {
+  today: { data?: unknown; error?: unknown; mutate: () => unknown };
+  progress: { data?: unknown; error?: unknown; mutate: () => unknown };
+  workouts: { data?: unknown; error?: unknown; mutate: () => unknown };
+  nutrition: { data?: unknown; error?: unknown; mutate: () => unknown };
+};
+
+function hasTabData(tab: TabId, data: TabResources): boolean {
+  if (tab === "today") return Boolean(data.today.data);
+  if (tab === "train") return Boolean(data.today.data && data.workouts.data);
+  if (tab === "fuel") return Boolean(data.today.data && data.nutrition.data);
+  if (tab === "progress") return Boolean(data.today.data && data.progress.data);
+  return false;
+}
+
 function isLoadingTab(
   tab: TabId,
   data: { today: { data?: unknown }; progress: { data?: unknown }; workouts: { data?: unknown }; nutrition: { data?: unknown } }
@@ -251,6 +264,34 @@ function isLoadingTab(
   if (tab === "fuel") return !data.today.data || !data.nutrition.data;
   if (tab === "progress") return !data.today.data || !data.progress.data;
   return false;
+}
+
+function getTabError(tab: TabId, data: TabResources): unknown {
+  if (data.today.error) return data.today.error;
+  if (tab === "train") return data.workouts.error;
+  if (tab === "fuel") return data.nutrition.error;
+  if (tab === "progress") return data.progress.error;
+  return null;
+}
+
+function retryTab(tab: TabId, data: TabResources) {
+  data.today.mutate();
+  if (tab === "train") data.workouts.mutate();
+  if (tab === "fuel") data.nutrition.mutate();
+  if (tab === "progress") data.progress.mutate();
+}
+
+function errorMessage(tab: TabId, err: unknown): string {
+  const label =
+    tab === "today"
+      ? "today's data"
+      : tab === "train"
+      ? "training data"
+      : tab === "fuel"
+      ? "nutrition data"
+      : "progress data";
+  const detail = err instanceof Error && err.message ? ` (${err.message})` : "";
+  return `Couldn't load ${label}.${detail}`;
 }
 
 function ErrorBanner({ C, message, onRetry }: { C: ReturnType<typeof getPalette>; message: string; onRetry: () => void }) {
@@ -278,6 +319,41 @@ function ErrorBanner({ C, message, onRetry }: { C: ReturnType<typeof getPalette>
           borderRadius: 10,
           fontFamily: "inherit",
           fontSize: 11,
+          fontWeight: 700,
+          cursor: "pointer",
+        }}
+      >
+        Retry
+      </button>
+    </div>
+  );
+}
+
+function ErrorState({ C, message, onRetry }: { C: ReturnType<typeof getPalette>; message: string; onRetry: () => void }) {
+  return (
+    <div
+      style={{
+        padding: "44px 8px",
+        textAlign: "center",
+        color: C.t2,
+      }}
+    >
+      <div style={{ fontSize: 13, fontWeight: 700, color: C.t, marginBottom: 6 }}>
+        Data unavailable
+      </div>
+      <div style={{ fontSize: 12, color: C.t3, lineHeight: 1.5, marginBottom: 14 }}>
+        {message}
+      </div>
+      <button
+        onClick={onRetry}
+        style={{
+          background: C.s2,
+          color: C.t,
+          border: `1px solid ${C.border}`,
+          padding: "10px 14px",
+          borderRadius: 12,
+          fontFamily: "inherit",
+          fontSize: 12,
           fontWeight: 700,
           cursor: "pointer",
         }}

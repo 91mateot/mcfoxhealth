@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { type Palette } from "../theme";
 import { Sheet } from "../components/Sheet";
 import { Chip } from "../components/Chip";
@@ -9,7 +9,7 @@ interface LogWorkoutModalProps {
   C: Palette;
   open: boolean;
   onClose: () => void;
-  onAdd: (data: { type: string; notes: string }) => void;
+  onAdd: (data: { type: string; notes: string }) => void | Promise<void>;
 }
 
 const TYPES = ["Push", "Pull", "Legs", "HIIT", "Walk", "Yoga"];
@@ -17,6 +17,29 @@ const TYPES = ["Push", "Pull", "Legs", "HIIT", "Walk", "Yoga"];
 export function LogWorkoutModal({ C, open, onClose, onAdd }: LogWorkoutModalProps) {
   const [type, setType] = useState("Push");
   const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setSaving(false);
+    setError(null);
+  }, [open]);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await onAdd({ type, notes });
+      onClose();
+      setNotes("");
+    } catch (e) {
+      const detail = e instanceof Error && e.message ? ` (${e.message})` : "";
+      setError(`Couldn't save workout${detail}. Try again.`);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <Sheet C={C} open={open} onClose={onClose} title="Log a workout" height="72%">
@@ -28,6 +51,7 @@ export function LogWorkoutModal({ C, open, onClose, onAdd }: LogWorkoutModalProp
           <button
             key={t}
             onClick={() => setType(t)}
+            disabled={saving}
             style={{
               background: type === t ? C.primary : C.s,
               color: type === t ? "#0a0a0a" : C.t2,
@@ -37,7 +61,7 @@ export function LogWorkoutModal({ C, open, onClose, onAdd }: LogWorkoutModalProp
               fontFamily: "inherit",
               fontSize: 12,
               fontWeight: 700,
-              cursor: "pointer",
+              cursor: saving ? "default" : "pointer",
             }}
           >
             {t}
@@ -82,6 +106,11 @@ export function LogWorkoutModal({ C, open, onClose, onAdd }: LogWorkoutModalProp
         placeholder='"Bench 4x8 @ 185, OHP 3x8 @ 115, dips 3xBW…"'
         minHeight={90}
       />
+      {error && (
+        <div style={{ fontSize: 11, color: C.warn, marginTop: 8, fontFamily: "JetBrains Mono, monospace" }}>
+          {error}
+        </div>
+      )}
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         <Btn C={C} full onClick={onClose}>
           Cancel
@@ -90,13 +119,10 @@ export function LogWorkoutModal({ C, open, onClose, onAdd }: LogWorkoutModalProp
           C={C}
           primary
           full
-          onClick={() => {
-            onAdd({ type, notes });
-            onClose();
-            setNotes("");
-          }}
+          onClick={save}
+          disabled={saving}
         >
-          Save workout
+          {saving ? "Saving…" : "Save workout"}
         </Btn>
       </div>
     </Sheet>

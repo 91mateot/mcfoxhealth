@@ -13,7 +13,7 @@ interface LogMealModalProps {
   C: Palette;
   open: boolean;
   onClose: () => void;
-  onAdd: (meal: MealInput) => void;
+  onAdd: (meal: MealInput) => void | Promise<void>;
   prefill?: string;
 }
 
@@ -39,10 +39,16 @@ function confidenceColor(C: Palette, conf: EstimateConfidence): string {
   return C.warn;
 }
 
+function mealSaveError(e: unknown): string {
+  const detail = e instanceof Error && e.message ? ` (${e.message})` : "";
+  return `Couldn't save meal${detail}. Try again.`;
+}
+
 export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalProps) {
   const [step, setStep] = useState<Step>("describe");
   const [custom, setCustom] = useState("");
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [estimate, setEstimate] = useState<MealEstimate | null>(null);
   const [edited, setEdited] = useState<{ name: string; cal: number; p: number; c: number; f: number; tag: string; time: string } | null>(null);
@@ -59,6 +65,7 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
     if (open) {
       setStep("describe");
       setLoading(false);
+      setSaving(false);
       setError(null);
       setEstimate(null);
       setEdited(null);
@@ -73,9 +80,21 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
     }
   }, [open, prefill]);
 
-  const handleQuickAdd = (q: MealInput) => {
-    onAdd({ ...q, time: clientTime() });
-    onClose();
+  const saveMeal = async (payload: MealInput) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await onAdd(payload);
+      onClose();
+    } catch (e) {
+      setError(mealSaveError(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleQuickAdd = async (q: MealInput) => {
+    await saveMeal({ ...q, time: clientTime() });
   };
 
   const handleEstimate = async () => {
@@ -171,7 +190,7 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!edited) return;
     const payload: MealInput = { ...edited };
     if (estimate) {
@@ -190,8 +209,7 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
         payload.caffeine_mg = estimate.caffeine_mg;
       }
     }
-    onAdd(payload);
-    onClose();
+    await saveMeal(payload);
   };
 
   const handleBack = () => {
@@ -241,7 +259,7 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
             <Btn C={C} full onClick={onClose}>
               Cancel
             </Btn>
-            <Btn C={C} primary full onClick={handleEstimate}>
+            <Btn C={C} primary full onClick={handleEstimate} disabled={loading || saving}>
               {loading ? "Estimating…" : "Send to nutrition coach →"}
             </Btn>
           </div>
@@ -379,6 +397,7 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
                 <button
                   key={f.id}
                   onClick={() => handleQuickAdd({ name: f.name, cal: f.cal, p: f.p, c: f.c, f: f.f, tag: f.tag })}
+                  disabled={saving}
                   style={{
                     width: "100%",
                     background: C.s,
@@ -387,7 +406,7 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
                     padding: 12,
                     marginBottom: 6,
                     textAlign: "left",
-                    cursor: "pointer",
+                    cursor: saving ? "default" : "pointer",
                     fontFamily: FONT,
                     color: C.t,
                     display: "flex",
@@ -428,6 +447,7 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
             <button
               key={i}
               onClick={() => handleQuickAdd(q)}
+              disabled={saving}
               style={{
                 width: "100%",
                 background: C.s,
@@ -436,7 +456,7 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
                 padding: 12,
                 marginBottom: 6,
                 textAlign: "left",
-                cursor: "pointer",
+                cursor: saving ? "default" : "pointer",
                 fontFamily: FONT,
                 color: C.t,
                 display: "flex",
@@ -575,12 +595,18 @@ export function LogMealModal({ C, open, onClose, onAdd, prefill }: LogMealModalP
             </div>
           )}
 
+          {error && (
+            <div style={{ fontSize: 11, color: C.warn, marginTop: 8, fontFamily: MONO }}>
+              {error}
+            </div>
+          )}
+
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             <Btn C={C} full onClick={handleBack}>
               ← Back
             </Btn>
-            <Btn C={C} primary full onClick={handleSave}>
-              Save meal
+            <Btn C={C} primary full onClick={handleSave} disabled={saving}>
+              {saving ? "Saving…" : "Save meal"}
             </Btn>
           </div>
         </>
