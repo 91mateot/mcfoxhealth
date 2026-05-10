@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { type Palette } from "../theme";
 import { Sheet } from "../components/Sheet";
-import { Chip } from "../components/Chip";
 import { Btn } from "../components/Btn";
 import { VoiceInput } from "../components/VoiceInput";
 
@@ -67,18 +66,6 @@ export function LogWorkoutModal({ C, open, onClose, onAdd }: LogWorkoutModalProp
             {t}
           </button>
         ))}
-      </div>
-      <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700, marginBottom: 8 }}>
-        Pulling from Strava
-      </div>
-      <div style={{ background: C.s, border: `1px solid ${C.border}`, borderRadius: 14, padding: 12, marginBottom: 14 }}>
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: C.t }}>Most recent activity</div>
-          <Chip C={C} color={C.warn}>Strava pending</Chip>
-        </div>
-        <div style={{ fontSize: 11, color: C.t3, fontFamily: "inherit", marginTop: 6 }}>
-          Connect Strava to auto-import recent activities.
-        </div>
       </div>
       <div
         style={{

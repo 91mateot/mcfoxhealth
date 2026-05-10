@@ -120,7 +120,7 @@ export function TrainScreen({ C, today, workouts, onLogWorkout, onOpenWorkout, o
       {list.length === 0 ? (
         <Panel C={C}>
           <div style={{ fontSize: 12, color: C.t3, textAlign: "center", padding: "12px 0" }}>
-            No workouts yet. Connect Strava or log one manually.
+            No workouts yet. Log one manually below.
           </div>
         </Panel>
       ) : (

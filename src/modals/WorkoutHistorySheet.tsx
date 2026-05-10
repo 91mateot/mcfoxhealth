@@ -40,7 +40,7 @@ export function WorkoutHistorySheet({ C, open, onClose, onOpenWorkout }: Props) 
       )}
       {!isLoading && recent.length === 0 && !error && (
         <div style={{ fontSize: 12, color: C.t3, lineHeight: 1.5, padding: "20px 0" }}>
-          No workouts logged in the last week. Connect Strava or log one from Train.
+          No workouts logged in the last week. Log one from Train.
         </div>
       )}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>

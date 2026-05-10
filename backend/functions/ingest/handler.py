@@ -117,6 +117,14 @@ def lambda_handler(event, context):
     if "/ingest/withings" in path:
         return _handle_withings(event)
     if "/ingest/strava" in path:
+        # Strava ingestion is paused — Hevy handles workout logging now.
+        # GET (subscription verify) still answers so the webhook subscription
+        # stays alive for easy re-enable; POSTs no-op with 200 so Strava
+        # doesn't auto-disable the subscription for repeated failures.
+        if os.environ.get("STRAVA_INGEST_ENABLED", "0") != "1":
+            if method == "GET":
+                return _handle_strava_verify(event)
+            return _resp(200, {"status": "ignored", "reason": "strava ingest disabled"})
         if method == "GET":
             return _handle_strava_verify(event)
         return _handle_strava(event)
