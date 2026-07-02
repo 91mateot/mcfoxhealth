@@ -1,7 +1,7 @@
 # Mateo Fitness Dashboard — Handoff
 
 Personal performance dashboard. iPhone-first PWA, dark theme, real data from
-Apple Health + Withings + Strava, AI coach on Bedrock.
+Apple Health + Withings + Strava + Hevy, AI coach on Bedrock.
 
 ## Live
 
@@ -49,7 +49,26 @@ Tested in `backend/tests/test_scoring.py` (Whoop-proxy calibration + sanity).
 ### Ingestion
 - **Apple Health:** `POST /ingest/health` from HealthAutoExport (backfill script in `backend/scripts/hae_backfill.py`)
 - **Withings:** `POST /ingest/withings` webhook + backfill script
-- **Strava:** `POST /ingest/strava` webhook + OAuth refresh
+- **Workouts (dual-source):**
+  - **Hevy (strength/lifting):** daily scheduled poll on the `ingest` Lambda
+    (EventBridge `HevyPoll`, ~1:30am PT) → pulls recent Hevy v1 workouts and
+    upserts into the workouts table (`source="hevy"`, `type="Workout"`,
+    `strava_id="hevy_<id>"`). Client: `backend/shared/shared/hevy_client.py`;
+    handler: `_handle_hevy_sync` in `backend/functions/ingest/handler.py`.
+    Reads the `hevy-api-key` secret (Secrets Manager, us-west-2); if the secret
+    is missing it logs a clear message and no-ops (does not crash the cron).
+    Also invokable directly with `{"action": "hevy_poll"}`.
+  - **Strava (cardio/outdoor):** `POST /ingest/strava` webhook + OAuth refresh.
+    Strength-type activities (WeightTraining/Workout/CrossFit) are dropped here
+    so Hevy stays the single source of truth for lifting; cardio is kept.
+  - **De-dupe:** Hevy is preferred for strength, Strava for cardio. Hevy
+    re-polls are idempotent (keyed on the Hevy id); a session logged in both
+    sources cannot double-count because Strava drops strength activities.
+
+> **Note (2026-06):** Workout ingest was frozen 2026-05-08 when commit `7a8bf27`
+> paused Strava on the assumption Hevy would replace it, but the Hevy path was
+> never built — leaving `strain=0` with no workout feed. This dual-source setup
+> (Hevy for strength + Strava for cardio) restores it.
 
 ### Companion tools
 - `withings-mcp/` — separate public repo `partymola/withings-mcp`, registered MCP server for Claude Code queries against local Withings data

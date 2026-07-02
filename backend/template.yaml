@@ -326,6 +326,7 @@ Resources:
                 - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:fitness-api-key-*'
                 - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:withings-oauth-*'
                 - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:strava-oauth-*'
+                - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:hevy-api-key-*'
         - Statement:
             - Effect: Allow
               Action:
@@ -359,6 +360,11 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /ingest/strava
             Method: GET
+        HevyPoll:
+          Type: Schedule
+          Properties:
+            Schedule: cron(30 8 * * ? *)
+            Description: Daily Hevy workout sync (1:30am PT = 8:30am UTC, before the 2am baseline compute)
 
   ComputeFunction:
     Type: AWS::Serverless::Function
