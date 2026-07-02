@@ -23,6 +23,7 @@ logger = logging.getLogger("ingest")
 logger.setLevel(logging.INFO)
 
 from shared.db import get_item, get_table, put_item, query_items
+from shared.hevy_client import fetch_recent_workouts as _fetch_hevy_workouts
 from shared.scoring import compute_trimp, compute_strain, classify_hr_zone, estimate_strain_simple, HR_ZONES, MAX_HR
 from shared.sleep_quality import evaluate_quality as _eval_sleep_quality
 from shared.timezone import local_today_str
@@ -31,6 +32,12 @@ secrets_client = boto3.client("secretsmanager")
 lambda_client = boto3.client("lambda")
 
 COMPUTE_FN = os.environ.get("COMPUTE_FUNCTION_NAME", "")
+
+# Strava sport_type values that represent strength training. Hevy is the
+# source of truth for these, so the Strava webhook path drops them to avoid
+# double-ingesting a session that's already logged in Hevy (de-dupe guard —
+# Hevy preferred for strength, Strava for cardio).
+STRAVA_STRENGTH_TYPES = {"weighttraining", "workout", "crossfit"}
 
 WITHINGS_TOKEN_URL = "https://wbsapi.withings.net/v2/oauth2"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
@@ -109,6 +116,13 @@ HAE_NAME_MAP = {
 
 
 def lambda_handler(event, context):
+    # Scheduled invoke (EventBridge daily cron) or direct async invoke with an
+    # explicit action — used to poll Hevy for recent gym workouts. Workouts
+    # come from two sources now: Hevy (strength) via this poll, Strava (cardio)
+    # via the webhook path below.
+    if event.get("source") == "aws.events" or event.get("action") == "hevy_poll":
+        return _handle_hevy_sync(event)
+
     path = event.get("rawPath", "")
     method = event.get("requestContext", {}).get("http", {}).get("method", "GET")
 
@@ -117,14 +131,10 @@ def lambda_handler(event, context):
     if "/ingest/withings" in path:
         return _handle_withings(event)
     if "/ingest/strava" in path:
-        # Strava ingestion is paused — Hevy handles workout logging now.
-        # GET (subscription verify) still answers so the webhook subscription
-        # stays alive for easy re-enable; POSTs no-op with 200 so Strava
-        # doesn't auto-disable the subscription for repeated failures.
-        if os.environ.get("STRAVA_INGEST_ENABLED", "0") != "1":
-            if method == "GET":
-                return _handle_strava_verify(event)
-            return _resp(200, {"status": "ignored", "reason": "strava ingest disabled"})
+        # Strava webhook. GET is the subscription-verify handshake; POST is an
+        # activity event. Strava covers cardio/outdoor activities — strength
+        # sessions come from Hevy, so the POST handler filters those out (see
+        # _handle_strava) to keep Hevy the single source of truth for lifting.
         if method == "GET":
             return _handle_strava_verify(event)
         return _handle_strava(event)
@@ -1034,8 +1044,21 @@ def _handle_strava(event):
         "avgHR": round(activity.get("average_heartrate", 0), 1),
         "maxHR": round(activity.get("max_heartrate", 0)),
         "cal": round(activity.get("calories", 0)),
+        "source": "strava",
         "ingested_at": _now_iso(),
     }
+
+    # De-dupe guard: Hevy is the source of truth for strength/lifting sessions.
+    # If Strava classified this activity as strength (e.g. a "Workout" or
+    # "WeightTraining" logged from the watch), drop it so it doesn't collide
+    # with the Hevy row for the same session. Cardio/outdoor stays on Strava.
+    strava_type = str(workout_item["type"] or "").strip().lower()
+    if strava_type in STRAVA_STRENGTH_TYPES:
+        logger.info(
+            "strava activity %s type=%s is strength — skipping (Hevy owns strength)",
+            obj_id, workout_item["type"],
+        )
+        return _resp(200, {"status": "ignored", "reason": "strength activity handled by Hevy"})
 
     if hr_stream:
         trimp_data = compute_trimp(hr_stream, sample_interval_sec=1.0)
@@ -1063,6 +1086,97 @@ def _handle_strava(event):
     _trigger_compute(start_date)
 
     return _resp(200, {"date": start_date, "strava_id": str(obj_id), "strain": workout_item.get("strain")})
+
+
+# ── Hevy sync (scheduled poll) ─────────────────────────────────
+
+def _handle_hevy_sync(event):
+    """Poll the Hevy API for recent strength workouts and upsert them.
+
+    Runs from the EventBridge daily schedule (source == "aws.events") or an
+    explicit async invoke with {"action": "hevy_poll"}. Hevy has no webhooks
+    on its public API, so this poll is how gym/lifting sessions reach the
+    fitness-workouts table.
+
+    Failure modes are all soft — a missing key or a Hevy outage logs a clear
+    message and returns 200 with a status so the daily cron never crashes and
+    Strava/Compute keep working:
+      • missing hevy-api-key secret → log "hevy-api-key secret missing" and no-op
+      • Hevy API error → hevy_client logs + returns no rows
+    """
+    secret = _get_secret("hevy-api-key")
+    api_key = (secret or {}).get("api_key") or (secret or {}).get("key") or ""
+    if not api_key:
+        logger.warning(
+            "hevy-api-key secret missing or has no 'api_key' field — skipping Hevy "
+            "sync. Create the 'hevy-api-key' secret in Secrets Manager (us-west-2) "
+            "with an {\"api_key\": \"...\"} value to enable gym/lifting ingest."
+        )
+        return _resp(200, {"status": "skipped", "reason": "hevy-api-key secret missing"})
+
+    page_size = int(event.get("page_size", 10) or 10)
+    max_pages = int(event.get("max_pages", 3) or 3)
+
+    try:
+        rows = _fetch_hevy_workouts(api_key, page_size=page_size, max_pages=max_pages)
+    except ValueError as e:
+        # Only raised for an empty key — already guarded above, but be explicit.
+        logger.warning("hevy sync aborted: %s", e)
+        return _resp(200, {"status": "skipped", "reason": str(e)})
+    except Exception:  # noqa: BLE001 — never let a poll failure crash the cron
+        logger.exception("hevy sync failed unexpectedly")
+        return _resp(200, {"status": "error", "reason": "hevy fetch failed"})
+
+    table = get_table("WORKOUTS_TABLE")
+    written = 0
+    affected_dates = set()
+    for row in rows:
+        if _hevy_row_is_duplicate(table, row):
+            logger.info(
+                "hevy workout %s on %s duplicates an existing cardio row — skipping",
+                row.get("hevy_id"), row.get("date"),
+            )
+            continue
+        put_item(table, row)
+        written += 1
+        affected_dates.add(row["date"])
+
+    # Recompute daily scores for every date we touched so strain reflects the
+    # freshly-ingested lifting sessions.
+    for d in sorted(affected_dates):
+        _trigger_compute(d)
+
+    logger.info("hevy sync complete: %s workouts written across %s dates", written, len(affected_dates))
+    return _resp(200, {
+        "status": "ok",
+        "fetched": len(rows),
+        "written": written,
+        "dates": sorted(affected_dates),
+    })
+
+
+def _hevy_row_is_duplicate(table, row):
+    """Idempotency check for a Hevy row against what's already stored.
+
+    Hevy rows are keyed on their own id (strava_id = "hevy_<id>"), so an
+    upsert of the same Hevy workout is naturally idempotent — re-running the
+    poll overwrites the same key rather than creating a dupe.
+
+    Cross-source collisions (the same session in BOTH Hevy and Strava) are
+    handled on the Strava side: the webhook drops strength activities, so a
+    strength session only ever lands as a Hevy row. Hevy therefore always
+    wins for strength and Strava owns cardio — no conflicting rows are created.
+
+    This function returns True only when an identical Hevy row is already
+    present (same volume + duration), meaning nothing changed and we can skip
+    the redundant write. Any material change still upserts.
+    """
+    existing = get_item(table, {"date": row["date"], "strava_id": row["strava_id"]})
+    if not existing:
+        return False
+    same_volume = float(existing.get("volume_lb", -1) or -1) == float(row.get("volume_lb", 0) or 0)
+    same_dur = int(existing.get("dur", -1) or -1) == int(row.get("dur", 0) or 0)
+    return same_volume and same_dur
 
 
 # ── Helpers ────────────────────────────────────────────────────
