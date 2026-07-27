@@ -1524,6 +1524,8 @@ def _write_hevy_exercise_rows(table, exercise_rows, date):
         }
         if ex.get("superset_with"):
             row["superset_with"] = ex["superset_with"]
+        if ex.get("superset_group"):
+            row["superset_group"] = ex["superset_group"]
         if ex.get("note"):
             row["note"] = ex["note"]
         if ex.get("hevy_muscle_group"):

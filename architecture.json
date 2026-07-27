@@ -74,7 +74,7 @@
         "body_measurement_to_metrics"
       ],
       "constants": {"KG_TO_LB": 2.20462262, "CM_TO_IN": 0.393700787, "TEMPLATE_CACHE_KEY": "hevy_exercise_templates", "LAST_SYNC_KEY": "hevy_last_sync", "HEVY_MAX_PAGE_SIZE": 10},
-      "notes": "All Hevy list endpoints cap pageSize at 10 (per OpenAPI spec); page_size is clamped via _clamp_page_size so an over-cap value never 400s and silently zeroes a fetch (was the measurements_written:0 root cause)."
+      "notes": "All Hevy list endpoints cap pageSize at 10 (per OpenAPI spec); page_size is clamped via _clamp_page_size so an over-cap value never 400s and silently zeroes a fetch (was the measurements_written:0 root cause). Superset grouping is read from the exercise field superset_id (SINGULAR) — the key the LIVE API returns; the published OpenAPI spec's supersets_id (plural) is WRONG, so the mapper prefers superset_id and falls back to supersets_id, and tests membership with `is not None` (group ids start at 0). Each grouped exercise row carries superset_with (single partner canonical, backward-compat) and superset_group (sorted list of ALL other member canonicals, lossless for 3+ member groups). Do not change back to the plural spelling to match the spec."
     },
     {
       "path": "backend/shared/shared/workout_service.py",

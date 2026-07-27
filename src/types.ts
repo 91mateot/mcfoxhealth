@@ -376,6 +376,7 @@ export interface WorkoutExercise {
   muscle_group?: MuscleGroup;
   sets: LiftSet[];
   superset_with?: string;
+  superset_group?: string[];
   note?: string;
   pr?: { weight?: boolean; e1rm?: boolean; volume?: boolean };
   e1rm?: number;
