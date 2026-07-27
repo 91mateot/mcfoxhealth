@@ -228,6 +228,13 @@ def _get_today():
                 caffeine_total += m.get("caffeine_mg", 0)
     meals_today.sort(key=lambda x: x.get("time") or "")
 
+    # Nutrition data-integrity flag (2026-07-27): fitness-nutrition can be
+    # a genuinely dead/unwired feed for extended periods (e.g. Mateo's
+    # nutrition tracking gaps). A bare 0 total is indistinguishable from
+    # "logged and ate nothing" — surface whether ANY row exists today so
+    # downstream correlation work can tell "no data" from "zero intake".
+    nutrition_has_data = bool(meals)
+
     config = get_item(config_table, {"key": "mateo"}) or {}
     targets = config.get("nutrition_targets", {"cal": 2200, "p": 180, "c": 190, "f": 65, "water": 100})
     # Canonical supplement list lives in user_config (name + tag + dose).
@@ -380,6 +387,7 @@ def _get_today():
         "waterGoal": targets.get("water", 100),
         "caffeineMg": caffeine_total,
         "caffeineGoal": targets.get("caffeine", 400),
+        "nutritionHasData": nutrition_has_data,
         "recoveryWeek": recovery_week,
         "hrv30d": hrv_30d,
         "stepsWeek": steps_week,
@@ -679,6 +687,7 @@ def _get_nutrition(date_str):
         "totals": totals,
         "water": water_total,
         "waterLogs": water_logs,
+        "hasData": bool(items),
         "caffeineMg": caffeine_total,
         "caffeineGoal": targets.get("caffeine", 400),
         "targets": targets,
