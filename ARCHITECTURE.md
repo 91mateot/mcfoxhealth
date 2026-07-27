@@ -108,6 +108,21 @@ Read-only integration: no POST/PUT to Hevy. Calories/HR are not available from
 Hevy's public API — strain is estimated and calories are flagged unavailable
 rather than reported as a misleading 0.
 
+**Superset grouping field name (important):** `workout_to_exercise_rows` reads
+the superset group id from `superset_id` (SINGULAR) — the key the LIVE Hevy API
+actually returns on each exercise. Hevy's published OpenAPI spec documents it as
+`supersets_id` (plural), but the live API disagrees with its own spec; reading
+the plural key silently returned `None` for every exercise, so `superset_with`
+was never populated. The mapper now prefers `superset_id` and falls back to
+`supersets_id` (so it keeps working if Hevy ever conforms its API to the spec),
+and tests grouping membership with `is not None` (group ids start at 0, so a
+truthiness check would drop group 0). Do NOT "fix" this back to the plural
+spelling to match the spec — the spec is wrong. Each grouped exercise row
+carries both `superset_with` (a single partner canonical, kept for backward
+compatibility with the lift engine / LLM-parser convention / frontend) and
+`superset_group` (the sorted list of ALL other member canonicals, which
+preserves 3+ member groups without loss).
+
 ## Modules — `backend/shared/shared/`
 
 | Module | Responsibility |

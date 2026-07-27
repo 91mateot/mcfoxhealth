@@ -300,15 +300,23 @@ def workout_to_exercise_rows(workout: dict, templates: Optional[dict] = None) ->
 
     Returns a list of dicts with keys: canonical, name, muscle_group,
     hevy_muscle_group, sets[], note (optional), superset_with (optional),
-    exercise_template_id (optional). The date is applied by the writer, matching
+    superset_group (optional, sorted list of the other member canonicals for
+    3+ member groups), exercise_template_id (optional). The date is applied by the writer, matching
     how workout_service passes ``date`` separately to _write_exercise_rows.
     """
     templates = templates or {}
     exercises = workout.get("exercises") or []
 
-    # First pass: build rows + record supersets_id → list of canonicals so we
-    # can resolve superset_with in both directions afterward, mirroring how the
-    # LLM parser sets superset_with on both paired exercises.
+    # First pass: build rows + record the superset group id → list of canonicals
+    # so we can resolve superset_with in both directions afterward, mirroring how
+    # the LLM parser sets superset_with on both paired exercises.
+    #
+    # Field name: the LIVE Hevy API returns ``superset_id`` (SINGULAR) on each
+    # exercise. Hevy's published OpenAPI spec documents it as ``supersets_id``
+    # (plural) — the spec is WRONG. We prefer the real key and fall back to the
+    # spec key so this keeps working if Hevy ever conforms its API to its spec.
+    # ``superset_id`` values start at 0, so grouping MUST be tested with
+    # ``is not None`` — a truthiness check would silently drop group 0.
     rows = []
     superset_members: dict = {}
     for ex in exercises:
@@ -342,23 +350,33 @@ def workout_to_exercise_rows(workout: dict, templates: Optional[dict] = None) ->
         if isinstance(note, str) and note.strip():
             row["note"] = note.strip()[:200]
 
-        sid = ex.get("supersets_id")
+        # Prefer the real live-API key (``superset_id``); fall back to the
+        # spec's ``supersets_id``. ``is not None`` — group 0 is valid.
+        sid = ex.get("superset_id")
+        if sid is None:
+            sid = ex.get("supersets_id")
         if sid is not None:
             superset_members.setdefault(sid, []).append(canonical)
 
-        row["_supersets_id"] = ex.get("supersets_id")
+        row["_superset_id"] = sid
         rows.append(row)
 
-    # Second pass: resolve superset_with. A group can hold 2+ exercises; each
-    # member points at the OTHER member's canonical (first partner that isn't
-    # itself), matching the two-way pairing workout_service produces.
+    # Second pass: resolve superset_with + superset_group. A group can hold 2+
+    # exercises. ``superset_with`` stays a single canonical string for backward
+    # compatibility with the lift engine, the LLM-parser convention, and the
+    # frontend (src/types.ts / WorkoutDetail.tsx), which all treat it as a
+    # string. ``superset_group`` is added alongside as the sorted list of ALL
+    # other members' canonicals, so 3+ member groups lose no information.
     for row in rows:
-        sid = row.pop("_supersets_id", None)
+        sid = row.pop("_superset_id", None)
         if sid is None:
             continue
-        partners = [c for c in superset_members.get(sid, []) if c != row["canonical"]]
+        partners = sorted(
+            c for c in superset_members.get(sid, []) if c != row["canonical"]
+        )
         if partners:
             row["superset_with"] = partners[0]
+            row["superset_group"] = partners
 
     return rows
 

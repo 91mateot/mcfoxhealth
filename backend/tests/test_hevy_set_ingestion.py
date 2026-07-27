@@ -26,13 +26,16 @@ from shared.exercise_canonical import MUSCLE_GROUPS  # noqa: E402
 # ── Fixtures ────────────────────────────────────────────────────────
 
 def _ex(title="Bench Press (Barbell)", template_id="tmpl-bench", sets=None,
-        supersets_id=None, notes=None):
+        superset_id=None, notes=None):
     return {
         "index": 0,
         "title": title,
         "notes": notes,
         "exercise_template_id": template_id,
-        "supersets_id": supersets_id,
+        # Real live-API key is ``superset_id`` (singular). Hevy's published
+        # OpenAPI spec calls it ``supersets_id`` (plural) — the spec is wrong,
+        # so fixtures use the real key the code reads from production payloads.
+        "superset_id": superset_id,
         "sets": sets if sets is not None else [
             {"index": 0, "type": "normal", "weight_kg": 60, "reps": 10},
         ],
@@ -130,22 +133,114 @@ def test_exercise_note_and_template_id_preserved():
 
 def test_superset_pairing_both_directions():
     rows = hc.workout_to_exercise_rows(_workout(exercises=[
-        _ex(title="Seated Cable Row", template_id="t1", supersets_id=7),
-        _ex(title="Plank", template_id="t2", supersets_id=7),
-        _ex(title="Hip Abductor", template_id="t3", supersets_id=None),
+        _ex(title="Seated Cable Row", template_id="t1", superset_id=7),
+        _ex(title="Plank", template_id="t2", superset_id=7),
+        _ex(title="Hip Abductor", template_id="t3", superset_id=None),
     ]))
     by_canon = {r["canonical"]: r for r in rows}
     assert by_canon["seated_cable_row"]["superset_with"] == "plank"
     assert by_canon["plank"]["superset_with"] == "seated_cable_row"
     # Non-superset exercise carries no pairing.
     assert "superset_with" not in by_canon["hip_abductor"]
+    assert "superset_group" not in by_canon["hip_abductor"]
 
 
 def test_no_superset_when_id_null():
     rows = hc.workout_to_exercise_rows(_workout(exercises=[
-        _ex(title="Bench Press", supersets_id=None),
+        _ex(title="Bench Press", superset_id=None),
     ]))
     assert "superset_with" not in rows[0]
+    assert "superset_group" not in rows[0]
+
+
+def test_superset_group_id_zero_not_dropped():
+    """Regression: ``superset_id`` starts at 0. A truthiness check (``if sid:``)
+    would wrongly skip group 0 — which is the most common real group id. The
+    resolver MUST use ``is not None`` so group 0 pairs correctly."""
+    rows = hc.workout_to_exercise_rows(_workout(exercises=[
+        _ex(title="Hammer Curl (Cable)", template_id="t1", superset_id=0),
+        _ex(title="Triceps Rope Pushdown", template_id="t2", superset_id=0),
+    ]))
+    by_canon = {r["canonical"]: r for r in rows}
+    assert by_canon["hammer_curl"]["superset_with"] == "triceps_rope_pushdown"
+    assert by_canon["triceps_rope_pushdown"]["superset_with"] == "hammer_curl"
+    # superset_group carries the full grouping in both directions.
+    assert by_canon["hammer_curl"]["superset_group"] == ["triceps_rope_pushdown"]
+    assert by_canon["triceps_rope_pushdown"]["superset_group"] == ["hammer_curl"]
+
+
+def test_superset_group_three_members_no_loss():
+    """Regression: the real 2026-07-22 group had THREE members. superset_with
+    (single canonical) alone loses the third — superset_group preserves ALL
+    other members for each row."""
+    rows = hc.workout_to_exercise_rows(_workout(exercises=[
+        _ex(title="Standing Calf Raise (Dumbbell)", template_id="t1", superset_id=0),
+        _ex(title="Farmers Walk", template_id="t2", superset_id=0),
+        _ex(title="Rowing Machine", template_id="t3", superset_id=0),
+    ]))
+    by_canon = {r["canonical"]: r for r in rows}
+    # Every member's superset_group holds the other two, sorted, no loss.
+    assert by_canon["standing_calf_raise"]["superset_group"] == [
+        "farmers_walk", "rowing_machine",
+    ]
+    assert by_canon["farmers_walk"]["superset_group"] == [
+        "rowing_machine", "standing_calf_raise",
+    ]
+    assert by_canon["rowing_machine"]["superset_group"] == [
+        "farmers_walk", "standing_calf_raise",
+    ]
+    # superset_with stays a single canonical (backward compat) = sorted[0].
+    assert by_canon["standing_calf_raise"]["superset_with"] == "farmers_walk"
+
+
+def test_superset_mixed_grouped_and_ungrouped_in_one_workout():
+    """A single workout mixes a grouped pair (id 0), a lone grouped exercise's
+    absence, and ungrouped exercises. Only the grouped pair gets pairing."""
+    rows = hc.workout_to_exercise_rows(_workout(exercises=[
+        _ex(title="Push Up", template_id="t1", superset_id=0),
+        _ex(title="Farmers Walk", template_id="t2", superset_id=0),
+        _ex(title="Bench Press", template_id="t3", superset_id=None),
+        _ex(title="Squat", template_id="t4", superset_id=None),
+    ]))
+    by_canon = {r["canonical"]: r for r in rows}
+    assert by_canon["push_up"]["superset_with"] == "farmers_walk"
+    assert by_canon["farmers_walk"]["superset_with"] == "push_up"
+    assert "superset_with" not in by_canon["bench_press"]
+    assert "superset_group" not in by_canon["bench_press"]
+    assert "superset_with" not in by_canon["back_squat"]
+
+
+def test_superset_legacy_supersets_id_fallback():
+    """If Hevy ever conforms its API to its (wrong) spec and emits the plural
+    ``supersets_id`` instead of ``superset_id``, the resolver must still pair
+    via the fallback key. Group id 0 here also guards the truthiness bug."""
+    def _legacy_ex(title, template_id, supersets_id):
+        ex = _ex(title=title, template_id=template_id, superset_id=None)
+        del ex["superset_id"]
+        ex["supersets_id"] = supersets_id
+        return ex
+
+    rows = hc.workout_to_exercise_rows(_workout(exercises=[
+        _legacy_ex("Push Up", "t1", 0),
+        _legacy_ex("Farmers Walk", "t2", 0),
+    ]))
+    by_canon = {r["canonical"]: r for r in rows}
+    assert by_canon["push_up"]["superset_with"] == "farmers_walk"
+    assert by_canon["farmers_walk"]["superset_with"] == "push_up"
+    assert by_canon["push_up"]["superset_group"] == ["farmers_walk"]
+
+
+def test_superset_prefers_singular_over_legacy_plural():
+    """When BOTH keys are present, the real live key (``superset_id``) wins."""
+    ex_a = _ex(title="Push Up", template_id="t1", superset_id=0)
+    ex_a["supersets_id"] = 99  # stale spec key must be ignored
+    ex_b = _ex(title="Farmers Walk", template_id="t2", superset_id=0)
+    ex_b["supersets_id"] = 88
+    rows = hc.workout_to_exercise_rows(_workout(exercises=[ex_a, ex_b]))
+    by_canon = {r["canonical"]: r for r in rows}
+    # Both share superset_id 0, so they pair despite differing plural values.
+    assert by_canon["push_up"]["superset_with"] == "farmers_walk"
+    assert by_canon["farmers_walk"]["superset_with"] == "push_up"
 
 
 # ── Muscle-group mapping: all 20 Hevy enum values ───────────────────
