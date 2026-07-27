@@ -132,7 +132,10 @@ def lambda_handler(event, context):
     # explicit action — used to poll Hevy for recent gym workouts. Workouts
     # come from two sources now: Hevy (strength) via this poll, Strava (cardio)
     # via the webhook path below.
-    if event.get("source") == "aws.events" or event.get("action") == "hevy_poll":
+    if (
+        event.get("source") == "aws.events"
+        or event.get("action") in ("hevy_poll", "hevy_backfill")
+    ):
         return _handle_hevy_sync(event)
 
     path = event.get("rawPath", "")
@@ -1166,7 +1169,7 @@ def _handle_hevy_sync(event):
     explicit async invoke with {"action": "hevy_poll"}. Hevy has no webhooks on
     its public API, so this poll is how gym/lifting sessions reach the stack.
 
-    Two sync modes:
+    Three sync modes:
       • INCREMENTAL (default when a ``hevy_last_sync`` watermark exists): pull
         GET /v1/workouts/events?since=<watermark>, applying updates AND
         deletions. This is Hevy's purpose-built incremental feed and is the
@@ -1174,6 +1177,12 @@ def _handle_hevy_sync(event):
       • COLD START (no watermark): page-walk GET /v1/workouts newest-first as a
         bounded backfill, then set the watermark so subsequent polls go
         incremental.
+      • BACKFILL ({"action": "hevy_backfill"} or force_full/reset_watermark on a
+        poll): IGNORE the watermark, full page-walk of GET /v1/workouts, and
+        write BOTH rolled-up and per-exercise rows for EVERY workout regardless
+        of dupe state (force=True). Sized by default to cover Mateo's full
+        history (pageSize 10 × 20 pages = up to 200 workouts); page_size and
+        max_pages are event-overridable. Idempotent, so safely re-runnable.
 
     Each workout is written to BOTH:
       • fitness-workouts — the rolled-up session row (dur/volume/strain/etc.)
@@ -1201,16 +1210,35 @@ def _handle_hevy_sync(event):
         )
         return _resp(200, {"status": "skipped", "reason": "hevy-api-key secret missing"})
 
-    page_size = int(event.get("page_size", 10) or 10)
-    max_pages = int(event.get("max_pages", 3) or 3)
+    # Backfill mode: an explicit {"action": "hevy_backfill"} invoke, or a normal
+    # poll carrying force_full / reset_watermark. It IGNORES the watermark and
+    # does a full page-walk of GET /v1/workouts, writing BOTH rolled-up and
+    # per-exercise rows for every workout regardless of dupe state. Defaults are
+    # sized to cover Mateo's full history (~32+ sessions): pageSize 10 × 20 pages
+    # = up to 200 workouts, both overridable by the event. Safely re-runnable —
+    # every write is an idempotent overwrite.
+    backfill = (
+        event.get("action") == "hevy_backfill"
+        or bool(event.get("force_full"))
+        or bool(event.get("reset_watermark"))
+    )
+    if backfill:
+        page_size = int(event.get("page_size", 10) or 10)
+        max_pages = int(event.get("max_pages", 20) or 20)
+    else:
+        page_size = int(event.get("page_size", 10) or 10)
+        max_pages = int(event.get("max_pages", 3) or 3)
 
     config_table = get_table("USER_CONFIG_TABLE")
 
     # 1) Refresh the exercise-template cache if stale (templates are near-static;
-    #    never re-fetch ~226 rows on every poll).
-    templates = _load_hevy_templates(config_table, api_key)
+    #    never re-fetch ~226 rows on every poll). A backfill forces a refresh so
+    #    muscle-group resolution is current for the whole history walk.
+    templates = _load_hevy_templates(config_table, api_key, force_refresh=backfill)
 
-    # 2) Fetch workouts (incremental via events, or cold-start page walk).
+    # 2) Fetch workouts. Backfill always page-walks GET /v1/workouts and ignores
+    #    the watermark; a normal poll goes incremental when a watermark exists,
+    #    else cold-start page-walk.
     watermark_row = get_item(config_table, {"key": LAST_SYNC_KEY}) or {}
     last_sync = watermark_row.get("last_sync")
 
@@ -1218,7 +1246,12 @@ def _handle_hevy_sync(event):
     deleted_ids: list = []
     mode = "incremental"
     try:
-        if last_sync:
+        if backfill:
+            mode = "backfill"
+            updated_workouts = fetch_recent_workouts_full(
+                api_key, page_size=page_size, max_pages=max_pages
+            )
+        elif last_sync:
             ev = fetch_workout_events(api_key, since=last_sync)
             updated_workouts = ev.get("updated", [])
             deleted_ids = ev.get("deleted", [])
@@ -1238,31 +1271,36 @@ def _handle_hevy_sync(event):
     exercises_table = get_table("EXERCISES_TABLE")
 
     written = 0
+    ex_rows_written = 0
+    backfilled = 0
     affected_dates = set()
     affected_canonicals = set()
 
     # 3) Apply updates: rolled-up row + per-exercise rows.
+    #
+    #    The two writes are DECOUPLED. The rolled-up fitness-workouts row and the
+    #    per-exercise fitness-exercises rows are independent stores with
+    #    different keys and different consumers (session view vs the lift
+    #    engine). "The rolled-up row is unchanged" does NOT imply "the exercise
+    #    rows exist" — the pre-PR#3 poller wrote rolled-up rows with no exercise
+    #    rows at all, which is exactly why the first cold-start poll backfilled
+    #    only a handful of dates (the dupe-check short-circuited before the
+    #    exercise write). So the dupe-check may only suppress the redundant
+    #    fitness-workouts put_item; it must NEVER gate the exercise-row write.
     for workout in updated_workouts:
-        row = workout_to_row(workout)
-        if row is None:
+        outcome = _apply_hevy_workout(
+            workout, templates, workouts_table, exercises_table, force=backfill
+        )
+        if outcome is None:
             continue
-        if _hevy_row_is_duplicate(workouts_table, row):
-            logger.info(
-                "hevy workout %s on %s unchanged — skipping",
-                row.get("hevy_id"), row.get("date"),
-            )
-            continue
-        put_item(workouts_table, row)
-        written += 1
-        affected_dates.add(row["date"])
-
-        # Per-exercise rows into fitness-exercises. Re-polling the same workout
-        # overwrites the same (canonical, date) keys, so PR flags stay clean.
-        ex_rows = workout_to_exercise_rows(workout, templates)
-        _write_hevy_exercise_rows(exercises_table, ex_rows, row["date"])
-        for er in ex_rows:
-            if er.get("canonical"):
-                affected_canonicals.add(er["canonical"])
+        if outcome["workout_written"]:
+            written += 1
+        if outcome["backfilled"]:
+            backfilled += 1
+        ex_rows_written += outcome["ex_rows_written"]
+        if outcome["touched"]:
+            affected_dates.add(outcome["date"])
+            affected_canonicals.update(outcome["canonicals"])
 
     # 4) Apply deletions: a workout removed in Hevy must leave McFox too.
     deleted = 0
@@ -1285,11 +1323,11 @@ def _handle_hevy_sync(event):
             logger.exception("hevy weekly volume recompute failed")
 
     # 6) Body measurements → health-metrics via the merge/ordering-guard path.
-    measurements_written = 0
-    try:
-        measurements_written = _ingest_hevy_body_measurements(api_key)
-    except Exception:
-        logger.exception("hevy body-measurement ingest failed")
+    #    Distinguish "Mateo has genuinely never logged a body measurement" from
+    #    "the fetch/parse failed" so measurements_written: 0 is never silently
+    #    ambiguous (that ambiguity is exactly what hid the pageSize>10 → HTTP 400
+    #    bug behind an innocent-looking zero on the first live runs).
+    measurements = _ingest_hevy_body_measurements(api_key)
 
     # 7) Recompute daily scores for every date we touched.
     for d in sorted(affected_dates):
@@ -1305,26 +1343,131 @@ def _handle_hevy_sync(event):
     })
 
     logger.info(
-        "hevy sync complete (%s): %s written, %s deleted across %s dates, %s measurements",
-        mode, written, deleted, len(affected_dates), measurements_written,
+        "hevy sync complete (%s): %s written (%s backfilled), %s exercise rows, "
+        "%s deleted across %s dates, %s measurements (%s)",
+        mode, written, backfilled, ex_rows_written, deleted,
+        len(affected_dates), measurements["written"], measurements["status"],
     )
     return _resp(200, {
         "status": "ok",
         "mode": mode,
         "fetched": len(updated_workouts),
         "written": written,
+        "workouts_written": written,
+        "backfilled": backfilled,
+        "exercise_rows_written": ex_rows_written,
         "deleted": deleted,
-        "measurements_written": measurements_written,
+        "measurements_written": measurements["written"],
+        "measurements_available": measurements["available"],
+        "measurements_status": measurements["status"],
+        "canonicals_touched": sorted(affected_canonicals),
         "dates": sorted(affected_dates),
     })
 
 
-def _load_hevy_templates(config_table, api_key):
+def _hevy_exercise_rows_exist(exercises_table, date, canonicals):
+    """True only when EVERY expected canonical already has a fitness-exercises
+    row for ``date``. Used to decide whether a workout whose rolled-up row is
+    unchanged can be cheaply skipped, or must be backfilled.
+
+    "Rolled-up row unchanged" is NOT the same condition as "exercise rows
+    exist": the pre-PR#3 poller wrote rolled-up rows with zero exercise rows.
+    So we check the exercise store directly rather than inferring from the
+    session row. Empty ``canonicals`` (a workout with no parseable exercises)
+    returns True — there is nothing to backfill.
+    """
+    if not canonicals:
+        return True
+    for canonical in canonicals:
+        existing = get_item(exercises_table, {"canonical": canonical, "date": date})
+        if not existing:
+            return False
+    return True
+
+
+def _apply_hevy_workout(workout, templates, workouts_table, exercises_table, force=False):
+    """Upsert a single Hevy workout into BOTH stores, keeping the two writes
+    decoupled.
+
+    Decision table (per workout):
+      • rolled-up row changed / absent  → write BOTH rows.
+      • rolled-up row unchanged, exercise rows MISSING → backfill: write the
+        exercise rows, skip the redundant fitness-workouts put_item.
+      • rolled-up row unchanged, exercise rows PRESENT → skip both (cheap
+        no-op), UNLESS ``force`` (the explicit backfill entrypoint), which
+        always rewrites both. All writes are idempotent overwrites keyed on
+        (date, strava_id) and (canonical, date), so re-running never
+        duplicates rows or corrupts PR flags.
+
+    Returns None when the workout is unusable (no id/date), else a dict:
+      {workout_written, backfilled, ex_rows_written, touched, date, canonicals}
+    where ``touched`` means the exercise store changed for this workout, so its
+    canonicals must feed the PR / weekly-volume recompute.
+    """
+    row = workout_to_row(workout)
+    if row is None:
+        return None
+    date = row["date"]
+
+    ex_rows = workout_to_exercise_rows(workout, templates)
+    canonicals = {er["canonical"] for er in ex_rows if er.get("canonical")}
+
+    is_dupe = (not force) and _hevy_row_is_duplicate(workouts_table, row)
+    rows_exist = _hevy_exercise_rows_exist(exercises_table, date, canonicals)
+
+    # Fully synced and nothing changed → cheap skip (only when not forced).
+    if is_dupe and rows_exist:
+        logger.info(
+            "hevy workout %s on %s unchanged and fully synced — skipping",
+            row.get("hevy_id"), date,
+        )
+        return {
+            "workout_written": False,
+            "backfilled": False,
+            "ex_rows_written": 0,
+            "touched": False,
+            "date": date,
+            "canonicals": set(),
+        }
+
+    # Rolled-up row: write unless it's a genuine no-op duplicate. The dupe-check
+    # ONLY suppresses this redundant session-row put — never the exercise write.
+    workout_written = False
+    if not is_dupe:
+        put_item(workouts_table, row)
+        workout_written = True
+
+    # Exercise rows: always (re)written when we reach here. Idempotent overwrite
+    # on (canonical, date). This is the backfill path when the session row was a
+    # duplicate but its exercise rows were missing.
+    ex_rows_written = _write_hevy_exercise_rows(exercises_table, ex_rows, date)
+    backfilled = is_dupe and not workout_written
+
+    if backfilled:
+        logger.info(
+            "hevy workout %s on %s: session row unchanged but exercise rows "
+            "missing — backfilled %s exercise rows",
+            row.get("hevy_id"), date, ex_rows_written,
+        )
+
+    return {
+        "workout_written": workout_written,
+        "backfilled": backfilled,
+        "ex_rows_written": ex_rows_written,
+        "touched": True,
+        "date": date,
+        "canonicals": canonicals,
+    }
+
+
+def _load_hevy_templates(config_table, api_key, force_refresh=False):
     """Return the exercise-template cache (id → template dict), refreshing it
-    from Hevy only when the cached row is missing or older than ~7 days.
+    from Hevy only when the cached row is missing, older than ~7 days, or when
+    ``force_refresh`` is set (the backfill entrypoint re-fetches so muscle-group
+    resolution is current for the whole history walk).
     Degrades to whatever is cached (or {}) if the refresh call fails."""
     cache_row = get_item(config_table, {"key": TEMPLATE_CACHE_KEY}) or {}
-    if not templates_cache_is_stale(cache_row):
+    if not force_refresh and not templates_cache_is_stale(cache_row):
         return cache_row.get("templates") or {}
     try:
         templates = fetch_exercise_templates(api_key)
@@ -1459,27 +1602,49 @@ def _ingest_hevy_body_measurements(api_key):
     """Fetch Hevy body measurements and write each field into
     fitness-health-metrics under a ``#hevy`` source suffix, routed through the
     existing merge/ordering-guard helpers (NOT a bare put_item overwrite —
-    that regression was fixed in PR #2 and must not return). Returns the number
-    of metric points written."""
-    measurements = fetch_body_measurements(api_key)
+    that regression was fixed in PR #2 and must not return).
+
+    Returns a summary dict so ``measurements_written: 0`` is never silently
+    ambiguous:
+      {"written": int, "available": int, "status": str}
+    where ``status`` is one of:
+      • "ok"    — measurements were fetched and written
+      • "empty" — the fetch succeeded but Mateo has genuinely logged none
+      • "error" — the fetch/parse raised (a real failure, not empty data)
+    ``available`` is the count of raw measurement records Hevy returned.
+    """
+    try:
+        measurements = fetch_body_measurements(api_key)
+    except Exception:
+        logger.exception("hevy body-measurement fetch failed")
+        return {"written": 0, "available": 0, "status": "error"}
+
     if not measurements:
-        return 0
+        # A valid, empty result. With the pageSize clamp in place this now
+        # genuinely means "no measurements logged" rather than a masked 400.
+        return {"written": 0, "available": 0, "status": "empty"}
+
     table = get_table("HEALTH_METRICS_TABLE")
     written = 0
-    for m in measurements:
-        for metric_source, unit, kind, date, value in body_measurement_to_metrics(m):
-            if kind == "last":
-                # Body measurements are point-in-time; guard against an
-                # out-of-order re-fetch regressing a fresher stored value.
-                _write_last_with_ordering_guard(
-                    table, date, metric_source, unit, _now_iso(), value
-                )
-            else:
-                _merge_samples_and_aggregate(
-                    table, date, metric_source, unit, kind, [(_now_iso(), value)]
-                )
-            written += 1
-    return written
+    try:
+        for m in measurements:
+            for metric_source, unit, kind, date, value in body_measurement_to_metrics(m):
+                if kind == "last":
+                    # Body measurements are point-in-time; guard against an
+                    # out-of-order re-fetch regressing a fresher stored value.
+                    _write_last_with_ordering_guard(
+                        table, date, metric_source, unit, _now_iso(), value
+                    )
+                else:
+                    _merge_samples_and_aggregate(
+                        table, date, metric_source, unit, kind, [(_now_iso(), value)]
+                    )
+                written += 1
+    except Exception:
+        logger.exception("hevy body-measurement write failed")
+        return {"written": written, "available": len(measurements), "status": "error"}
+
+    return {"written": written, "available": len(measurements), "status": "ok"}
 
 
 def _hevy_row_is_duplicate(table, row):

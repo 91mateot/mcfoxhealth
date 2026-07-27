@@ -62,6 +62,28 @@ HEVY_STRENGTH_TYPE = "Workout"
 KG_TO_LB = 2.20462262
 CM_TO_IN = 0.393700787
 
+# Every public Hevy list endpoint (workouts, workouts/events, body_measurements,
+# exercise_templates) caps ``pageSize`` at 10 (per the OpenAPI spec). Sending a
+# larger value returns HTTP 400, which our fetch helpers treat as a hard stop
+# and degrade to an empty collection. That is exactly why the first live poll
+# returned ``measurements_written: 0`` — fetch_body_measurements defaulted to
+# pageSize=100 and every page 400'd. Clamp requests to this ceiling so a
+# generous caller-supplied page_size never silently zeroes out a fetch.
+HEVY_MAX_PAGE_SIZE = 10
+
+
+def _clamp_page_size(page_size: int) -> int:
+    """Clamp a requested page size to Hevy's per-endpoint maximum (10). A value
+    above the cap makes Hevy return 400, so we quietly reduce it rather than let
+    the whole fetch fail."""
+    try:
+        ps = int(page_size)
+    except (TypeError, ValueError):
+        return HEVY_MAX_PAGE_SIZE
+    if ps < 1:
+        return 1
+    return min(ps, HEVY_MAX_PAGE_SIZE)
+
 # Exercise-template cache lives in fitness-user-config under this key. Templates
 # are near-static (~226 rows on a typical account), so we refresh at most weekly.
 TEMPLATE_CACHE_KEY = "hevy_exercise_templates"
@@ -521,6 +543,7 @@ def _fetch_paginated(
     ``page >= page_count``. Never raises — degrades to whatever was collected.
     """
     items: list = []
+    page_size = _clamp_page_size(page_size)
     for page in range(1, max_pages + 1):
         query = {"page": page, "pageSize": page_size}
         if extra_query:
@@ -546,8 +569,8 @@ def _fetch_paginated(
 
 def fetch_exercise_templates(
     api_key: str,
-    page_size: int = 100,
-    max_pages: int = 10,
+    page_size: int = 10,
+    max_pages: int = 30,
     http_get: Callable[[str, str], tuple] = _http_get,
 ) -> dict:
     """Fetch ALL exercise templates and return id → template dict.
@@ -662,6 +685,7 @@ def fetch_recent_workouts(
     if not api_key:
         raise ValueError("hevy api key is empty")
 
+    page_size = _clamp_page_size(page_size)
     rows: list = []
     for page in range(1, max_pages + 1):
         url = f"{HEVY_API_BASE}/{HEVY_API_VERSION}/workouts?page={page}&pageSize={page_size}"
@@ -697,6 +721,7 @@ def fetch_recent_workouts_full(
     if not api_key:
         raise ValueError("hevy api key is empty")
 
+    page_size = _clamp_page_size(page_size)
     workouts: list = []
     for page in range(1, max_pages + 1):
         url = f"{HEVY_API_BASE}/{HEVY_API_VERSION}/workouts?page={page}&pageSize={page_size}"
@@ -718,11 +743,15 @@ def fetch_recent_workouts_full(
 
 def fetch_body_measurements(
     api_key: str,
-    page_size: int = 100,
+    page_size: int = 10,
     max_pages: int = 10,
     http_get: Callable[[str, str], tuple] = _http_get,
 ) -> list:
-    """Fetch all body measurements as raw Hevy dicts. Degrades to [] on error."""
+    """Fetch all body measurements as raw Hevy dicts. Degrades to [] on error.
+
+    ``page_size`` is clamped to Hevy's per-endpoint max (10) by _fetch_paginated;
+    the default here already sits at the ceiling so the request is always valid.
+    """
     if not api_key:
         raise ValueError("hevy api key is empty")
     return _fetch_paginated(
