@@ -317,6 +317,12 @@ Resources:
             TableName: !Ref HealthMetricsTable
         - DynamoDBCrudPolicy:
             TableName: !Ref WorkoutsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExercisesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserConfigTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DailyScoresTable
         - Statement:
             - Effect: Allow
               Action:

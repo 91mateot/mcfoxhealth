@@ -31,82 +31,17 @@ ESTIMATOR_MODEL_ID = os.environ.get("ESTIMATOR_MODEL_ID", "us.anthropic.claude-s
 
 
 # ── Exercise canonicalization ─────────────────────────────────────────────
-
-MUSCLE_GROUPS = {"chest", "back", "shoulders", "arms", "legs", "core", "glutes", "cardio", "mobility", "other"}
-
-# The LLM is expected to canonicalize, but we normalize unknown names too.
-_SYNONYMS = {
-    "bench": "bench_press",
-    "bench press": "bench_press",
-    "barbell bench": "bench_press",
-    "bb bench": "bench_press",
-    "dumbbell bench": "db_bench_press",
-    "db bench": "db_bench_press",
-    "incline bench": "incline_bench_press",
-    "incline db": "incline_db_press",
-    "incline dumbbell": "incline_db_press",
-    "ohp": "overhead_press",
-    "press": "overhead_press",
-    "overhead press": "overhead_press",
-    "squat": "back_squat",
-    "back squat": "back_squat",
-    "front squat": "front_squat",
-    "dl": "deadlift",
-    "deadlift": "deadlift",
-    "rdl": "romanian_deadlift",
-    "romanian deadlift": "romanian_deadlift",
-    "row": "barbell_row",
-    "barbell row": "barbell_row",
-    "bb row": "barbell_row",
-    "seated row": "seated_cable_row",
-    "seated back row": "seated_cable_row",
-    "seated cable row": "seated_cable_row",
-    "pullup": "pull_up",
-    "pull-up": "pull_up",
-    "pull up": "pull_up",
-    "chin up": "chin_up",
-    "lat pulldown": "lat_pulldown",
-    "pulldown": "lat_pulldown",
-    "dip": "dip",
-    "dips": "dip",
-    "leg press": "leg_press",
-    "leg curl": "leg_curl",
-    "leg extension": "leg_extension",
-    "hip abductor": "hip_abductor",
-    "hip abductors": "hip_abductor",
-    "hip thrust": "hip_thrust",
-    "plank": "plank",
-    "curl": "biceps_curl",
-    "bicep curl": "biceps_curl",
-    "biceps curl": "biceps_curl",
-    "tricep pushdown": "triceps_pushdown",
-    "pushdown": "triceps_pushdown",
-    "lateral raise": "lateral_raise",
-    "side raise": "lateral_raise",
-    "face pull": "face_pull",
-    "single arm march": "single_arm_march",
-    "single-arm march": "single_arm_march",
-    "cable crossover": "cable_crossover",
-    "back cable crossover": "cable_crossover",
-}
-
-
-def _canonicalize(name: str) -> str:
-    """Slugify an exercise name. Looks up synonyms first; falls back to a
-    deterministic lowercase/underscore slug."""
-    if not name:
-        return "unknown"
-    lower = name.strip().lower()
-    if lower in _SYNONYMS:
-        return _SYNONYMS[lower]
-    # Try stripping qualifiers (barbell/dumbbell/cable) to hit the synonyms map.
-    stripped = re.sub(r"^(barbell|dumbbell|cable|machine|bb|db)\s+", "", lower)
-    if stripped in _SYNONYMS:
-        return _SYNONYMS[stripped]
-    # Deterministic slug fallback.
-    slug = re.sub(r"[^\w\s-]", "", lower)
-    slug = re.sub(r"\s+", "_", slug).strip("_")
-    return slug[:50] or "unknown"
+#
+# The canonicalization vocabulary lives in shared.exercise_canonical so the
+# Hevy poller path (shared.hevy_client) canonicalizes exercises IDENTICALLY to
+# this LLM-parser path. A second divergent canonicalizer would split the same
+# lift across two keys in fitness-exercises and break PR/e1RM history joins.
+# Re-exported here under the historical private name for backwards compat.
+from shared.exercise_canonical import (  # noqa: E402
+    MUSCLE_GROUPS,
+    _SYNONYMS,
+    canonicalize as _canonicalize,
+)
 
 
 # ── Lift parser (Bedrock) ─────────────────────────────────────────────────

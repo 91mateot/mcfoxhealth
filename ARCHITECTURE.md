@@ -1,0 +1,137 @@
+# McFox Health — Architecture
+
+Personal health/fitness dashboard for Mateo. Serverless AWS backend (Python 3.13
+Lambdas behind an HTTP API, DynamoDB storage, SAM-managed) with scheduled ingest
+from external providers. This document is the human-readable companion to
+`architecture.json`; keep them in sync (shared-dev-conventions § Architecture Map
+Maintenance).
+
+> Scope note: this map was introduced alongside the Hevy set-level ingestion
+> work and documents the backend (`backend/`) with emphasis on the ingest →
+> compute → lift-learning data flow. It reflects the structure that has been
+> directly verified in the code; extend it as other areas are touched.
+
+## Runtime topology
+
+```
+External providers                 Lambdas (functions/)            DynamoDB (fitness-*)
+──────────────────                 ────────────────────            ───────────────────
+HealthAutoExport ──POST /ingest/health ─┐
+Withings webhook ──POST /ingest/withings├─▶ IngestFunction ──▶ health-metrics, workouts,
+Strava webhook   ──POST /ingest/strava  ┘   (handler.lambda_handler)  exercises, user-config,
+Hevy API (poll)  ──Schedule hevy_poll  ──▶                            daily-scores
+                                             │  invokes (async) ▼
+                                             └────────────▶ ComputeFunction ──▶ daily-scores,
+                                                            (baselines/scores)   baselines,
+                                                                                 correlations
+Browser / app  ──HTTP API /api/* ─────────▶ ApiFunction  (read models)
+Browser / app  ──HTTP API /nutrition/* ───▶ NutritionFunction
+Browser / app  ──HTTP API /coach/* ───────▶ CoachFunction (Bedrock tool-use)
+```
+
+Shared business logic lives in `backend/shared/shared/` and is packaged as a
+Lambda layer (`SharedLayer`) imported by every function.
+
+## Lift-learning engine (the core of the Hevy work)
+
+A complete set-level lift-tracking engine already existed and reads exclusively
+from the `fitness-exercises` table (PK=`canonical`, SK=`date`, one row per
+exercise per day). Any writer into that table lights up e1RM, PR detection,
+stall detection, weekly volume, the coach, the workout proposer, and the API —
+for free.
+
+Two writers now feed `fitness-exercises`:
+
+1. **LLM lift-parser path** — `workout_service.annotate_workout` parses free-form
+   notes (Bedrock) and calls `_write_exercise_rows`.
+2. **Hevy poller path** — `ingest/handler._handle_hevy_sync` maps Hevy's
+   structured `exercises[]`/`sets[]` into the same row shape via
+   `hevy_client.workout_to_exercise_rows` + `_write_hevy_exercise_rows`.
+
+Both canonicalize through the SAME vocabulary
+(`shared.exercise_canonical.canonicalize`) so the same lift never splits across
+two keys. After writing, both call `lift_compute.recompute_prs_for_canonicals`
+and `recompute_weekly_volume`.
+
+## Hevy ingestion data flow (added)
+
+`IngestFunction` runs a daily `hevy_poll` schedule. Per poll:
+
+1. **Exercise-template cache** — `fetch_exercise_templates` (paginated) →
+   cached in `fitness-user-config` under key `hevy_exercise_templates` with a
+   `fetched_at`; refreshed only when older than ~7 days. Provides real
+   `primary_muscle_group` per exercise.
+2. **Workout fetch** — incremental via `GET /v1/workouts/events?since=<watermark>`
+   (`fetch_workout_events`, applies updates AND deletions) when a
+   `hevy_last_sync` watermark exists; otherwise a bounded cold-start page-walk
+   (`fetch_recent_workouts_full`). Watermark persisted in `fitness-user-config`
+   under key `hevy_last_sync`.
+3. **Write** — each workout writes a rolled-up session row to `fitness-workouts`
+   (`workout_to_row`, now preserving `description`, `routine_id`, `start_time`,
+   `end_time`, `updated_at`, a per-set-type breakdown, `avg_rpe`/`max_rpe`, and
+   an explicit `cal_unavailable` flag) AND per-exercise rows to
+   `fitness-exercises` (`workout_to_exercise_rows` → `_write_hevy_exercise_rows`,
+   `source="hevy"`).
+4. **Deletions** — a workout deleted in Hevy is removed from `fitness-workouts`
+   and its `source="hevy"` rows removed from `fitness-exercises`.
+5. **Recompute** — `recompute_prs_for_canonicals` + `recompute_weekly_volume`
+   for touched canonicals; `_trigger_compute` for touched dates.
+6. **Body measurements** — `GET /v1/body_measurements` (`fetch_body_measurements`
+   + `body_measurement_to_metrics`) → `fitness-health-metrics` under a `#hevy`
+   source suffix (e.g. `weight#hevy`, `waist#hevy`, `bodyfat_hevy#hevy`,
+   `lean_mass#hevy`), converting cm→in and kg→lb, routed through the existing
+   merge / ordering-guard helpers (never a bare `put_item` overwrite).
+
+Read-only integration: no POST/PUT to Hevy. Calories/HR are not available from
+Hevy's public API — strain is estimated and calories are flagged unavailable
+rather than reported as a misleading 0.
+
+## Modules — `backend/shared/shared/`
+
+| Module | Responsibility |
+|---|---|
+| `exercise_canonical.py` | **(new)** Single source of truth for exercise-name → `canonical` slug (`canonicalize`, `_SYNONYMS`) and the app's 10-value `MUSCLE_GROUPS` vocabulary. Imported by both the LLM parser and the Hevy poller. |
+| `hevy_client.py` | Hevy API client: workout → rolled-up row + exercise rows, muscle-group mapping (20 Hevy enum values → app vocabulary), template cache, events-based incremental sync, body-measurement mapping. HTTP isolated behind an injectable `http_get` seam. |
+| `workout_service.py` | LLM lift-parser path (`annotate_workout`), `_write_exercise_rows`, coach debrief. Re-exports canonicalization from `exercise_canonical`. |
+| `lift_compute.py` | Epley e1RM, PR detection, stall detection, `recompute_prs_for_canonicals`, `recompute_weekly_volume` over `fitness-exercises`. |
+| `coach_context.py` | Assembles coach prompt context (reads `fitness-exercises`, scores, user-config). |
+| `workout_proposer.py` | Proposes next workout from history + program config. |
+| `scoring.py` | TRIMP / strain / HR-zone math + hot-swappable scoring weights. |
+| `sleep_quality.py` | Sleep-quality evaluation. |
+| `cost_service.py`, `db.py`, `timezone.py` | Cost tracking, DynamoDB helpers, local-time helpers. |
+
+## Functions — `backend/functions/`
+
+| Function | Routes / triggers | Notes |
+|---|---|---|
+| `ingest/` | `POST /ingest/{health,withings,strava}`, `GET /ingest/strava`, `Schedule hevy_poll` | Writes health-metrics, workouts, exercises, user-config, daily-scores; invokes ComputeFunction. |
+| `compute/` | daily + weekly schedules | Baselines, daily scores, correlations, lift roll-ups. |
+| `api/` | `GET/POST /api/*` | Read models for the dashboard. |
+| `nutrition/` | `/nutrition/*` | Meal logging, favorites, workout annotation route. |
+| `coach/` | `/coach/*` | Bedrock tool-use coach (FastAPI app). |
+
+## DynamoDB tables (`fitness-*`)
+
+| Table | Key schema | Purpose |
+|---|---|---|
+| `fitness-health-metrics` | date (PK), metric_source (SK) | Per-metric daily values; source-suffixed (`#hae`, `#hevy`, …). |
+| `fitness-daily-scores` | date (PK) | Daily composite scores + weekly volume roll-ups (`week_<date>`). |
+| `fitness-workouts` | date (PK), strava_id (SK) | Rolled-up sessions (Strava cardio + Hevy strength, `hevy_<id>`). |
+| `fitness-exercises` | canonical (PK), date (SK) | Per-exercise-per-day rows; the lift-learning engine's substrate. |
+| `fitness-user-config` | key (PK) | Config + caches (scoring weights, favorites, `hevy_exercise_templates`, `hevy_last_sync`). |
+| `fitness-nutrition` | date (PK), meal_id (SK) | Meals. |
+| `fitness-journal` | date (PK) | Journal entries / tags. |
+| `fitness-baselines` | type (PK) | Rolling baselines. |
+| `fitness-correlations` | tag (PK), metric (SK) | Tag↔metric correlations. |
+| `fitness-calibration` | date (PK) | Nutrition calibration. |
+| `fitness-conversations` | user_id (PK), conversation_id (SK) | Coach conversations. |
+| `fitness-feedback` | user_id (PK), target_key (SK) | Coach feedback. |
+| `fitness-events` | (see template.yaml) | Event log. |
+
+## Testing
+
+Offline pytest suite in `backend/tests/`. External HTTP is injected via seams
+(`http_get`) and DynamoDB is stubbed with fake tables, so no live keys/AWS are
+needed. Run: `cd backend && .venv/bin/python -m pytest tests --deselect tests/test_api_contract.py`
+(`test_api_contract.py` hits live endpoints; `test_coach_auth.py` needs an
+optional `fastapi` dep — both are known-excluded from the offline run).
