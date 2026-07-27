@@ -55,32 +55,54 @@ and `recompute_weekly_volume`.
 
 ## Hevy ingestion data flow (added)
 
-`IngestFunction` runs a daily `hevy_poll` schedule. Per poll:
+`IngestFunction` runs a daily `hevy_poll` schedule (and an explicit
+`hevy_backfill` action). Per poll:
 
-1. **Exercise-template cache** — `fetch_exercise_templates` (paginated) →
-   cached in `fitness-user-config` under key `hevy_exercise_templates` with a
-   `fetched_at`; refreshed only when older than ~7 days. Provides real
-   `primary_muscle_group` per exercise.
-2. **Workout fetch** — incremental via `GET /v1/workouts/events?since=<watermark>`
-   (`fetch_workout_events`, applies updates AND deletions) when a
-   `hevy_last_sync` watermark exists; otherwise a bounded cold-start page-walk
-   (`fetch_recent_workouts_full`). Watermark persisted in `fitness-user-config`
-   under key `hevy_last_sync`.
-3. **Write** — each workout writes a rolled-up session row to `fitness-workouts`
-   (`workout_to_row`, now preserving `description`, `routine_id`, `start_time`,
-   `end_time`, `updated_at`, a per-set-type breakdown, `avg_rpe`/`max_rpe`, and
-   an explicit `cal_unavailable` flag) AND per-exercise rows to
-   `fitness-exercises` (`workout_to_exercise_rows` → `_write_hevy_exercise_rows`,
-   `source="hevy"`).
+1. **Exercise-template cache** — `fetch_exercise_templates` (paginated, `pageSize`
+   capped at Hevy's max of 10) → cached in `fitness-user-config` under key
+   `hevy_exercise_templates` with a `fetched_at`; refreshed only when older than
+   ~7 days (or forced on a backfill). Provides real `primary_muscle_group` per
+   exercise.
+2. **Workout fetch** — three modes: **incremental** via
+   `GET /v1/workouts/events?since=<watermark>` (`fetch_workout_events`, applies
+   updates AND deletions) when a `hevy_last_sync` watermark exists; **cold-start**
+   bounded page-walk (`fetch_recent_workouts_full`) when no watermark; **backfill**
+   (`action=hevy_backfill`, or a poll carrying `force_full`/`reset_watermark`)
+   which IGNORES the watermark and does a full page-walk (default `pageSize` 10 ×
+   `max_pages` 20 = up to 200 workouts, both event-overridable). Watermark
+   persisted in `fitness-user-config` under key `hevy_last_sync`.
+3. **Write (decoupled)** — per workout, `_apply_hevy_workout` writes a rolled-up
+   session row to `fitness-workouts` (`workout_to_row`, preserving `description`,
+   `routine_id`, `start_time`, `end_time`, `updated_at`, a per-set-type breakdown,
+   `avg_rpe`/`max_rpe`, and an explicit `cal_unavailable` flag) AND per-exercise
+   rows to `fitness-exercises` (`workout_to_exercise_rows` →
+   `_write_hevy_exercise_rows`, `source="hevy"`). The two writes are
+   **independent**: the rolled-up-row dupe-check (`_hevy_row_is_duplicate`) only
+   suppresses the redundant `fitness-workouts` put — it NEVER gates the
+   exercise-row write. A workout whose session row is unchanged but whose
+   exercise rows are missing is **backfilled** (existence checked via
+   `_hevy_exercise_rows_exist` on `(canonical, date)`); a fully-synced workout is
+   a cheap skip. `backfill`/`force_full` rewrites both rows unconditionally. All
+   writes are idempotent overwrites, so re-polling never duplicates rows or
+   corrupts PR flags.
 4. **Deletions** — a workout deleted in Hevy is removed from `fitness-workouts`
    and its `source="hevy"` rows removed from `fitness-exercises`.
 5. **Recompute** — `recompute_prs_for_canonicals` + `recompute_weekly_volume`
-   for touched canonicals; `_trigger_compute` for touched dates.
-6. **Body measurements** — `GET /v1/body_measurements` (`fetch_body_measurements`
-   + `body_measurement_to_metrics`) → `fitness-health-metrics` under a `#hevy`
-   source suffix (e.g. `weight#hevy`, `waist#hevy`, `bodyfat_hevy#hevy`,
-   `lean_mass#hevy`), converting cm→in and kg→lb, routed through the existing
-   merge / ordering-guard helpers (never a bare `put_item` overwrite).
+   for touched canonicals (including backfilled ones); `_trigger_compute` for
+   touched dates.
+6. **Body measurements** — `GET /v1/body_measurements` (`fetch_body_measurements`,
+   `pageSize` capped at Hevy's max of 10 — a larger value 400s, which was the
+   root cause of the early `measurements_written: 0` runs) + `body_measurement_to_metrics`
+   → `fitness-health-metrics` under a `#hevy` source suffix (e.g. `weight#hevy`,
+   `waist#hevy`, `bodyfat_hevy#hevy`, `lean_mass#hevy`), converting cm→in and
+   kg→lb, routed through the existing merge / ordering-guard helpers (never a
+   bare `put_item` overwrite). The summary distinguishes `measurements_status`
+   `ok` / `empty` (genuinely none logged) / `error` (fetch/parse failure) so a
+   zero is never ambiguous.
+
+The response summary reports: `mode`, `fetched`, `workouts_written`,
+`backfilled`, `exercise_rows_written`, `deleted`, `measurements_written`,
+`measurements_available`, `measurements_status`, `canonicals_touched`, `dates`.
 
 Read-only integration: no POST/PUT to Hevy. Calories/HR are not available from
 Hevy's public API — strain is estimated and calories are flagged unavailable
@@ -104,7 +126,7 @@ rather than reported as a misleading 0.
 
 | Function | Routes / triggers | Notes |
 |---|---|---|
-| `ingest/` | `POST /ingest/{health,withings,strava}`, `GET /ingest/strava`, `Schedule hevy_poll` | Writes health-metrics, workouts, exercises, user-config, daily-scores; invokes ComputeFunction. |
+| `ingest/` | `POST /ingest/{health,withings,strava}`, `GET /ingest/strava`, `Schedule hevy_poll`, `action=hevy_backfill` | Writes health-metrics, workouts, exercises, user-config, daily-scores; invokes ComputeFunction. |
 | `compute/` | daily + weekly schedules | Baselines, daily scores, correlations, lift roll-ups. |
 | `api/` | `GET/POST /api/*` | Read models for the dashboard. |
 | `nutrition/` | `/nutrition/*` | Meal logging, favorites, workout annotation route. |

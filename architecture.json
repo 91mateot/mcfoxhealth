@@ -19,7 +19,8 @@
         "POST /ingest/withings",
         "POST /ingest/strava",
         "GET /ingest/strava",
-        "Schedule hevy_poll (daily cron 30 8 * * ? * UTC)"
+        "Schedule hevy_poll (daily cron 30 8 * * ? * UTC)",
+        "async action=hevy_backfill (or hevy_poll with force_full/reset_watermark)"
       ],
       "writes_tables": ["fitness-health-metrics", "fitness-workouts", "fitness-exercises", "fitness-user-config", "fitness-daily-scores"],
       "invokes": ["ComputeFunction"]
@@ -72,7 +73,8 @@
         "fetch_body_measurements",
         "body_measurement_to_metrics"
       ],
-      "constants": {"KG_TO_LB": 2.20462262, "CM_TO_IN": 0.393700787, "TEMPLATE_CACHE_KEY": "hevy_exercise_templates", "LAST_SYNC_KEY": "hevy_last_sync"}
+      "constants": {"KG_TO_LB": 2.20462262, "CM_TO_IN": 0.393700787, "TEMPLATE_CACHE_KEY": "hevy_exercise_templates", "LAST_SYNC_KEY": "hevy_last_sync", "HEVY_MAX_PAGE_SIZE": 10},
+      "notes": "All Hevy list endpoints cap pageSize at 10 (per OpenAPI spec); page_size is clamped via _clamp_page_size so an over-cap value never 400s and silently zeroes a fetch (was the measurements_written:0 root cause)."
     },
     {
       "path": "backend/shared/shared/workout_service.py",
@@ -107,18 +109,24 @@
   ],
   "data_flows": {
     "hevy_ingestion": {
-      "trigger": "IngestFunction hevy_poll daily schedule (or action=hevy_poll)",
+      "trigger": "IngestFunction hevy_poll daily schedule (or action=hevy_poll); explicit action=hevy_backfill (or hevy_poll with force_full/reset_watermark) for a full re-sync",
       "auth": "api-key header; secret hevy-api-key (Secrets Manager us-west-2, JSON {api_key})",
       "read_only": true,
+      "modes": {
+        "incremental": "GET /v1/workouts/events?since=<hevy_last_sync> when a watermark exists (updates + deletions).",
+        "cold_start": "bounded page-walk of GET /v1/workouts when no watermark.",
+        "backfill": "action=hevy_backfill (or force_full/reset_watermark): IGNORES the watermark, full page-walk (default pageSize 10 x max_pages 20 = up to 200 workouts, both event-overridable), forces both writes regardless of dupe state and forces a template refresh, then advances the watermark. Idempotent, safely re-runnable."
+      },
       "steps": [
-        "Refresh exercise-template cache (fitness-user-config key=hevy_exercise_templates) if older than ~7 days.",
-        "Fetch workouts incrementally via GET /v1/workouts/events?since=<hevy_last_sync> (updates + deletions); cold-start page-walk when no watermark.",
-        "Write rolled-up row to fitness-workouts (workout_to_row) + per-exercise rows to fitness-exercises (workout_to_exercise_rows, source=hevy).",
+        "Refresh exercise-template cache (fitness-user-config key=hevy_exercise_templates) if older than ~7 days (forced on backfill). pageSize clamped to Hevy's max of 10.",
+        "Fetch workouts per mode (incremental / cold_start / backfill above).",
+        "Per workout (_apply_hevy_workout), DECOUPLED writes: the rolled-up fitness-workouts row (workout_to_row) and the per-exercise fitness-exercises rows (workout_to_exercise_rows, source=hevy) are independent. The session-row dupe-check (_hevy_row_is_duplicate) only suppresses the redundant fitness-workouts put; it NEVER gates the exercise-row write. A workout whose session row is unchanged but whose exercise rows are missing is BACKFILLED (existence checked via _hevy_exercise_rows_exist on (canonical,date)); a fully-synced workout is a cheap skip; backfill/force_full rewrites both unconditionally. All writes are idempotent overwrites.",
         "Delete workouts removed in Hevy from fitness-workouts and their source=hevy fitness-exercises rows.",
-        "recompute_prs_for_canonicals + recompute_weekly_volume for touched canonicals; _trigger_compute for touched dates.",
-        "Ingest GET /v1/body_measurements into fitness-health-metrics under #hevy sources (cm->in, kg->lb) via merge/ordering-guard helpers.",
+        "recompute_prs_for_canonicals + recompute_weekly_volume for touched canonicals (including backfilled ones); _trigger_compute for touched dates.",
+        "Ingest GET /v1/body_measurements (pageSize clamped to Hevy's max of 10 -- an over-cap value 400s and silently returns empty, the measurements_written:0 root cause) into fitness-health-metrics under #hevy sources (cm->in, kg->lb) via merge/ordering-guard helpers. Summary reports measurements_status ok/empty/error so a zero is never ambiguous.",
         "Advance hevy_last_sync watermark in fitness-user-config."
       ],
+      "summary_fields": ["mode", "fetched", "workouts_written", "backfilled", "exercise_rows_written", "deleted", "measurements_written", "measurements_available", "measurements_status", "canonicals_touched", "dates"],
       "notes": "Hevy public API exposes no calories/HR: strain estimated, cal flagged cal_unavailable. Never a bare put_item overwrite for metrics (PR #2 regression guard)."
     },
     "muscle_group_mapping": {
