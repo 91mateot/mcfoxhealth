@@ -23,7 +23,19 @@ logger = logging.getLogger("ingest")
 logger.setLevel(logging.INFO)
 
 from shared.db import get_item, get_table, put_item, query_items
-from shared.hevy_client import fetch_recent_workouts as _fetch_hevy_workouts
+from shared.hevy_client import (
+    body_measurement_to_metrics,
+    fetch_body_measurements,
+    fetch_exercise_templates,
+    fetch_recent_workouts_full,
+    fetch_workout_events,
+    templates_cache_is_stale,
+    workout_to_exercise_rows,
+    workout_to_row,
+    LAST_SYNC_KEY,
+    TEMPLATE_CACHE_KEY,
+)
+from shared.lift_compute import recompute_prs_for_canonicals, recompute_weekly_volume
 from shared.scoring import compute_trimp, compute_strain, classify_hr_zone, estimate_strain_simple, HR_ZONES, MAX_HR
 from shared.sleep_quality import evaluate_quality as _eval_sleep_quality
 from shared.timezone import local_today_str
@@ -1148,18 +1160,36 @@ def _handle_strava(event):
 # ── Hevy sync (scheduled poll) ─────────────────────────────────
 
 def _handle_hevy_sync(event):
-    """Poll the Hevy API for recent strength workouts and upsert them.
+    """Poll the Hevy API for strength workouts + body measurements and upsert.
 
     Runs from the EventBridge daily schedule (source == "aws.events") or an
-    explicit async invoke with {"action": "hevy_poll"}. Hevy has no webhooks
-    on its public API, so this poll is how gym/lifting sessions reach the
-    fitness-workouts table.
+    explicit async invoke with {"action": "hevy_poll"}. Hevy has no webhooks on
+    its public API, so this poll is how gym/lifting sessions reach the stack.
+
+    Two sync modes:
+      • INCREMENTAL (default when a ``hevy_last_sync`` watermark exists): pull
+        GET /v1/workouts/events?since=<watermark>, applying updates AND
+        deletions. This is Hevy's purpose-built incremental feed and is the
+        only way a workout deleted in Hevy ever gets removed from McFox.
+      • COLD START (no watermark): page-walk GET /v1/workouts newest-first as a
+        bounded backfill, then set the watermark so subsequent polls go
+        incremental.
+
+    Each workout is written to BOTH:
+      • fitness-workouts — the rolled-up session row (dur/volume/strain/etc.)
+      • fitness-exercises — one row per canonical exercise, in the exact shape
+        the existing lift engine (lift_compute / coach / proposer / api) reads.
+        Writing here lights up e1RM, PR detection, stall detection and weekly
+        volume for free. We recompute PR flags for the touched canonicals
+        exactly as workout_service.annotate_workout does.
+
+    Also ingests GET /v1/body_measurements into fitness-health-metrics under a
+    ``#hevy`` source suffix, routed through the same merge/ordering-guard
+    helpers the HAE path uses (never a bare put_item overwrite).
 
     Failure modes are all soft — a missing key or a Hevy outage logs a clear
-    message and returns 200 with a status so the daily cron never crashes and
-    Strava/Compute keep working:
-      • missing hevy-api-key secret → log "hevy-api-key secret missing" and no-op
-      • Hevy API error → hevy_client logs + returns no rows
+    message and returns 200 so the daily cron never crashes and Strava/Compute
+    keep working.
     """
     secret = _get_secret("hevy-api-key")
     api_key = (secret or {}).get("api_key") or (secret or {}).get("key") or ""
@@ -1174,42 +1204,282 @@ def _handle_hevy_sync(event):
     page_size = int(event.get("page_size", 10) or 10)
     max_pages = int(event.get("max_pages", 3) or 3)
 
+    config_table = get_table("USER_CONFIG_TABLE")
+
+    # 1) Refresh the exercise-template cache if stale (templates are near-static;
+    #    never re-fetch ~226 rows on every poll).
+    templates = _load_hevy_templates(config_table, api_key)
+
+    # 2) Fetch workouts (incremental via events, or cold-start page walk).
+    watermark_row = get_item(config_table, {"key": LAST_SYNC_KEY}) or {}
+    last_sync = watermark_row.get("last_sync")
+
+    updated_workouts: list = []
+    deleted_ids: list = []
+    mode = "incremental"
     try:
-        rows = _fetch_hevy_workouts(api_key, page_size=page_size, max_pages=max_pages)
+        if last_sync:
+            ev = fetch_workout_events(api_key, since=last_sync)
+            updated_workouts = ev.get("updated", [])
+            deleted_ids = ev.get("deleted", [])
+        else:
+            mode = "cold_start"
+            updated_workouts = fetch_recent_workouts_full(
+                api_key, page_size=page_size, max_pages=max_pages
+            )
     except ValueError as e:
-        # Only raised for an empty key — already guarded above, but be explicit.
         logger.warning("hevy sync aborted: %s", e)
         return _resp(200, {"status": "skipped", "reason": str(e)})
     except Exception:  # noqa: BLE001 — never let a poll failure crash the cron
         logger.exception("hevy sync failed unexpectedly")
         return _resp(200, {"status": "error", "reason": "hevy fetch failed"})
 
-    table = get_table("WORKOUTS_TABLE")
+    workouts_table = get_table("WORKOUTS_TABLE")
+    exercises_table = get_table("EXERCISES_TABLE")
+
     written = 0
     affected_dates = set()
-    for row in rows:
-        if _hevy_row_is_duplicate(table, row):
+    affected_canonicals = set()
+
+    # 3) Apply updates: rolled-up row + per-exercise rows.
+    for workout in updated_workouts:
+        row = workout_to_row(workout)
+        if row is None:
+            continue
+        if _hevy_row_is_duplicate(workouts_table, row):
             logger.info(
-                "hevy workout %s on %s duplicates an existing cardio row — skipping",
+                "hevy workout %s on %s unchanged — skipping",
                 row.get("hevy_id"), row.get("date"),
             )
             continue
-        put_item(table, row)
+        put_item(workouts_table, row)
         written += 1
         affected_dates.add(row["date"])
 
-    # Recompute daily scores for every date we touched so strain reflects the
-    # freshly-ingested lifting sessions.
+        # Per-exercise rows into fitness-exercises. Re-polling the same workout
+        # overwrites the same (canonical, date) keys, so PR flags stay clean.
+        ex_rows = workout_to_exercise_rows(workout, templates)
+        _write_hevy_exercise_rows(exercises_table, ex_rows, row["date"])
+        for er in ex_rows:
+            if er.get("canonical"):
+                affected_canonicals.add(er["canonical"])
+
+    # 4) Apply deletions: a workout removed in Hevy must leave McFox too.
+    deleted = 0
+    for hevy_id in deleted_ids:
+        removed_dates = _delete_hevy_workout(workouts_table, exercises_table, hevy_id)
+        if removed_dates:
+            deleted += 1
+            affected_dates.update(removed_dates)
+
+    # 5) Recompute PR flags + e1RM for touched canonicals and refresh the
+    #    weekly volume roll-up, exactly as workout_service.annotate_workout does.
+    if affected_canonicals:
+        try:
+            recompute_prs_for_canonicals(sorted(affected_canonicals))
+        except Exception:
+            logger.exception("hevy PR recompute failed for %s", sorted(affected_canonicals))
+        try:
+            recompute_weekly_volume()
+        except Exception:
+            logger.exception("hevy weekly volume recompute failed")
+
+    # 6) Body measurements → health-metrics via the merge/ordering-guard path.
+    measurements_written = 0
+    try:
+        measurements_written = _ingest_hevy_body_measurements(api_key)
+    except Exception:
+        logger.exception("hevy body-measurement ingest failed")
+
+    # 7) Recompute daily scores for every date we touched.
     for d in sorted(affected_dates):
         _trigger_compute(d)
 
-    logger.info("hevy sync complete: %s workouts written across %s dates", written, len(affected_dates))
+    # 8) Advance the watermark so the next poll goes incremental. Use "now"
+    #    rather than a workout timestamp so nothing between polls is missed.
+    put_item(config_table, {
+        "key": LAST_SYNC_KEY,
+        "last_sync": _now_iso(),
+        "mode": mode,
+        "updated_at": _now_iso(),
+    })
+
+    logger.info(
+        "hevy sync complete (%s): %s written, %s deleted across %s dates, %s measurements",
+        mode, written, deleted, len(affected_dates), measurements_written,
+    )
     return _resp(200, {
         "status": "ok",
-        "fetched": len(rows),
+        "mode": mode,
+        "fetched": len(updated_workouts),
         "written": written,
+        "deleted": deleted,
+        "measurements_written": measurements_written,
         "dates": sorted(affected_dates),
     })
+
+
+def _load_hevy_templates(config_table, api_key):
+    """Return the exercise-template cache (id → template dict), refreshing it
+    from Hevy only when the cached row is missing or older than ~7 days.
+    Degrades to whatever is cached (or {}) if the refresh call fails."""
+    cache_row = get_item(config_table, {"key": TEMPLATE_CACHE_KEY}) or {}
+    if not templates_cache_is_stale(cache_row):
+        return cache_row.get("templates") or {}
+    try:
+        templates = fetch_exercise_templates(api_key)
+    except Exception:
+        logger.exception("hevy exercise-template fetch failed — using cached/empty")
+        return cache_row.get("templates") or {}
+    if templates:
+        put_item(config_table, {
+            "key": TEMPLATE_CACHE_KEY,
+            "templates": templates,
+            "fetched_at": _now_iso(),
+            "count": len(templates),
+        })
+        return templates
+    # Empty fetch (e.g. transient 5xx) — keep whatever we had.
+    return cache_row.get("templates") or {}
+
+
+def _write_hevy_exercise_rows(table, exercise_rows, date):
+    """Mirror Hevy-derived exercise rows into fitness-exercises, one row per
+    (canonical, date). Mirrors workout_service._write_exercise_rows so the
+    existing lift engine consumes them unchanged. Overwrites on re-poll
+    (idempotent). Returns the number of rows written.
+
+    Working-set metrics (top_weight / volume / session_count) EXCLUDE warmups
+    but INCLUDE dropset/failure sets, matching how the LLM-parser path treats
+    them and how lift_compute reads them.
+    """
+    now_iso = _now_iso()
+    count = 0
+    for ex in exercise_rows:
+        if not ex.get("canonical"):
+            continue
+        sets = ex.get("sets", [])
+        working_sets = [s for s in sets if not s.get("warmup")]
+        top_weight = max((s.get("weight", 0) for s in working_sets), default=0)
+        top_reps_at_top = max(
+            (s.get("reps", 0) for s in working_sets if s.get("weight", 0) == top_weight),
+            default=0,
+        )
+        volume = sum(s.get("reps", 0) * s.get("weight", 0) for s in working_sets)
+        row = {
+            "canonical": ex["canonical"],
+            "date": date,
+            "name": ex["name"],
+            "muscle_group": ex.get("muscle_group", "other"),
+            "sets": sets,
+            "top_weight": round(top_weight, 1),
+            "top_reps_at_top_weight": top_reps_at_top,
+            "working_volume": round(volume, 1),
+            "session_count": len(working_sets),
+            "logged_at": now_iso,
+            "source": "hevy",
+        }
+        if ex.get("superset_with"):
+            row["superset_with"] = ex["superset_with"]
+        if ex.get("note"):
+            row["note"] = ex["note"]
+        if ex.get("hevy_muscle_group"):
+            row["hevy_muscle_group"] = ex["hevy_muscle_group"]
+        if ex.get("exercise_template_id"):
+            row["exercise_template_id"] = ex["exercise_template_id"]
+        put_item(table, row)
+        count += 1
+    return count
+
+
+def _delete_hevy_workout(workouts_table, exercises_table, hevy_id):
+    """Remove a Hevy workout (and its mirrored exercise rows) that was deleted
+    in Hevy. Returns the set of dates touched so daily scores can be recomputed.
+
+    The workout row key is (date, strava_id="hevy_<id>") but we don't know the
+    date up front, so we resolve it: the strava_id GSI isn't guaranteed, so we
+    scan for the matching hevy_id. This is bounded (the table is small) and only
+    runs for genuinely-deleted workouts, which are rare.
+    """
+    strava_id = f"hevy_{hevy_id}"
+    touched = set()
+    try:
+        resp = workouts_table.scan(
+            FilterExpression="strava_id = :sid",
+            ExpressionAttributeValues={":sid": strava_id},
+            Limit=1000,
+        )
+        matches = resp.get("Items", [])
+    except Exception:
+        logger.exception("hevy delete scan failed for %s", strava_id)
+        return touched
+
+    for item in matches:
+        date = item.get("date")
+        if not date:
+            continue
+        try:
+            workouts_table.delete_item(Key={"date": date, "strava_id": strava_id})
+        except Exception:
+            logger.exception("failed to delete workout row %s/%s", date, strava_id)
+            continue
+        touched.add(date)
+        # Remove mirrored exercise rows for this session's date that came from
+        # Hevy. Exercise rows are keyed (canonical, date); only delete rows we
+        # sourced from Hevy so a same-day manual annotation isn't clobbered.
+        _delete_hevy_exercise_rows_for_date(exercises_table, date)
+    return touched
+
+
+def _delete_hevy_exercise_rows_for_date(exercises_table, date):
+    """Delete Hevy-sourced fitness-exercises rows for a given date. Scoped to
+    source=="hevy" so manual/LLM-parsed rows for the same date survive."""
+    try:
+        resp = exercises_table.scan(
+            FilterExpression="#d = :date AND #src = :src",
+            ExpressionAttributeNames={"#d": "date", "#src": "source"},
+            ExpressionAttributeValues={":date": date, ":src": "hevy"},
+            Limit=1000,
+        )
+        rows = resp.get("Items", [])
+    except Exception:
+        logger.exception("hevy exercise-row delete scan failed for %s", date)
+        return
+    for r in rows:
+        canonical = r.get("canonical")
+        if not canonical:
+            continue
+        try:
+            exercises_table.delete_item(Key={"canonical": canonical, "date": date})
+        except Exception:
+            logger.exception("failed to delete exercise row %s/%s", canonical, date)
+
+
+def _ingest_hevy_body_measurements(api_key):
+    """Fetch Hevy body measurements and write each field into
+    fitness-health-metrics under a ``#hevy`` source suffix, routed through the
+    existing merge/ordering-guard helpers (NOT a bare put_item overwrite —
+    that regression was fixed in PR #2 and must not return). Returns the number
+    of metric points written."""
+    measurements = fetch_body_measurements(api_key)
+    if not measurements:
+        return 0
+    table = get_table("HEALTH_METRICS_TABLE")
+    written = 0
+    for m in measurements:
+        for metric_source, unit, kind, date, value in body_measurement_to_metrics(m):
+            if kind == "last":
+                # Body measurements are point-in-time; guard against an
+                # out-of-order re-fetch regressing a fresher stored value.
+                _write_last_with_ordering_guard(
+                    table, date, metric_source, unit, _now_iso(), value
+                )
+            else:
+                _merge_samples_and_aggregate(
+                    table, date, metric_source, unit, kind, [(_now_iso(), value)]
+                )
+            written += 1
+    return written
 
 
 def _hevy_row_is_duplicate(table, row):

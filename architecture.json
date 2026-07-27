@@ -1,0 +1,143 @@
+{
+  "project": "mcfoxhealth",
+  "description": "Personal health/fitness dashboard. Serverless AWS backend (Python 3.13 Lambdas, DynamoDB, SAM) with scheduled ingest from HealthAutoExport, Withings, Strava, and Hevy.",
+  "scope_note": "Introduced with the Hevy set-level ingestion work; documents backend/ with emphasis on the ingest -> compute -> lift-learning flow. Extend as other areas are touched.",
+  "stack": {
+    "language": "python",
+    "runtime": "python3.13",
+    "iac": "AWS SAM (backend/template.yaml)",
+    "compute": "AWS Lambda behind HTTP API",
+    "storage": "DynamoDB (fitness-* tables)"
+  },
+  "lambdas": [
+    {
+      "name": "IngestFunction",
+      "code_uri": "backend/functions/ingest/",
+      "handler": "handler.lambda_handler",
+      "triggers": [
+        "POST /ingest/health",
+        "POST /ingest/withings",
+        "POST /ingest/strava",
+        "GET /ingest/strava",
+        "Schedule hevy_poll (daily cron 30 8 * * ? * UTC)"
+      ],
+      "writes_tables": ["fitness-health-metrics", "fitness-workouts", "fitness-exercises", "fitness-user-config", "fitness-daily-scores"],
+      "invokes": ["ComputeFunction"]
+    },
+    {
+      "name": "ComputeFunction",
+      "code_uri": "backend/functions/compute/",
+      "triggers": ["Schedule DailyBaselines", "Schedule WeeklyCorrelations", "async action=compute_day"],
+      "writes_tables": ["fitness-daily-scores", "fitness-baselines", "fitness-correlations", "fitness-exercises"]
+    },
+    {
+      "name": "ApiFunction",
+      "code_uri": "backend/functions/api/",
+      "triggers": ["HTTP API /api/*"],
+      "reads_tables": ["fitness-health-metrics", "fitness-workouts", "fitness-exercises", "fitness-daily-scores", "fitness-nutrition", "fitness-journal", "fitness-baselines", "fitness-correlations", "fitness-user-config", "fitness-conversations"]
+    },
+    {
+      "name": "NutritionFunction",
+      "code_uri": "backend/functions/nutrition/",
+      "triggers": ["HTTP API /nutrition/*"]
+    },
+    {
+      "name": "CoachFunction",
+      "code_uri": "backend/functions/coach/",
+      "triggers": ["HTTP API /coach/*"],
+      "notes": "Bedrock tool-use coach (FastAPI app)."
+    }
+  ],
+  "shared_modules": [
+    {
+      "path": "backend/shared/shared/exercise_canonical.py",
+      "new": true,
+      "responsibility": "Single source of truth for exercise-name canonicalization (canonicalize, _SYNONYMS) and the app's 10-value MUSCLE_GROUPS vocabulary.",
+      "exports": ["canonicalize", "_SYNONYMS", "MUSCLE_GROUPS"],
+      "imported_by": ["workout_service.py", "hevy_client.py"]
+    },
+    {
+      "path": "backend/shared/shared/hevy_client.py",
+      "responsibility": "Hevy API client + mappers.",
+      "http_seam": "http_get (injectable for tests)",
+      "key_functions": [
+        "workout_to_row",
+        "workout_to_exercise_rows",
+        "map_muscle_group",
+        "fetch_exercise_templates",
+        "templates_cache_is_stale",
+        "fetch_workout_events",
+        "fetch_recent_workouts",
+        "fetch_recent_workouts_full",
+        "fetch_body_measurements",
+        "body_measurement_to_metrics"
+      ],
+      "constants": {"KG_TO_LB": 2.20462262, "CM_TO_IN": 0.393700787, "TEMPLATE_CACHE_KEY": "hevy_exercise_templates", "LAST_SYNC_KEY": "hevy_last_sync"}
+    },
+    {
+      "path": "backend/shared/shared/workout_service.py",
+      "responsibility": "LLM lift-parser path (annotate_workout), _write_exercise_rows, coach debrief. Re-exports canonicalization from exercise_canonical."
+    },
+    {
+      "path": "backend/shared/shared/lift_compute.py",
+      "responsibility": "Epley e1RM, PR/stall detection, recompute_prs_for_canonicals, recompute_weekly_volume over fitness-exercises."
+    },
+    {"path": "backend/shared/shared/coach_context.py", "responsibility": "Assembles coach prompt context."},
+    {"path": "backend/shared/shared/workout_proposer.py", "responsibility": "Proposes next workout from history + program config."},
+    {"path": "backend/shared/shared/scoring.py", "responsibility": "TRIMP/strain/HR-zone math + scoring weights."},
+    {"path": "backend/shared/shared/sleep_quality.py", "responsibility": "Sleep-quality evaluation."},
+    {"path": "backend/shared/shared/db.py", "responsibility": "DynamoDB helpers (get_table/get_item/put_item/query_items/batch_write)."},
+    {"path": "backend/shared/shared/timezone.py", "responsibility": "Local-time helpers (local_now, local_today_str)."},
+    {"path": "backend/shared/shared/cost_service.py", "responsibility": "Cost tracking."}
+  ],
+  "tables": [
+    {"name": "fitness-health-metrics", "pk": "date", "sk": "metric_source", "purpose": "Per-metric daily values, source-suffixed (#hae, #hevy).", "hevy_sources": ["weight#hevy", "lean_mass#hevy", "bodyfat_hevy#hevy", "waist#hevy", "neck#hevy", "shoulder#hevy", "chest#hevy", "left_bicep#hevy", "right_bicep#hevy", "left_forearm#hevy", "right_forearm#hevy", "abdomen#hevy", "hips#hevy", "left_thigh#hevy", "right_thigh#hevy", "left_calf#hevy", "right_calf#hevy"]},
+    {"name": "fitness-daily-scores", "pk": "date", "purpose": "Daily composite scores + weekly volume roll-ups (week_<date>)."},
+    {"name": "fitness-workouts", "pk": "date", "sk": "strava_id", "purpose": "Rolled-up sessions (Strava cardio + Hevy strength keyed hevy_<id>)."},
+    {"name": "fitness-exercises", "pk": "canonical", "sk": "date", "purpose": "Per-exercise-per-day rows; lift-learning engine substrate. Written by LLM parser and Hevy poller (source field)."},
+    {"name": "fitness-user-config", "pk": "key", "purpose": "Config + caches.", "keys": ["scoring", "favorites", "lateral_chain_program", "lift_stalls", "hevy_exercise_templates", "hevy_last_sync"]},
+    {"name": "fitness-nutrition", "pk": "date", "sk": "meal_id"},
+    {"name": "fitness-journal", "pk": "date"},
+    {"name": "fitness-baselines", "pk": "type"},
+    {"name": "fitness-correlations", "pk": "tag", "sk": "metric"},
+    {"name": "fitness-calibration", "pk": "date"},
+    {"name": "fitness-conversations", "pk": "user_id", "sk": "conversation_id"},
+    {"name": "fitness-feedback", "pk": "user_id", "sk": "target_key"},
+    {"name": "fitness-events", "pk": "see template.yaml"}
+  ],
+  "data_flows": {
+    "hevy_ingestion": {
+      "trigger": "IngestFunction hevy_poll daily schedule (or action=hevy_poll)",
+      "auth": "api-key header; secret hevy-api-key (Secrets Manager us-west-2, JSON {api_key})",
+      "read_only": true,
+      "steps": [
+        "Refresh exercise-template cache (fitness-user-config key=hevy_exercise_templates) if older than ~7 days.",
+        "Fetch workouts incrementally via GET /v1/workouts/events?since=<hevy_last_sync> (updates + deletions); cold-start page-walk when no watermark.",
+        "Write rolled-up row to fitness-workouts (workout_to_row) + per-exercise rows to fitness-exercises (workout_to_exercise_rows, source=hevy).",
+        "Delete workouts removed in Hevy from fitness-workouts and their source=hevy fitness-exercises rows.",
+        "recompute_prs_for_canonicals + recompute_weekly_volume for touched canonicals; _trigger_compute for touched dates.",
+        "Ingest GET /v1/body_measurements into fitness-health-metrics under #hevy sources (cm->in, kg->lb) via merge/ordering-guard helpers.",
+        "Advance hevy_last_sync watermark in fitness-user-config."
+      ],
+      "notes": "Hevy public API exposes no calories/HR: strain estimated, cal flagged cal_unavailable. Never a bare put_item overwrite for metrics (PR #2 regression guard)."
+    },
+    "muscle_group_mapping": {
+      "source_enum_size": 20,
+      "target_vocabulary": ["chest", "back", "shoulders", "arms", "legs", "core", "glutes", "cardio", "mobility", "other"],
+      "map": {
+        "abdominals": "core", "shoulders": "shoulders", "biceps": "arms", "triceps": "arms", "forearms": "arms",
+        "quadriceps": "legs", "hamstrings": "legs", "calves": "legs", "glutes": "glutes", "abductors": "glutes",
+        "adductors": "legs", "lats": "back", "upper_back": "back", "traps": "back", "lower_back": "back",
+        "chest": "chest", "cardio": "cardio", "neck": "other", "full_body": "other", "other": "other"
+      },
+      "raw_value_retained_as": "hevy_muscle_group (on the exercise row)"
+    }
+  },
+  "testing": {
+    "dir": "backend/tests/",
+    "run": "cd backend && .venv/bin/python -m pytest tests --deselect tests/test_api_contract.py",
+    "offline": true,
+    "seams": ["hevy_client.http_get injectable", "shared.db stubbed with fake tables"],
+    "known_excluded": ["test_api_contract.py (live endpoints)", "test_coach_auth.py (optional fastapi dep)"]
+  }
+}
