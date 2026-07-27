@@ -179,26 +179,17 @@ def _handle_health(event):
         hrv_data = metrics.get("heart_rate_variability") or metrics.get("heartRateVariability")
         hrv_val = _extract_value(hrv_data)
         if hrv_val is not None:
-            put_item(table, {
-                "date": date_str,
-                "metric_source": "hrv#hae",
-                "value": hrv_val,
-                "unit": "ms",
-                "ingested_at": _now_iso(),
-            })
+            # Merge-guard fix (2026-07-27): same overwrite bug as the main
+            # HAE array path — this legacy dict-shape fallback also needs
+            # the samples-ledger merge, not a bare put_item.
+            _merge_samples_and_aggregate(table, date_str, "hrv#hae", "ms", "avg", [(_now_iso(), hrv_val)])
             items_written += 1
 
     if "resting_heart_rate" in metrics or "restingHeartRate" in metrics:
         rhr_data = metrics.get("resting_heart_rate") or metrics.get("restingHeartRate")
         rhr_val = _extract_value(rhr_data)
         if rhr_val is not None:
-            put_item(table, {
-                "date": date_str,
-                "metric_source": "rhr#hae",
-                "value": rhr_val,
-                "unit": "bpm",
-                "ingested_at": _now_iso(),
-            })
+            _merge_samples_and_aggregate(table, date_str, "rhr#hae", "bpm", "avg", [(_now_iso(), rhr_val)])
             items_written += 1
 
     sleep = metrics.get("sleepAnalysis") or metrics.get("sleep_analysis") or metrics.get("sleep")
@@ -212,26 +203,14 @@ def _handle_health(event):
         steps_data = metrics.get("steps") or metrics.get("stepCount")
         steps_val = _extract_value(steps_data)
         if steps_val is not None:
-            put_item(table, {
-                "date": date_str,
-                "metric_source": "steps#hae",
-                "value": int(steps_val),
-                "unit": "count",
-                "ingested_at": _now_iso(),
-            })
+            _merge_samples_and_aggregate(table, date_str, "steps#hae", "count", "sum_int", [(_now_iso(), int(steps_val))])
             items_written += 1
 
     if "active_energy" in metrics or "activeEnergyBurned" in metrics:
         cal_data = metrics.get("active_energy") or metrics.get("activeEnergyBurned")
         cal_val = _extract_value(cal_data)
         if cal_val is not None:
-            put_item(table, {
-                "date": date_str,
-                "metric_source": "active_cal#hae",
-                "value": round(cal_val),
-                "unit": "kcal",
-                "ingested_at": _now_iso(),
-            })
+            _merge_samples_and_aggregate(table, date_str, "active_cal#hae", "kcal", "sum_int", [(_now_iso(), round(cal_val))])
             items_written += 1
 
     _trigger_compute(date_str)
@@ -480,7 +459,23 @@ def _handle_hae_metrics_array(data_list):
                 latest_date = max(latest_date or d, d)
             continue
 
-        # Standard numeric aggregation (avg / sum_int / sum / last)
+        # Standard numeric aggregation (avg / sum_int / sum / last).
+        #
+        # MERGE-GUARD FIX (2026-07-27): HAE fires multiple automations per
+        # day, and each POST here only ever carried the points present in
+        # THAT call. The old code aggregated only within a single payload
+        # and did a bare put_item(), so the LAST webhook to land for a given
+        # (date, metric) silently discarded every earlier same-day POST —
+        # this is the confirmed root cause of the steps-undercount bug
+        # (McFox showed 6,501 steps vs. the real ~21,267 on one affected
+        # day) and the HRV-discrepancy bug (each payload only averaged an
+        # arbitrary subset of the day's HRV samples). Fix: keep every
+        # incoming (timestamp, value) point in a per-day samples ledger —
+        # the same pattern already proven for the hr#hae_samples sidecar —
+        # merge new points into it, then recompute the daily aggregate over
+        # the FULL merged set before writing. This is correct regardless of
+        # whether a given HAE automation sends a full-day resend or just an
+        # incremental delta.
         by_date = {}
         for p in points:
             d = _coerce_date(p.get("date") or p.get("startDate") or p.get("endDate") or "")
@@ -489,36 +484,24 @@ def _handle_hae_metrics_array(data_list):
             raw = p.get("qty") if p.get("qty") is not None else p.get("value")
             if raw is None:
                 continue
+            ts = p.get("date") or p.get("endDate") or p.get("startDate") or ""
             try:
-                # For "last" we keep (timestamp_str, value) so we can pick the latest.
-                if kind == "last":
-                    ts = p.get("date") or p.get("endDate") or p.get("startDate") or ""
-                    by_date.setdefault(d, []).append((ts, float(raw)))
-                else:
-                    by_date.setdefault(d, []).append(float(raw))
+                by_date.setdefault(d, []).append((ts, float(raw)))
             except (ValueError, TypeError):
                 continue
 
-        for d, vals in by_date.items():
-            if not vals:
+        for d, pairs in by_date.items():
+            if not pairs:
                 continue
-            if kind == "avg":
-                val = round(sum(vals) / len(vals), 1)
-            elif kind == "sum_int":
-                val = int(round(sum(vals)))
-            elif kind == "last":
-                # Pick latest by timestamp string (ISO-like sorts correctly)
-                _ts, val = max(vals, key=lambda x: x[0])
-                val = round(val, 2)
-            else:  # "sum"
-                val = round(sum(vals), 1)
-            put_item(table, {
-                "date": d,
-                "metric_source": metric_source,
-                "value": val,
-                "unit": unit,
-                "ingested_at": _now_iso(),
-            })
+            if kind == "last":
+                # "last"-kind metrics (weight, BMI) aren't cumulative — a
+                # samples ledger doesn't apply. Instead, guard against an
+                # out-of-order webhook retry regressing a fresher value by
+                # comparing against whatever's already stored.
+                ts, val = max(pairs, key=lambda x: x[0])
+                _write_last_with_ordering_guard(table, d, metric_source, unit, ts, round(val, 2))
+            else:
+                _merge_samples_and_aggregate(table, d, metric_source, unit, kind, pairs)
             items_written += 1
             latest_date = max(latest_date or d, d)
 
@@ -526,6 +509,80 @@ def _handle_hae_metrics_array(data_list):
         _trigger_compute(latest_date)
 
     return _resp(200, {"date": latest_date, "items_written": items_written})
+
+
+def _merge_samples_and_aggregate(table, date_str, metric_source, unit, kind, new_pairs):
+    """Merge-guard for cumulative/averaged HAE metrics (avg / sum_int / sum).
+
+    HAE sends multiple automations per day, each carrying only the samples
+    it collected in its own export window. A bare overwrite per POST means
+    the LAST webhook wins and discards every earlier same-day POST's data —
+    this is the confirmed root cause of the steps-undercount and HRV-
+    discrepancy bugs. Fix: keep a timestamp-deduped samples ledger for the
+    metric (sidecar row `<metric_source>_samples`), merge new points into
+    it, then recompute the daily aggregate over the FULL merged set. This
+    is correct whether a given automation sends a full-day resend or an
+    incremental delta, since dedup-by-timestamp makes re-sends idempotent.
+    """
+    samples_key = f"{metric_source}_samples"
+    existing = get_item(table, {"date": date_str, "metric_source": samples_key}) or {}
+    existing_samples = {s["ts"]: s["v"] for s in (existing.get("samples") or []) if s.get("ts")}
+    for ts, val in new_pairs:
+        if ts:
+            existing_samples[ts] = val
+        else:
+            # No usable timestamp — still fold the value in under a
+            # synthetic key so it isn't silently dropped, but it can't be
+            # deduped against a future re-send of the same point.
+            existing_samples[f"_no_ts_{len(existing_samples)}"] = val
+
+    merged_samples = [{"ts": ts, "v": v} for ts, v in existing_samples.items()]
+    put_item(table, {
+        "date": date_str,
+        "metric_source": samples_key,
+        "samples": merged_samples,
+        "ingested_at": _now_iso(),
+    })
+
+    vals = list(existing_samples.values())
+    if kind == "avg":
+        val = round(sum(vals) / len(vals), 1)
+    elif kind == "sum_int":
+        val = int(round(sum(vals)))
+    else:  # "sum"
+        val = round(sum(vals), 1)
+
+    put_item(table, {
+        "date": date_str,
+        "metric_source": metric_source,
+        "value": val,
+        "unit": unit,
+        "ingested_at": _now_iso(),
+    })
+
+
+def _write_last_with_ordering_guard(table, date_str, metric_source, unit, incoming_ts, incoming_val):
+    """Merge-guard for "last"-kind metrics (weight, BMI).
+
+    These aren't cumulative, so a samples ledger doesn't apply — but a
+    Lambda/API-Gateway webhook retry can still deliver an OLDER payload
+    after a newer one already landed. Guard against regressing a fresher
+    stored value by comparing timestamps before overwriting.
+    """
+    existing = get_item(table, {"date": date_str, "metric_source": metric_source}) or {}
+    existing_ts = existing.get("source_ts") or ""
+    if existing_ts and incoming_ts and incoming_ts < existing_ts:
+        # Incoming payload is older than what's already stored — ignore it
+        # rather than regress to a stale value.
+        return
+    put_item(table, {
+        "date": date_str,
+        "metric_source": metric_source,
+        "value": incoming_val,
+        "unit": unit,
+        "source_ts": incoming_ts,
+        "ingested_at": _now_iso(),
+    })
 
 
 def _log_hae_summary(data_list):

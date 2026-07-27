@@ -247,6 +247,26 @@ def _compute_day(date_str):
                 sleep_end,
             )
 
+        # HRV overnight-window refinement (2026-07-27): the daily HRV value
+        # from ingest is a full-day average of the merged samples ledger,
+        # which is already correct (no data loss) but mixes daytime and
+        # overnight readings. HRV's recovery-relevance is highest for the
+        # overnight/resting reading — Apple's own daily-summary convention
+        # and Bevel/Whoop both key off it — so when we have per-sample HRV
+        # and a resolved sleep window, recompute hrv as the average of only
+        # the samples that fall inside [sleep_start, sleep_end]. Falls back
+        # to the full-day average (already in `hrv`) when there's no sleep
+        # window or too few in-window samples to trust.
+        hrv_samples_item = metric_map.get("hrv#hae_samples")
+        if hrv_samples_item and sleep_start and sleep_end:
+            overnight_hrv = _sleep_window_avg(
+                hrv_samples_item.get("samples") or [],
+                sleep_start,
+                sleep_end,
+            )
+            if overnight_hrv is not None:
+                hrv = overnight_hrv
+
     scoring_config = _get_scoring_config()
     weights = scoring_config.get("recovery_weights") if scoring_config else None
 
@@ -846,6 +866,32 @@ def _sleep_window_hr_stats(samples: list, sleep_start: str, sleep_end: str):
     if len(in_window) < 5:
         return None, None
     return round(sum(in_window) / len(in_window), 1), round(min(in_window), 1)
+
+
+def _sleep_window_avg(samples: list, sleep_start: str, sleep_end: str):
+    """Intersect per-sample readings (ingest's generic `{ts, v}` samples-
+    ledger shape) with [sleep_start, sleep_end] and return the average,
+    rounded to 1 decimal. Returns None when fewer than 3 in-window samples
+    exist. Used for the HRV overnight-window refinement — a lower sample
+    threshold than HR (5) is appropriate since HAE typically sends far
+    fewer HRV readings per day than HR readings."""
+    start = _parse_hae_ts(sleep_start)
+    end = _parse_hae_ts(sleep_end)
+    if start is None or end is None:
+        return None
+    in_window = []
+    for s in samples or []:
+        ts = _parse_hae_ts(s.get("ts"))
+        if ts is None:
+            continue
+        if start <= ts <= end:
+            try:
+                in_window.append(float(s.get("v")))
+            except (ValueError, TypeError):
+                continue
+    if len(in_window) < 3:
+        return None
+    return round(sum(in_window) / len(in_window), 1)
 
 
 # ─── Scoring config loader (hot-swappable via user-config) ──────────────

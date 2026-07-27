@@ -537,3 +537,163 @@ def test_unaggregated_sleep_replaces_when_totals_comparable():
     # 1.5 + 2.0 + 3.5 = 7h = 420m — should fully replace the 180m row.
     assert latest["total_min"] == 420
     assert latest["deep_min"] == 90
+
+
+# ─── Merge-guard regression: steps/HRV/etc. must combine across POSTs ────
+#
+# Root cause under test (fixed 2026-07-27): HAE fires multiple automations
+# per day, each carrying only that automation's slice of samples. The old
+# code aggregated within a single payload and did a bare put_item(), so the
+# LAST webhook for a given (date, metric) silently discarded every earlier
+# same-day POST. Confirmed in production: McFox showed 6,501 steps on a day
+# where the real total was ~21,267 (only the last automation's slice was
+# kept). These tests simulate two sequential webhook POSTs with disjoint
+# sample windows and assert the final value reflects BOTH combined.
+
+def test_steps_two_sequential_posts_combine_not_clobber():
+    h, t = _fresh_module()
+    _patch_auth(h)
+    # Morning automation: 3,000 steps by 10am.
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "step_count", "data": [
+            {"qty": 3000, "date": "2026-04-20 10:00:00 -0700"},
+        ]}
+    ]}}), None)
+    steps = [i for i in t.items if i["metric_source"] == "steps#hae"]
+    assert len(steps) == 1 and steps[0]["value"] == 3000
+
+    # Evening automation: a DIFFERENT slice of the day, 4,500 more steps.
+    # The old bug: this POST alone would overwrite the day's row down to
+    # just 4500, discarding the morning's 3000.
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "step_count", "data": [
+            {"qty": 4500, "date": "2026-04-20 18:00:00 -0700"},
+        ]}
+    ]}}), None)
+    steps = [i for i in t.items if i["metric_source"] == "steps#hae"]
+    assert steps[-1]["value"] == 7500, "must combine both POSTs, not just keep the last"
+
+    # Re-sending the SAME point again (HAE full-day resend) must not
+    # double-count it — dedup is by timestamp.
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "step_count", "data": [
+            {"qty": 4500, "date": "2026-04-20 18:00:00 -0700"},
+        ]}
+    ]}}), None)
+    steps = [i for i in t.items if i["metric_source"] == "steps#hae"]
+    assert steps[-1]["value"] == 7500, "re-sending an identical timestamped point must be idempotent"
+
+
+def test_hrv_two_sequential_posts_combine_not_clobber():
+    h, t = _fresh_module()
+    _patch_auth(h)
+    # First automation: two morning HRV readings, avg = 50.
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "heart_rate_variability", "data": [
+            {"qty": 40, "date": "2026-04-20 03:00:00 -0700"},
+            {"qty": 60, "date": "2026-04-20 04:00:00 -0700"},
+        ]}
+    ]}}), None)
+    hrv = [i for i in t.items if i["metric_source"] == "hrv#hae"]
+    assert len(hrv) == 1 and hrv[0]["value"] == 50.0
+
+    # Second automation: an afternoon reading the first payload never saw.
+    # The old bug: this alone would overwrite hrv#hae down to just 100,
+    # discarding the morning readings entirely.
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "heart_rate_variability", "data": [
+            {"qty": 100, "date": "2026-04-20 15:00:00 -0700"},
+        ]}
+    ]}}), None)
+    hrv = [i for i in t.items if i["metric_source"] == "hrv#hae"]
+    # Average of all 3 unique-timestamp samples: (40+60+100)/3 = 66.7
+    assert hrv[-1]["value"] == 66.7, "must average across BOTH POSTs, not just the second"
+
+    # The samples ledger sidecar accumulates across calls (FakeTable
+    # appends put_items rather than replacing), so check the LATEST sidecar
+    # row rather than asserting there's only ever been one.
+    sidecar = [i for i in t.items if i["metric_source"] == "hrv#hae_samples"]
+    assert len(sidecar) == 2 and len(sidecar[-1]["samples"]) == 3
+
+
+def test_active_cal_two_sequential_posts_combine_not_clobber():
+    """Spot-check that the same merge-guard was generalized to a
+    non-steps/HRV sum-type metric (active_cal), not just those two."""
+    h, t = _fresh_module()
+    _patch_auth(h)
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "active_energy", "data": [
+            {"qty": 200, "date": "2026-04-20 09:00:00 -0700"},
+        ]}
+    ]}}), None)
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "active_energy", "data": [
+            {"qty": 350, "date": "2026-04-20 17:00:00 -0700"},
+        ]}
+    ]}}), None)
+    cal = [i for i in t.items if i["metric_source"] == "active_cal#hae"]
+    assert cal[-1]["value"] == 550, "active_cal must also combine across POSTs"
+
+
+def test_rhr_two_sequential_posts_combine_not_clobber():
+    """Spot-check the merge-guard on an avg-type metric outside steps/HRV."""
+    h, t = _fresh_module()
+    _patch_auth(h)
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "resting_heart_rate", "data": [
+            {"qty": 58, "date": "2026-04-20 06:00:00 -0700"},
+        ]}
+    ]}}), None)
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "resting_heart_rate", "data": [
+            {"qty": 62, "date": "2026-04-20 20:00:00 -0700"},
+        ]}
+    ]}}), None)
+    rhr = [i for i in t.items if i["metric_source"] == "rhr#hae"]
+    assert rhr[-1]["value"] == 60.0, "rhr must average across both POSTs (58+62)/2 = 60"
+
+
+# ─── Ordering guard: "last"-kind metrics must ignore stale retries ──────
+
+def test_weight_ordering_guard_ignores_older_retry():
+    """A late-arriving webhook retry carrying an OLDER reading must not
+    regress a fresher value already stored (API Gateway/Lambda retries can
+    arrive out of order)."""
+    h, t = _fresh_module()
+    _patch_auth(h)
+    # Fresh reading lands first (21:00).
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "weight_body_mass", "units": "lb", "data": [
+            {"qty": 169.5, "date": "2026-04-20 21:00:00 -0700"},
+        ]}
+    ]}}), None)
+    # A retry of an OLDER reading (07:00) arrives late — must be ignored.
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "weight_body_mass", "units": "lb", "data": [
+            {"qty": 168.2, "date": "2026-04-20 07:00:00 -0700"},
+        ]}
+    ]}}), None)
+    w = [i for i in t.items if i["metric_source"] == "weight_apple#hae"]
+    assert w[-1]["value"] == 169.5, "an out-of-order older retry must not overwrite the fresher value"
+
+    # A genuinely NEWER reading must still be accepted normally.
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "weight_body_mass", "units": "lb", "data": [
+            {"qty": 170.1, "date": "2026-04-20 23:00:00 -0700"},
+        ]}
+    ]}}), None)
+    w = [i for i in t.items if i["metric_source"] == "weight_apple#hae"]
+    assert w[-1]["value"] == 170.1, "a genuinely newer reading must still be accepted"
+
+
+def test_legacy_dict_shape_fallback_also_merge_guards_steps():
+    """The legacy top-level-keys-per-metric shape (_handle_health's fallback
+    branch, e.g. {"steps": ..., "date": ...} with no "data" wrapper) has the
+    identical overwrite bug pre-fix — confirm it now also merges across
+    sequential calls instead of clobbering."""
+    h, t = _fresh_module()
+    _patch_auth(h)
+    h.lambda_handler(_event({"steps": 3000, "date": "2026-04-20"}), None)
+    h.lambda_handler(_event({"steps": 4500, "date": "2026-04-20"}), None)
+    steps = [i for i in t.items if i["metric_source"] == "steps#hae"]
+    assert steps[-1]["value"] == 7500, "legacy fallback path must also combine across calls"
