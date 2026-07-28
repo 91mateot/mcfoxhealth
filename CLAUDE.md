@@ -6,7 +6,9 @@ Personal health/fitness dashboard. Vite+TS PWA on Vercel, AWS Lambda backend, Wh
 
 - **Frontend**: Vite 5 + React 18 + TypeScript + SWR. No CSS framework. Deployed to Vercel (`mcfoxhealth.vercel.app`, auto-deploy on push to `main`).
 - **Backend**: AWS SAM, Python 3.13 Lambdas, DynamoDB, EventBridge. Stack name `fitness-dashboard` in `us-west-2`.
-- **Integrations**: Apple Health (via HealthAutoExport), Withings, Strava, Claude Bedrock.
+- **Integrations**: Apple Health (via HealthAutoExport), Withings, Strava, **Hevy** (strength/lifting — daily API poll, set-level detail), Claude Bedrock.
+
+> ⚠️ **Read [`RUNBOOK.md`](RUNBOOK.md) before touching the ingest pipeline.** It documents the operational traps that have already caused real bugs — Hevy's OpenAPI spec having wrong field names, the `pageSize` cap of 10, the DynamoDB `Scan` 1000-item cap, zeros that mean "unavailable" not "zero", and which feeds only Mateo can fix (HAE is iPhone-side).
 
 ## Repo layout
 
