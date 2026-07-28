@@ -3,6 +3,8 @@
 Personal performance dashboard. iPhone-first PWA, dark theme, real data from
 Apple Health + Withings + Strava + Hevy, AI coach on Bedrock.
 
+> ⚙️ **Operating this system?** See [`RUNBOOK.md`](RUNBOOK.md) — deploy recipe, health checks, feed ownership (which breakages only Mateo can fix), and the traps that have already caused real bugs. This file covers *what* the system is; the runbook covers *how to run it without breaking it*.
+
 ## Live
 
 - **Frontend:** https://mcfoxhealth.vercel.app (Vercel, auto-deploys from GitHub `main`)
@@ -32,9 +34,9 @@ src/
 ### Backend (`backend/`)
 - AWS SAM (`template.yaml`), Python 3.13 Lambdas
 - 5 functions: `ingest`, `compute`, `api`, `nutrition`, `coach`
-- 11 DynamoDB tables: health-metrics, daily-scores, workouts, nutrition,
+- 13 DynamoDB tables: health-metrics, daily-scores, workouts, nutrition,
   journal, baselines, correlations, user-config, calibration, exercises,
-  conversations
+  conversations, events, feedback
 - EventBridge schedules: compute daily 2am PT, correlations Sunday 6am PT
 - Secrets in AWS Secrets Manager (strava-oauth, withings-oauth, fitness-api-key)
 
