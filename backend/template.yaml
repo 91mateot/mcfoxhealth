@@ -519,6 +519,12 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /api/planned-workout/refresh
             Method: POST
+        MarkRestDay:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /api/planned-workout/rest
+            Method: POST
         GetInfraCost:
           Type: HttpApi
           Properties:
