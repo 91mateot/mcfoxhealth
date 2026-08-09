@@ -371,6 +371,13 @@ Resources:
           Properties:
             Schedule: cron(30 8 * * ? *)
             Description: Daily Hevy workout sync (1:30am PT = 8:30am UTC, before the 2am baseline compute)
+            Input: '{"action":"hevy_poll"}'
+        OAuthCredentialCheck:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 8 * * ? *)
+            Description: Daily Withings and Strava OAuth credential check
+            Input: '{"action":"oauth_credential_check"}'
 
   ComputeFunction:
     Type: AWS::Serverless::Function

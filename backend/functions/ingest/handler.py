@@ -36,6 +36,7 @@ from shared.hevy_client import (
     TEMPLATE_CACHE_KEY,
 )
 from shared.lift_compute import recompute_prs_for_canonicals, recompute_weekly_volume
+from shared.oauth_service import OAuthCredentialCheckError, OAuthRefreshError, OAuthService
 from shared.scoring import compute_trimp, compute_strain, classify_hr_zone, estimate_strain_simple, HR_ZONES, MAX_HR
 from shared.sleep_quality import evaluate_quality as _eval_sleep_quality
 from shared.timezone import (
@@ -48,6 +49,10 @@ from shared.timezone import (
 
 secrets_client = boto3.client("secretsmanager")
 lambda_client = boto3.client("lambda")
+oauth_service = OAuthService(
+    secrets_client,
+    lambda: get_table("USER_CONFIG_TABLE"),
+)
 
 COMPUTE_FN = os.environ.get("COMPUTE_FUNCTION_NAME", "")
 
@@ -58,9 +63,6 @@ COMPUTE_FN = os.environ.get("COMPUTE_FUNCTION_NAME", "")
 STRAVA_STRENGTH_TYPES = {"weighttraining", "workout", "crossfit"}
 
 HEVY_REPLAY_OVERLAP_HOURS = 48
-
-WITHINGS_TOKEN_URL = "https://wbsapi.withings.net/v2/oauth2"
-STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
 
 # HAE metric-name → (metric_source, unit, aggregation kind)
 # Aggregation kinds:
@@ -136,13 +138,18 @@ HAE_NAME_MAP = {
 
 
 def lambda_handler(event, context):
+    action = event.get("action")
+
+    if action == "oauth_credential_check":
+        return _handle_oauth_credential_check()
+
     # Scheduled invoke (EventBridge daily cron) or direct async invoke with an
     # explicit action — used to poll Hevy for recent gym workouts. Workouts
     # come from two sources now: Hevy (strength) via this poll, Strava (cardio)
     # via the webhook path below.
     if (
         event.get("source") == "aws.events"
-        or event.get("action") in ("hevy_poll", "hevy_backfill")
+        or action in ("hevy_poll", "hevy_backfill")
     ):
         return _handle_hevy_sync(event)
 
@@ -1030,22 +1037,22 @@ def _handle_withings(event):
         logger.warning("rejected withings notification for userid=%s (not in allowlist)", notif_userid)
         return _resp(200, {"status": "ignored", "reason": "userid not in allowlist"})
 
-    # Proactive refresh if within 5 minutes of expiry (or already expired / missing)
-    token = secret.get("access_token", "")
-    expires_at = int(secret.get("expires_at", 0) or 0)
-    if not token or expires_at - int(time.time()) < 300:
-        try:
-            token = _refresh_withings_token()
-        except Exception as e:
-            return _resp(500, {"error": f"withings token refresh failed: {str(e)}"})
+    # Ensure the access token is usable. OAuth secrets bypass the warm-process
+    # cache, and refresh-token rotation is serialized by a DynamoDB lease.
+    try:
+        token = _ensure_oauth_access_token("withings")
+    except OAuthRefreshError as exc:
+        logger.error("withings token refresh failed code=%s", exc.code)
+        return _resp(500, {"error": "withings token refresh failed", "code": exc.code})
 
     # First attempt; if auth fails, refresh and retry once.
     data = _withings_getmeas(token, startdate, enddate)
     if data.get("status") in (401, 601):
         try:
-            token = _refresh_withings_token()
-        except Exception as e:
-            return _resp(500, {"error": f"withings token refresh failed: {str(e)}"})
+            token = _refresh_withings_token(token)
+        except OAuthRefreshError as exc:
+            logger.error("withings forced token refresh failed code=%s", exc.code)
+            return _resp(500, {"error": "withings token refresh failed", "code": exc.code})
         data = _withings_getmeas(token, startdate, enddate)
 
     if data.get("status") != 0:
@@ -1115,48 +1122,21 @@ def _withings_getmeas(token, startdate, enddate):
         return {"status": -1, "error": str(e)}
 
 
-def _refresh_withings_token():
-    """Refresh Withings access token using refresh_token grant. Updates the secret in place."""
-    secret = _get_secret("withings-oauth") or {}
-    client_id = secret.get("client_id", "")
-    client_secret = secret.get("client_secret", "")
-    refresh_token = secret.get("refresh_token", "")
-    if not (client_id and client_secret and refresh_token):
-        raise RuntimeError("missing withings client credentials or refresh_token")
-
-    data = urllib.parse.urlencode({
-        "action": "requesttoken",
-        "grant_type": "refresh_token",
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "refresh_token": refresh_token,
-    }).encode()
-
-    req = urllib.request.Request(
-        WITHINGS_TOKEN_URL,
-        data=data,
-        method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+def _ensure_oauth_access_token(vendor, *, force=False, failed_access_token=None):
+    return oauth_service.ensure_access_token(
+        vendor,
+        force=force,
+        failed_access_token=failed_access_token,
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        body = json.loads(resp.read())
 
-    if body.get("status") != 0:
-        raise RuntimeError(f"withings refresh status {body.get('status')}: {body.get('error', '')}")
 
-    new = body.get("body", {})
-    updated = dict(secret)
-    updated["access_token"] = new.get("access_token", "")
-    updated["refresh_token"] = new.get("refresh_token", refresh_token)
-    updated["userid"] = str(new.get("userid", updated.get("userid", "")))
-    updated["expires_at"] = int(time.time()) + int(new.get("expires_in", 10800))
-
-    secrets_client.update_secret(
-        SecretId="withings-oauth",
-        SecretString=json.dumps(updated),
+def _refresh_withings_token(failed_access_token=None):
+    """Force refresh after Withings rejects an access token."""
+    return _ensure_oauth_access_token(
+        "withings",
+        force=True,
+        failed_access_token=failed_access_token,
     )
-    _secret_cache["withings-oauth"] = updated
-    return updated["access_token"]
 
 
 def _strava_get(url, token):
@@ -1171,42 +1151,13 @@ def _strava_get(url, token):
         return None, -1
 
 
-def _refresh_strava_token():
-    """Refresh Strava access token using refresh_token grant. Updates the secret in place."""
-    secret = _get_secret("strava-oauth") or {}
-    client_id = secret.get("client_id", "")
-    client_secret = secret.get("client_secret", "")
-    refresh_token = secret.get("refresh_token", "")
-    if not (client_id and client_secret and refresh_token):
-        raise RuntimeError("missing strava client credentials or refresh_token")
-
-    data = urllib.parse.urlencode({
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-    }).encode()
-
-    req = urllib.request.Request(
-        STRAVA_TOKEN_URL,
-        data=data,
-        method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+def _refresh_strava_token(failed_access_token=None):
+    """Force refresh after Strava rejects an access token."""
+    return _ensure_oauth_access_token(
+        "strava",
+        force=True,
+        failed_access_token=failed_access_token,
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        body = json.loads(resp.read())
-
-    updated = dict(secret)
-    updated["access_token"] = body.get("access_token", "")
-    updated["refresh_token"] = body.get("refresh_token", refresh_token)
-    updated["expires_at"] = int(body.get("expires_at", int(time.time()) + int(body.get("expires_in", 21600))))
-
-    secrets_client.update_secret(
-        SecretId="strava-oauth",
-        SecretString=json.dumps(updated),
-    )
-    _secret_cache["strava-oauth"] = updated
-    return updated["access_token"]
 
 
 def _handle_strava_verify(event):
@@ -1234,7 +1185,6 @@ def _handle_strava(event):
     API before writing, so a spoofed POST can't inject fake data — at worst
     it triggers a token refresh + a 200 ignore for unknown ids.
     """
-    strava_secret = _get_secret("strava-oauth") or {}
     body = _parse_body(event)
     if not body:
         return _resp(400, {"error": "invalid body"})
@@ -1246,24 +1196,19 @@ def _handle_strava(event):
     if obj_type != "activity" or aspect_type not in ("create", "update"):
         return _resp(200, {"status": "ignored"})
 
-    secret = strava_secret or _get_secret("strava-oauth")
-    if not secret:
-        return _resp(500, {"error": "missing strava credentials"})
-
-    token = secret.get("access_token", "")
-    expires_at = int(secret.get("expires_at", 0) or 0)
-    if not token or expires_at - int(time.time()) < 300:
-        try:
-            token = _refresh_strava_token()
-        except Exception as e:
-            return _resp(500, {"error": f"strava token refresh failed: {str(e)}"})
+    try:
+        token = _ensure_oauth_access_token("strava")
+    except OAuthRefreshError as exc:
+        logger.error("strava token refresh failed code=%s", exc.code)
+        return _resp(500, {"error": "strava token refresh failed", "code": exc.code})
 
     activity, status = _strava_get(f"https://www.strava.com/api/v3/activities/{obj_id}", token)
     if status == 401:
         try:
-            token = _refresh_strava_token()
-        except Exception as e:
-            return _resp(500, {"error": f"strava token refresh failed: {str(e)}"})
+            token = _refresh_strava_token(token)
+        except OAuthRefreshError as exc:
+            logger.error("strava forced token refresh failed code=%s", exc.code)
+            return _resp(500, {"error": "strava token refresh failed", "code": exc.code})
         activity, status = _strava_get(f"https://www.strava.com/api/v3/activities/{obj_id}", token)
     if status != 200 or activity is None:
         return _resp(502, {"error": f"strava activity fetch failed (status {status})"})
@@ -1362,6 +1307,16 @@ def _handle_strava(event):
     _trigger_compute(start_date)
 
     return _resp(200, {"date": start_date, "strava_id": str(obj_id), "strain": workout_item.get("strain")})
+
+
+def _handle_oauth_credential_check():
+    """Daily idempotent OAuth check; fails observably if either vendor fails."""
+    try:
+        results = oauth_service.check_credentials()
+    except OAuthCredentialCheckError as exc:
+        logger.error("OAuth credential check failed results=%s", exc.results)
+        raise
+    return _resp(200, {"status": "ok", "vendors": results})
 
 
 # ── Hevy sync (scheduled poll) ─────────────────────────────────
@@ -2186,6 +2141,18 @@ def _verify_api_key(key):
 _secret_cache = {}
 
 def _get_secret(name):
+    # OAuth refresh tokens rotate. Always bypass the warm-process cache so a
+    # Lambda execution environment cannot keep using a superseded token.
+    if name == "withings-oauth":
+        try:
+            return oauth_service.get_secret("withings")
+        except OAuthRefreshError:
+            return None
+    if name == "strava-oauth":
+        try:
+            return oauth_service.get_secret("strava")
+        except OAuthRefreshError:
+            return None
     if name in _secret_cache:
         return _secret_cache[name]
     secrets_arn = os.environ.get("SECRETS_ARN", "")

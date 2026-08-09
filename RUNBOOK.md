@@ -223,6 +223,33 @@ Do not reset or discard the event watermark as a deletion-reconciliation
 strategy; broader historical reconciliation requires a separately reviewed
 change.
 
+### 2.13 OAuth refresh tokens must never come from a warm cache
+
+Withings and Strava both rotate refresh tokens. OAuth secret reads therefore
+bypass the ingest Lambda's process-local secret cache and go directly to
+Secrets Manager. Do not route `withings-oauth` or `strava-oauth` back through
+the generic warm cache.
+
+`shared/oauth_service.py` serializes a provider refresh with a 45-second
+conditional lease in `fitness-user-config`. After acquiring the lease it reads
+the secret again before calling the provider, persists the complete rotated
+secret while preserving unknown fields, and then releases the lease. If the
+lease cannot be established, refresh fails closed rather than risking two
+rotations from the same token.
+
+- Strava refreshes when 3,600 seconds or less remain.
+- Withings refreshes when 600 seconds or less remain.
+- Webhooks keep just-in-time refresh and retry once after provider auth failure.
+- The daily `oauth_credential_check` action refreshes only when due and fails
+  the invocation observably if either vendor check fails.
+- `oauth_status#withings` and `oauth_status#strava` contain timestamps, expiry,
+  state, and sanitized failure codes only. Never write access tokens, refresh
+  tokens, client secrets, or raw provider error bodies into status rows/logs.
+
+The daily check is not a substitute for webhook processing or historical data
+reconciliation. Do not add a high-frequency unconditional refresh schedule;
+that increases token-rotation races without improving data completeness.
+
 ---
 
 ## 3. Deploy
@@ -280,14 +307,32 @@ Expect `Sandbox.Timedout` (§2.7). Re-invoke until date coverage is complete, th
 |---|---|
 | `hevy_last_sync` | Incremental watermark. Present ⇒ incremental mode; absent ⇒ cold-start page-walk. |
 | `hevy_exercise_templates` | ~226 templates cached, refreshed if >7 days stale (forced on backfill). Provides real `primary_muscle_group`. |
+| `oauth_refresh_lease#withings`, `oauth_refresh_lease#strava` | Short-lived conditional refresh leases; expired rows are harmless. |
+| `oauth_status#withings`, `oauth_status#strava` | Sanitized credential health, expiry, attempt/success/check timestamps, and failure code. |
 | `scoring` | Scoring weights — **hot-swappable, no deploy needed.** |
 
 ### 4.4 EventBridge schedules
 | Rule | Schedule (UTC) |
 |---|---|
+| `IngestFunctionOAuthCredentialCheck` | `cron(0 8 * * ? *)` daily |
 | `IngestFunctionHevyPoll` | `cron(30 8 * * ? *)` daily |
 | `ComputeFunctionDailyBaselines` | `cron(0 9 * * ? *)` daily |
 | `ComputeFunctionWeeklyCorrelations` | `cron(0 13 ? * SUN *)` |
+
+### 4.5 Check OAuth credentials (safe to rerun)
+
+```python
+call_boto3(service_name='lambda', operation_name='Invoke', region_name='us-west-2',
+  params={'FunctionName':'fitness-dashboard-IngestFunction-RYfFZRORN8J2',
+          'InvocationType':'RequestResponse',
+          'Payload': json.dumps({'action':'oauth_credential_check'})})
+```
+
+The response contains only `valid` / `refreshed` state and access-token expiry
+per vendor. Provider failures raise a Lambda error so EventBridge retry and
+Lambda error metrics can observe them. Inspect the `oauth_status#vendor` rows
+for sanitized state; inspect Secrets Manager only to confirm version metadata,
+never to print token values.
 
 ---
 
