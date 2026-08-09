@@ -107,11 +107,18 @@ def _hevy_workout(wid, date="2026-06-30", exercises=None):
 def _stub_offline(h, workouts=None, events=None, measurements=None):
     """Stub the fetch + recompute helpers so the handler stays offline."""
     workouts = workouts or []
-    h.fetch_recent_workouts_full = lambda key, **kw: list(workouts)
+    h.fetch_recent_workouts_full = lambda key, **kw: hc.HevyFetchResult.success(workouts)
     if events is not None:
-        h.fetch_workout_events = lambda key, since, **kw: events
+        h.fetch_workout_events = lambda key, since, **kw: (
+            events if isinstance(events, hc.HevyWorkoutEventsResult)
+            else hc.HevyWorkoutEventsResult.success(
+                events.get("updated", []), events.get("deleted", [])
+            )
+        )
     h.fetch_exercise_templates = lambda key, **kw: {}
-    h.fetch_body_measurements = lambda key, **kw: list(measurements or [])
+    h.fetch_body_measurements = lambda key, **kw: hc.HevyFetchResult.success(
+        measurements or []
+    )
     h.recompute_prs_for_canonicals = lambda *_a, **_k: {}
     h.recompute_weekly_volume = lambda *_a, **_k: {}
 
@@ -241,7 +248,7 @@ def test_backfill_ignores_watermark_and_walks_multiple_pages():
     h.fetch_recent_workouts_full = lambda key, **kw: hc.fetch_recent_workouts_full(
         key, http_get=_http, **kw)
     h.fetch_exercise_templates = lambda key, **kw: {}
-    h.fetch_body_measurements = lambda key, **kw: []
+    h.fetch_body_measurements = lambda key, **kw: hc.HevyFetchResult.success([])
     h.recompute_prs_for_canonicals = lambda *_a, **_k: {}
     h.recompute_weekly_volume = lambda *_a, **_k: {}
 
@@ -365,14 +372,8 @@ def test_legacy_lookup_failure_stops_before_writes_and_watermark_advance():
         raise RuntimeError("simulated DynamoDB scan failure")
 
     tables["WORKOUTS_TABLE"].scan = fail_scan
-    response = h.lambda_handler({"action": "hevy_poll"}, None)
-    body = json.loads(response["body"])
-
-    assert body == {
-        "status": "error",
-        "reason": "hevy legacy lookup failed",
-        "retryable": True,
-    }
+    with pytest.raises(h.HevySyncError, match="hevy legacy lookup failed"):
+        h.lambda_handler({"action": "hevy_poll"}, None)
     workout_rows = [
         item for item in tables["WORKOUTS_TABLE"].items
         if item["strava_id"] == "hevy_lookup-failure"
@@ -474,6 +475,482 @@ def test_incremental_poll_preserves_existing_legacy_date_key():
     assert rows[0]["legacy_date_preserved"] is True
 
 
+# ── PR2: incremental sync integrity ────────────────────────────────
+
+@pytest.mark.parametrize(
+    ("status", "truncated"),
+    [
+        ("timeout", False),
+        ("rate_limited", False),
+        ("vendor_error", False),
+        ("malformed", False),
+        ("truncated", True),
+    ],
+)
+def test_incomplete_incremental_fetch_never_advances_watermark(status, truncated):
+    h, tables = _fresh_module()
+    old_watermark = "2026-08-01T12:00:00+00:00"
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": old_watermark,
+    })
+    failed = hc.HevyWorkoutEventsResult(
+        updated=[_hevy_workout("partial")] if status != "timeout" else [],
+        deleted=[],
+        complete=False,
+        truncated=truncated,
+        pages_read=1 if status != "timeout" else 0,
+        status=status,
+        error="sanitized test failure",
+    )
+    _stub_offline(h, events=failed)
+
+    with pytest.raises(h.HevySyncError, match=status):
+        h.lambda_handler({"action": "hevy_poll"}, None)
+
+    watermark = tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]
+    assert watermark["last_sync"] == old_watermark
+    assert tables["WORKOUTS_TABLE"].items == []
+    assert tables["EXERCISES_TABLE"].items == []
+
+
+def test_complete_empty_poll_advances_to_prefetch_boundary_and_replays_48_hours():
+    h, tables = _fresh_module()
+    old_watermark = "2026-08-05T12:00:00+00:00"
+    sync_started_at = "2026-08-06T13:14:15+00:00"
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": old_watermark,
+    })
+    captured = {}
+
+    def _events(_key, since, **_kwargs):
+        captured["since"] = since
+        return hc.HevyWorkoutEventsResult.success()
+
+    _stub_offline(h, events=hc.HevyWorkoutEventsResult.success())
+    h.fetch_workout_events = _events
+    h._now_iso = lambda: sync_started_at
+
+    response = h.lambda_handler({"action": "hevy_poll"}, None)
+    body = json.loads(response["body"])
+    watermark = tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]
+
+    assert body["status"] == "ok"
+    assert body["fetched"] == 0
+    assert body["fetch_status"] == "empty"
+    assert captured["since"] == "2026-08-03T12:00:00+00:00"
+    assert watermark["last_sync"] == sync_started_at
+    assert watermark["replay_overlap_hours"] == 48
+
+
+def test_real_empty_events_envelope_page_count_zero_advances_watermark():
+    h, tables = _fresh_module()
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": "2026-08-05T12:00:00+00:00",
+    })
+    _stub_offline(h, events=hc.HevyWorkoutEventsResult.success())
+
+    def _events(key, since, **kwargs):
+        return hc.fetch_workout_events(
+            key,
+            since,
+            page_size=kwargs["page_size"],
+            max_pages=kwargs["max_pages"],
+            http_get=lambda _url, _key: ({
+                "page": 1,
+                "page_count": 0,
+                "events": [],
+            }, 200),
+        )
+
+    h.fetch_workout_events = _events
+    h._now_iso = lambda: "2026-08-06T12:00:00+00:00"
+
+    body = json.loads(h.lambda_handler({"action": "hevy_poll"}, None)["body"])
+
+    assert body["status"] == "ok"
+    assert body["fetch_status"] == "empty"
+    assert tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]["last_sync"] == "2026-08-06T12:00:00+00:00"
+
+
+def test_overlap_replays_boundary_events_idempotently():
+    h, tables = _fresh_module()
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": "2026-08-05T12:00:00+00:00",
+    })
+    around_boundary = [
+        _hevy_workout("before-boundary", date="2026-08-05"),
+        _hevy_workout("after-boundary", date="2026-08-06"),
+    ]
+    captured_since = []
+
+    def _events(_key, since, **_kwargs):
+        captured_since.append(since)
+        return hc.HevyWorkoutEventsResult.success(updated=around_boundary)
+
+    _stub_offline(h, events=hc.HevyWorkoutEventsResult.success())
+    h.fetch_workout_events = _events
+    h._now_iso = lambda: "2026-08-06T12:00:00+00:00"
+
+    h.lambda_handler({"action": "hevy_poll"}, None)
+    h.lambda_handler({"action": "hevy_poll"}, None)
+
+    ids = [row["strava_id"] for row in tables["WORKOUTS_TABLE"].items]
+    assert ids.count("hevy_before-boundary") == 1
+    assert ids.count("hevy_after-boundary") == 1
+    exercise_keys = {
+        (row["canonical"], row["date"])
+        for row in tables["EXERCISES_TABLE"].items
+    }
+    assert len(exercise_keys) == len(tables["EXERCISES_TABLE"].items)
+    assert captured_since == [
+        "2026-08-03T12:00:00+00:00",
+        "2026-08-04T12:00:00+00:00",
+    ]
+
+
+def test_deletion_event_replay_is_idempotent():
+    h, tables = _fresh_module()
+    workout = _hevy_workout("deleted-workout")
+    _stub_offline(h, workouts=[workout])
+    h.lambda_handler({"action": "hevy_poll"}, None)
+    assert tables["WORKOUTS_TABLE"].items
+    assert tables["EXERCISES_TABLE"].items
+
+    deletion = hc.HevyWorkoutEventsResult.success(deleted=["deleted-workout"])
+    _stub_offline(h, events=deletion)
+    first = json.loads(h.lambda_handler({"action": "hevy_poll"}, None)["body"])
+    second = json.loads(h.lambda_handler({"action": "hevy_poll"}, None)["body"])
+
+    assert first["deleted"] == 1
+    assert second["deleted"] == 0
+    assert tables["WORKOUTS_TABLE"].items == []
+    assert tables["EXERCISES_TABLE"].items == []
+
+
+def test_deletion_apply_failure_is_observable_and_preserves_watermark():
+    h, tables = _fresh_module()
+    old_watermark = "2026-08-01T12:00:00+00:00"
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": old_watermark,
+    })
+    _stub_offline(
+        h,
+        events=hc.HevyWorkoutEventsResult.success(deleted=["cannot-delete"]),
+    )
+
+    def _fail_scan(**_kwargs):
+        raise RuntimeError("simulated deletion lookup failure")
+
+    tables["WORKOUTS_TABLE"].scan = _fail_scan
+    with pytest.raises(h.HevySyncError, match="deletion apply failed"):
+        h.lambda_handler({"action": "hevy_poll"}, None)
+
+    assert tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]["last_sync"] == old_watermark
+
+
+def test_partial_run_recomputes_prior_write_then_fails_without_watermark_advance():
+    h, tables = _fresh_module()
+    workouts_table = tables["WORKOUTS_TABLE"]
+    old_watermark = "2026-08-01T12:00:00+00:00"
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": old_watermark,
+    })
+    workouts = [_hevy_workout("a"), _hevy_workout("b", date="2026-07-01")]
+    _stub_offline(h, events={"updated": workouts, "deleted": []})
+
+    scan_calls = {"count": 0}
+
+    def _fail_second_lookup(**_kwargs):
+        scan_calls["count"] += 1
+        if scan_calls["count"] == 2:
+            raise RuntimeError("simulated legacy lookup failure")
+        return {"Items": []}
+
+    workouts_table.scan = _fail_second_lookup
+    recomputes = {"prs": [], "weekly": 0, "dates": []}
+    h.recompute_prs_for_canonicals = lambda names: recomputes["prs"].append(names)
+    h.recompute_weekly_volume = lambda: recomputes.__setitem__(
+        "weekly", recomputes["weekly"] + 1
+    )
+    h._trigger_compute = lambda date: recomputes["dates"].append(date)
+
+    with pytest.raises(h.HevySyncError, match="legacy lookup failed"):
+        h.lambda_handler({"action": "hevy_poll"}, None)
+
+    assert {row["strava_id"] for row in workouts_table.items} == {"hevy_a"}
+    assert recomputes == {
+        "prs": [["bench_press"]],
+        "weekly": 1,
+        "dates": ["2026-06-30"],
+    }
+    assert tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]["last_sync"] == old_watermark
+
+    # Retry: A cheap-skips, B safely lands, and identity-keyed rows stay unique.
+    workouts_table.scan = lambda **_kwargs: {"Items": list(workouts_table.items)}
+    h.lambda_handler({"action": "hevy_poll"}, None)
+    ids = [row["strava_id"] for row in workouts_table.items]
+    assert ids.count("hevy_a") == 1
+    assert ids.count("hevy_b") == 1
+
+
+def test_incomplete_measurement_fetch_does_not_advance_workout_watermark():
+    h, tables = _fresh_module()
+    old_watermark = "2026-08-01T12:00:00+00:00"
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": old_watermark,
+    })
+    _stub_offline(h, events=hc.HevyWorkoutEventsResult.success())
+    h.fetch_body_measurements = lambda _key, **_kwargs: hc.HevyFetchResult(
+        [], False, False, 0, "vendor_error", "status 503"
+    )
+
+    with pytest.raises(h.HevySyncError, match="body-measurement sync incomplete"):
+        h.lambda_handler({"action": "hevy_poll"}, None)
+
+    assert tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]["last_sync"] == old_watermark
+
+
+def test_good_record_applies_before_bad_record_requires_operator_review(caplog):
+    h, tables = _fresh_module()
+    old_watermark = "2026-08-01T12:00:00+00:00"
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": old_watermark,
+    })
+    issue = {
+        "record_id": "bad-workout",
+        "event_type": "updated",
+        "reason": "start_time cannot derive an analysis date",
+    }
+    events = hc.HevyWorkoutEventsResult(
+        updated=[_hevy_workout("good-workout")],
+        deleted=[],
+        complete=True,
+        truncated=False,
+        pages_read=1,
+        status="records_degraded",
+        record_issues=(issue,),
+    )
+    _stub_offline(h, events=events)
+    recomputes = {"prs": [], "weekly": 0, "dates": []}
+    h.recompute_prs_for_canonicals = lambda names: recomputes["prs"].append(names)
+    h.recompute_weekly_volume = lambda: recomputes.__setitem__(
+        "weekly", recomputes["weekly"] + 1
+    )
+    h._trigger_compute = lambda date: recomputes["dates"].append(date)
+
+    with pytest.raises(h.HevyRecordIssueError) as raised:
+        h.lambda_handler({"action": "hevy_poll"}, None)
+
+    assert raised.value.record_issues == (issue,)
+    assert "id=bad-workout" in str(raised.value)
+    assert "start_time cannot derive an analysis date" in str(raised.value)
+    assert "id=bad-workout type=updated" in caplog.text
+    assert {row["strava_id"] for row in tables["WORKOUTS_TABLE"].items} == {
+        "hevy_good-workout"
+    }
+    assert recomputes == {
+        "prs": [["bench_press"]],
+        "weekly": 1,
+        "dates": ["2026-06-30"],
+    }
+    assert tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]["last_sync"] == old_watermark
+
+
+def test_reviewed_bad_record_override_recovers_and_advances_watermark(caplog):
+    h, tables = _fresh_module()
+    old_watermark = "2026-08-01T12:00:00+00:00"
+    sync_started_at = "2026-08-06T12:00:00+00:00"
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": old_watermark,
+    })
+    issue = {
+        "record_id": "bad-workout",
+        "event_type": "updated",
+        "reason": "start_time cannot derive an analysis date",
+    }
+    events = hc.HevyWorkoutEventsResult(
+        updated=[_hevy_workout("good-workout")],
+        deleted=[],
+        complete=True,
+        truncated=False,
+        pages_read=1,
+        status="records_degraded",
+        record_issues=(issue,),
+    )
+    _stub_offline(h, events=events)
+    h._now_iso = lambda: sync_started_at
+
+    body = json.loads(h.lambda_handler({
+        "action": "hevy_poll",
+        "skip_invalid_workout_ids": ["bad-workout"],
+    }, None)["body"])
+
+    assert body["status"] == "ok_with_reviewed_skips"
+    assert body["reviewed_skips"] == [issue]
+    assert "intentionally skipped after review: id=bad-workout" in caplog.text
+    assert tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]["last_sync"] == sync_started_at
+    assert {row["strava_id"] for row in tables["WORKOUTS_TABLE"].items} == {
+        "hevy_good-workout"
+    }
+
+
+def test_unknown_event_does_not_wedge_known_workout_or_watermark():
+    h, tables = _fresh_module()
+    sync_started_at = "2026-08-06T12:00:00+00:00"
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": "2026-08-01T12:00:00+00:00",
+    })
+    ignored = {
+        "record_id": "future-event",
+        "event_type": "archived",
+        "reason": "unsupported event type",
+    }
+    _stub_offline(h, events=hc.HevyWorkoutEventsResult(
+        updated=[_hevy_workout("known-workout")],
+        deleted=[],
+        complete=True,
+        truncated=False,
+        pages_read=1,
+        status="ok_with_ignored_events",
+        ignored_events=(ignored,),
+    ))
+    h._now_iso = lambda: sync_started_at
+
+    body = json.loads(h.lambda_handler({"action": "hevy_poll"}, None)["body"])
+
+    assert body["status"] == "ok_with_ignored_events"
+    assert body["ignored_events"] == [ignored]
+    assert {row["strava_id"] for row in tables["WORKOUTS_TABLE"].items} == {
+        "hevy_known-workout"
+    }
+    assert tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]["last_sync"] == sync_started_at
+
+
+def test_bad_record_override_cannot_skip_unreported_healthy_id():
+    h, tables = _fresh_module()
+    issue = {
+        "record_id": "bad-workout",
+        "event_type": "updated",
+        "reason": "start_time cannot derive an analysis date",
+    }
+    _stub_offline(h, events=hc.HevyWorkoutEventsResult(
+        updated=[_hevy_workout("healthy-workout")],
+        deleted=[],
+        complete=True,
+        truncated=False,
+        pages_read=1,
+        status="records_degraded",
+        record_issues=(issue,),
+    ))
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": "2026-08-01T12:00:00+00:00",
+    })
+
+    with pytest.raises(ValueError, match="IDs not present in record issues"):
+        h.lambda_handler({
+            "action": "hevy_poll",
+            "skip_invalid_workout_ids": ["healthy-workout"],
+        }, None)
+
+    assert tables["WORKOUTS_TABLE"].items == []
+
+
+def test_reviewed_bad_record_override_recovers_backfill():
+    h, tables = _fresh_module()
+    issue = {
+        "record_id": "bad-backfill",
+        "event_type": "workout",
+        "reason": "start_time cannot derive an analysis date",
+    }
+    h.fetch_recent_workouts_full = lambda _key, **_kwargs: hc.HevyFetchResult(
+        [_hevy_workout("good-backfill")],
+        True,
+        False,
+        1,
+        "records_degraded",
+        record_issues=(issue,),
+    )
+    h.fetch_exercise_templates = lambda _key, **_kwargs: {}
+    h.fetch_body_measurements = lambda _key, **_kwargs: hc.HevyFetchResult.success([])
+    h.recompute_prs_for_canonicals = lambda *_args, **_kwargs: {}
+    h.recompute_weekly_volume = lambda *_args, **_kwargs: {}
+
+    body = json.loads(h.lambda_handler({
+        "action": "hevy_backfill",
+        "skip_invalid_workout_ids": ["bad-backfill"],
+    }, None)["body"])
+
+    assert body["status"] == "ok_with_reviewed_skips"
+    assert {row["strava_id"] for row in tables["WORKOUTS_TABLE"].items} == {
+        "hevy_good-backfill"
+    }
+
+
+def test_repeated_transport_failures_freeze_then_success_uses_its_own_boundary():
+    h, tables = _fresh_module()
+    old_watermark = "2026-08-01T12:00:00+00:00"
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": old_watermark,
+    })
+    results = iter([
+        hc.HevyWorkoutEventsResult([], [], False, False, 0, "timeout"),
+        hc.HevyWorkoutEventsResult([], [], False, False, 0, "vendor_error"),
+        hc.HevyWorkoutEventsResult.success(),
+    ])
+    _stub_offline(h, events=hc.HevyWorkoutEventsResult.success())
+    h.fetch_workout_events = lambda *_args, **_kwargs: next(results)
+    now_values = iter([
+        "2026-08-02T10:00:00+00:00",
+        "2026-08-03T11:00:00+00:00",
+        "2026-08-04T12:00:00+00:00",
+        "2026-08-04T12:00:01+00:00",
+    ])
+    h._now_iso = lambda: next(now_values)
+
+    for expected_status in ("timeout", "vendor_error"):
+        with pytest.raises(h.HevySyncError, match=expected_status):
+            h.lambda_handler({"action": "hevy_poll"}, None)
+        assert tables["USER_CONFIG_TABLE"].get_item(
+            Key={"key": "hevy_last_sync"}
+        )["Item"]["last_sync"] == old_watermark
+
+    body = json.loads(h.lambda_handler({"action": "hevy_poll"}, None)["body"])
+    assert body["sync_started_at"] == "2026-08-04T12:00:00+00:00"
+    assert tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]["last_sync"] == "2026-08-04T12:00:00+00:00"
+
+
 def test_backfill_default_page_span_covers_full_history():
     """The backfill default max_pages (20) × pageSize (10) covers >= 200
     workouts — enough for Mateo's full history — without an event override."""
@@ -483,11 +960,11 @@ def test_backfill_default_page_span_covers_full_history():
 
     def _capture(key, **kw):
         captured.update(kw)
-        return []
+        return hc.HevyFetchResult.success([])
 
     h.fetch_recent_workouts_full = _capture
     h.fetch_exercise_templates = lambda key, **kw: {}
-    h.fetch_body_measurements = lambda key, **kw: []
+    h.fetch_body_measurements = lambda key, **kw: hc.HevyFetchResult.success([])
     h.recompute_prs_for_canonicals = lambda *_a, **_k: {}
     h.recompute_weekly_volume = lambda *_a, **_k: {}
 
@@ -514,8 +991,9 @@ def test_measurements_pagesize_clamped_to_hevy_max():
 
     # Caller asks for an over-cap page size; the clamp must rescue it.
     result = hc.fetch_body_measurements("k", page_size=100, http_get=_http)
-    assert len(result) == 1
-    assert result[0]["weight_kg"] == 80.0
+    assert result.complete is True
+    assert len(result.items) == 1
+    assert result.items[0]["weight_kg"] == 80.0
     assert all("pageSize=10" in u for u in urls)  # never sent the illegal 100
 
 
@@ -539,10 +1017,8 @@ def test_measurements_summary_distinguishes_empty_from_error():
         raise RuntimeError("hevy 500 on body_measurements")
 
     h2.fetch_body_measurements = _boom
-    resp2 = h2.lambda_handler({"action": "hevy_poll"}, None)
-    body2 = json.loads(resp2["body"])
-    assert body2["measurements_written"] == 0
-    assert body2["measurements_status"] == "error"
+    with pytest.raises(h2.HevySyncError, match="body-measurement sync incomplete"):
+        h2.lambda_handler({"action": "hevy_poll"}, None)
 
 
 def test_measurements_written_when_present():
@@ -550,9 +1026,9 @@ def test_measurements_written_when_present():
     with the available count."""
     h, tables = _fresh_module()
     _stub_offline(h, workouts=[])
-    h.fetch_body_measurements = lambda key, **kw: [
+    h.fetch_body_measurements = lambda key, **kw: hc.HevyFetchResult.success([
         {"date": "2026-05-20", "weight_kg": 80.0, "waist": 81.28},
-    ]
+    ])
     resp = h.lambda_handler({"action": "hevy_poll"}, None)
     body = json.loads(resp["body"])
     assert body["measurements_status"] == "ok"

@@ -10,9 +10,13 @@ AWS and no real Hevy key are required.
 import os
 import sys
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "shared"))
 sys.path.insert(0, os.path.join(ROOT, "functions", "ingest"))
+
+from shared import hevy_client as hc  # noqa: E402
 
 
 class FakeTable:
@@ -111,11 +115,16 @@ def _stub_hevy_fetches(h, workouts=None, events=None):
     offline and focused on the sync wiring.
     """
     workouts = workouts or []
-    h.fetch_recent_workouts_full = lambda key, **kw: list(workouts)
+    h.fetch_recent_workouts_full = lambda key, **kw: hc.HevyFetchResult.success(workouts)
     if events is not None:
-        h.fetch_workout_events = lambda key, since, **kw: events
+        h.fetch_workout_events = lambda key, since, **kw: (
+            events if isinstance(events, hc.HevyWorkoutEventsResult)
+            else hc.HevyWorkoutEventsResult.success(
+                events.get("updated", []), events.get("deleted", [])
+            )
+        )
     h.fetch_exercise_templates = lambda key, **kw: {}
-    h.fetch_body_measurements = lambda key, **kw: []
+    h.fetch_body_measurements = lambda key, **kw: hc.HevyFetchResult.success([])
     h.recompute_prs_for_canonicals = lambda *_a, **_k: {}
     h.recompute_weekly_volume = lambda *_a, **_k: {}
 
@@ -222,9 +231,9 @@ def test_hevy_sync_ingests_body_measurements():
     h._get_secret = lambda name: {"api_key": "k"} if name == "hevy-api-key" else None
     _stub_hevy_fetches(h, workouts=[])
     # Override the body-measurement fetch with a real payload.
-    h.fetch_body_measurements = lambda key, **kw: [
+    h.fetch_body_measurements = lambda key, **kw: hc.HevyFetchResult.success([
         {"date": "2026-06-30", "weight_kg": 76.66, "waist": 81.28},
-    ]
+    ])
     resp = h.lambda_handler({"action": "hevy_poll"}, None)
     import json
     body = json.loads(resp["body"])
@@ -238,9 +247,8 @@ def test_hevy_sync_ingests_body_measurements():
     assert weight_rows and "source_ts" in weight_rows[0]
 
 
-def test_hevy_sync_degrades_when_endpoint_errors():
-    """A Hevy outage on the cold-start fetch must not crash the cron — the
-    handler returns 200 and simply writes nothing."""
+def test_hevy_sync_surfaces_endpoint_errors_as_invocation_failure():
+    """A Hevy outage must be distinguishable from a successful empty poll."""
     h, tables = _fresh_module(multi_table=True)
     h._get_secret = lambda name: {"api_key": "k"} if name == "hevy-api-key" else None
 
@@ -249,12 +257,9 @@ def test_hevy_sync_degrades_when_endpoint_errors():
 
     h.fetch_recent_workouts_full = _boom
     h.fetch_exercise_templates = lambda key, **kw: {}
-    h.fetch_body_measurements = lambda key, **kw: []
-    resp = h.lambda_handler({"action": "hevy_poll"}, None)
-    import json
-    body = json.loads(resp["body"])
-    assert resp["statusCode"] == 200
-    assert body["status"] == "error"
+    h.fetch_body_measurements = lambda key, **kw: hc.HevyFetchResult.success([])
+    with pytest.raises(h.HevySyncError, match="hevy workout fetch failed"):
+        h.lambda_handler({"action": "hevy_poll"}, None)
     assert tables["WORKOUTS_TABLE"].items == []
 
 
@@ -295,12 +300,14 @@ def test_hevy_sync_repoll_keeps_pr_flags_clean():
     h._get_secret = lambda name: {"api_key": "k"} if name == "hevy-api-key" else None
 
     # Stub fetches but keep the real recompute functions.
-    h.fetch_recent_workouts_full = lambda key, **kw: [_hevy_workout("a")]
-    h.fetch_workout_events = lambda key, since, **kw: {
-        "updated": [_hevy_workout("a")], "deleted": []
-    }
+    h.fetch_recent_workouts_full = lambda key, **kw: hc.HevyFetchResult.success([
+        _hevy_workout("a")
+    ])
+    h.fetch_workout_events = lambda key, since, **kw: hc.HevyWorkoutEventsResult.success(
+        updated=[_hevy_workout("a")]
+    )
     h.fetch_exercise_templates = lambda key, **kw: {}
-    h.fetch_body_measurements = lambda key, **kw: []
+    h.fetch_body_measurements = lambda key, **kw: hc.HevyFetchResult.success([])
     # scan_exercise_history queries by canonical; wire lift_compute's OWN
     # db references (it bound get_table/put_item/query_items at import time).
     import shared.db as db_mod
