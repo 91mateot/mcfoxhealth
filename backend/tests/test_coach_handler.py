@@ -311,6 +311,24 @@ def test_snapshot_path_replaces_today_block(patched_context):
     assert "Body Composition" in prompt  # still DB-driven
 
 
+def test_snapshot_meal_totals_do_not_depend_on_daily_score_protein_semantics(patched_context):
+    snapshot = {
+        "date": "Mon, Apr 27",
+        "mealsToday": [
+            {"time": "08:00", "name": "Zero-cal drink", "cal": 0, "p": 0, "c": 0, "f": 0},
+            {"time": "12:30", "name": "Chicken Bake", "cal": 770, "p": 61, "c": 78, "f": 25},
+        ],
+        "nutritionTargets": {"cal": 2200, "p": 180, "c": 190, "f": 65},
+        "metricSemantics": {"protein": {"availability": "unavailable"}},
+    }
+
+    prompt = patched_context.build_system_prompt(snapshot)
+    assert "Calories: 770 / 2200 target" in prompt
+    assert "Protein: 61g / 180g target" in prompt
+    assert "Carbs: 78g / 190g target" in prompt
+    assert "Fat: 25g / 65g target" in prompt
+
+
 def test_snapshot_with_null_vitals(patched_context):
     """A snapshot with no HRV/RHR yet should degrade gracefully."""
     snapshot = {
@@ -339,6 +357,63 @@ def test_snapshot_with_null_vitals(patched_context):
     assert "Recovery: n/a" in prompt
     assert "Strain so far: n/a" in prompt
     assert "Protein: n/a" in prompt
+    assert "Calories: n/a" in prompt
+    assert "Carbs: n/a" in prompt
+    assert "Fat: n/a" in prompt
     assert "Water: n/a" in prompt
     assert "None%" not in prompt
     assert "No meals logged yet today." in prompt
+
+
+def test_db_context_missing_physiology_renders_unavailable(patched_context):
+    block = patched_context._today_block_from_db("2026-04-26", {}, [], [], {})
+
+    assert "Recovery: n/a" in block
+    assert "unknown%" not in block
+    assert "Strain so far: n/a" in block
+    assert "Score: n/a" in block
+    assert "Duration: n/a (n/a efficiency)" in block
+    assert "Deep: n/a min | REM: n/a min | Core: n/a min | Awake: n/a min" in block
+    assert "0% efficiency" not in block
+
+
+def test_db_context_partial_sleep_does_not_fill_missing_stages(patched_context):
+    block = patched_context._today_block_from_db(
+        "2026-04-26",
+        {"sleep": {"total_min": 420}},
+        [],
+        [],
+        {},
+    )
+
+    assert "Duration: 7h 0m (n/a efficiency)" in block
+    assert "Deep: n/a min | REM: n/a min | Core: n/a min | Awake: n/a min" in block
+
+
+def test_db_context_preserves_genuine_observed_zeroes(patched_context):
+    block = patched_context._today_block_from_db(
+        "2026-04-26",
+        {
+            "recovery": 0,
+            "recovery_zone": "red",
+            "strain": 0,
+            "sleep_score": 0,
+            "sleep": {
+                "total_min": 0,
+                "efficiency": 0,
+                "deep_min": 0,
+                "rem_min": 0,
+                "core_min": 0,
+                "awake_min": 0,
+            },
+        },
+        [],
+        [],
+        {},
+    )
+
+    assert "Recovery: 0% (red)" in block
+    assert "Strain so far: 0/21" in block
+    assert "Score: 0/100" in block
+    assert "Duration: 0h 0m (0% efficiency)" in block
+    assert "Deep: 0 min | REM: 0 min | Core: 0 min | Awake: 0 min" in block
