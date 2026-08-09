@@ -43,6 +43,11 @@ from typing import Callable, Optional
 
 from shared.exercise_canonical import MUSCLE_GROUPS, canonicalize
 from shared.scoring import compute_strain
+from shared.timezone import (
+    analysis_date_for_timestamp,
+    parse_timestamp,
+    temporal_metadata,
+)
 
 logger = logging.getLogger("hevy_client")
 
@@ -185,21 +190,18 @@ def _v1(path: str) -> str:
 
 # ── Timestamp / duration helpers ────────────────────────────────────────────
 
-def _iso_date(ts) -> Optional[str]:
-    """Extract a YYYY-MM-DD date key from a Hevy ISO-8601 timestamp.
+def _iso_date(ts, *, allow_naive_source_date: bool = False) -> Optional[str]:
+    """Derive a Hevy analysis date without truncating a UTC timestamp.
 
-    Hevy emits UTC timestamps like ``2026-06-30T18:04:11+00:00``. We key
-    workout rows by local calendar date elsewhere in the stack; Hevy doesn't
-    carry a local offset, so we take the date portion as-is. Off-by-one at
-    midnight UTC is acceptable for a lifting log and matches how the Strava
-    path keys on ``start_date_local[:10]``.
+    Hevy workout timestamps are absolute instants and do not carry trustworthy
+    event-local timezone context, so aware values are converted to the
+    configured home timezone. Date-only body-measurement values may retain
+    their explicit source date because no absolute instant is present.
     """
-    if not ts or not isinstance(ts, str):
-        return None
-    head = ts.strip()[:10]
-    if len(head) == 10 and head[4] == "-" and head[7] == "-":
-        return head
-    return None
+    return analysis_date_for_timestamp(
+        ts,
+        allow_naive_source_date=allow_naive_source_date,
+    )
 
 
 def _duration_min(workout: dict) -> float:
@@ -208,10 +210,11 @@ def _duration_min(workout: dict) -> float:
     end = workout.get("end_time")
     if not start or not end:
         return 0.0
-    try:
-        s = datetime.fromisoformat(start.replace("Z", "+00:00"))
-        e = datetime.fromisoformat(end.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
+    s = parse_timestamp(start)
+    e = parse_timestamp(end)
+    if s is None or e is None:
+        return 0.0
+    if s.tzinfo is None or s.utcoffset() is None or e.tzinfo is None or e.utcoffset() is None:
         return 0.0
     delta = (e - s).total_seconds() / 60.0
     return round(delta, 1) if delta > 0 else 0.0
@@ -425,7 +428,9 @@ def workout_to_row(workout: dict) -> Optional[dict]:
     Returns None when the workout has no usable id or date.
     """
     hevy_id = workout.get("id")
-    date = _iso_date(workout.get("start_time"))
+    source_start_time = workout.get("start_time")
+    temporal = temporal_metadata(source_start_time)
+    date = temporal.get("analysis_date")
     if not hevy_id or not date:
         return None
 
@@ -470,6 +475,16 @@ def workout_to_row(workout: dict) -> Optional[dict]:
         "set_type_breakdown": _set_type_breakdown(exercises),
         "ingested_at": datetime.now(timezone.utc).isoformat(),
     }
+    row.update(temporal)
+
+    # Keep the vendor values verbatim even though start_time/end_time already
+    # exist for backward compatibility. The explicit source_* names make it
+    # clear these are preserved source instants, not fabricated event-local
+    # times. analysis_timezone records the home-timezone fallback separately.
+    row["source_start_time"] = source_start_time
+    source_end_time = workout.get("end_time")
+    if source_end_time:
+        row["source_end_time"] = source_end_time
 
     # Session-level fields that used to be discarded. ``description`` is
     # Mateo's free-text "went hard today" note — high-value subjective load.
@@ -503,7 +518,7 @@ def body_measurement_to_metrics(measurement: dict) -> list:
     """
     if not isinstance(measurement, dict):
         return []
-    date = _iso_date(measurement.get("date"))
+    date = _iso_date(measurement.get("date"), allow_naive_source_date=True)
     if not date:
         return []
 

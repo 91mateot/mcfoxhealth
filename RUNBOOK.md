@@ -120,6 +120,53 @@ Known-good example: 2026-05-09/11/13/20 each have a short `"Prep - Day N"` sessi
 
 Only revisit if a new `#hae`-sourced workout row appears.
 
+### 2.10 `date` is analysis context — never truncate an absolute UTC timestamp
+
+New writes derive calendar attribution through `shared/timezone.py`; the raw
+instant remains source truth. The configured home timezone is
+`America/Los_Angeles`.
+
+- **Hevy workouts:** `start_time` is an absolute instant, but Hevy provides no
+  trustworthy event-local timezone. Convert it to the home timezone before
+  assigning the `date` key. Preserve `source_start_time`, `source_end_time`,
+  `source_date`, `source_utc_offset`, `analysis_date`, `analysis_timezone`, and
+  `date_derivation`. Do not infer a travel-local timezone.
+- **Existing Hevy ids:** an update or explicit backfill retains the already
+  stored partition-key date, even when it differs from the new
+  `analysis_date`. This prevents a forward-only release from silently re-keying
+  history or creating a second row. Historical repair is a separate approved
+  migration.
+- **Strava:** `start_date_local` remains the source-local calendar authority;
+  its raw value is retained. If it is absent, an absolute `start_date` falls
+  back to the home timezone.
+- **HAE:** explicit source offsets are treated as event-local context. Legacy
+  date-only/naive values retain their validated source date without claiming a
+  timezone. Stored rows mark these paths as `source_offset` or
+  `source_date_fallback`; mixed-confidence aggregates retain both derivations
+  rather than a misleading offset. Raw sample timestamps remain in the
+  existing samples ledgers and sleep segments.
+- **Withings:** epoch timestamps are absolute instants and derive their date in
+  the home timezone; the source UTC instant and temporal metadata are retained.
+
+Never use `timestamp[:10]` to assign an analysis date. A date-only source value
+may be preserved through the explicit source-date fallback, but it is not proof
+of event-local timezone.
+
+### 2.11 Fresh `sam build` drifts untouched Coach dependencies
+
+`backend/functions/coach/requirements.txt` uses open lower bounds
+(`fastapi>=0.115`, `uvicorn[standard]>=0.30`). Verified 2026-08-08: the live
+Coach artifact contains FastAPI 0.140.1 / Uvicorn 0.51.0 / Starlette 1.3.1 /
+WebSockets 16.1.1, while a fresh build resolves 0.141.1 / 0.52.1 / 1.6.0 /
+17.0.1 even though `app.py`, `run.sh`, `requirements.txt`, and `__init__.py` are
+byte-for-byte unchanged.
+
+**A normal full-stack deploy can therefore propose an unrelated
+`CoachFunction` code update.** Always inspect the CloudFormation change set.
+For a narrowly scoped release, preserve the currently deployed Coach artifact
+or stop; dependency pinning/lockfiles require their own reviewed PR. Do not
+silently ship the newly resolved package set with an unrelated change.
+
 ---
 
 ## 3. Deploy
@@ -229,6 +276,7 @@ Every `source: hevy` date in `fitness-workouts` must have matching rows in `fitn
 | Strava per-km splits | ❌ **Dropped by decision.** HR *streams* are already fetched and converted to zone-minutes — splits add little. Don't rebuild this. |
 | `fitness-hae-2026` ingest key | ⚠️ Plaintext in Ingest Lambda env vars. Rotation to Secrets Manager is Mateo's call. |
 | HAE freshness watchdog | ⏸️ Proposed, not built. `compute_day` only fires on health writes, so a silent HAE stop goes undetected — this is how a 6-week May→June gap passed unnoticed. |
+| Historical temporal repair | ⏸️ Explicitly deferred. New writes use centralized temporal semantics, while pre-change Hevy rows retain their existing `date` keys. Do not re-key or recompute historical scores without a separately reviewed migration. |
 
 ---
 

@@ -89,6 +89,55 @@ def _patch_auth(handler):
     handler._verify_api_key = lambda _k: True
 
 
+def test_hae_date_coercion_uses_offset_and_preserves_naive_source_date():
+    handler, _table = _fresh_module()
+    assert handler._coerce_date("2026-07-02 00:30:00 -0700") == "2026-07-02"
+    assert handler._coerce_date("2026-07-02") == "2026-07-02"
+    assert handler._coerce_date("not-a-timestamp") is None
+
+
+def test_hae_rows_distinguish_offset_dates_from_source_date_fallbacks():
+    h, t = _fresh_module()
+    _patch_auth(h)
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "heart_rate_variability", "units": "ms", "data": [
+            {"qty": 46.3, "date": "2026-07-02 00:30:00 -0700"},
+        ]},
+        {"name": "step_count", "units": "count", "data": [
+            {"qty": 8500, "date": "2026-07-02"},
+        ]},
+    ]}}), None)
+
+    hrv = [i for i in t.items if i["metric_source"] == "hrv#hae"][-1]
+    steps = [i for i in t.items if i["metric_source"] == "steps#hae"][-1]
+
+    assert hrv["date_derivation"] == "source_offset"
+    assert hrv["source_utc_offset"] == "-07:00"
+    assert hrv["analysis_utc_offset"] == "-07:00"
+
+    assert steps["date_derivation"] == "source_date_fallback"
+    assert "source_utc_offset" not in steps
+    assert "analysis_utc_offset" not in steps
+    assert "analysis_timezone" not in steps
+
+
+def test_hae_mixed_timestamp_confidence_is_explicit_on_aggregate_row():
+    h, t = _fresh_module()
+    _patch_auth(h)
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "heart_rate_variability", "units": "ms", "data": [
+            {"qty": 46.3, "date": "2026-07-02 00:30:00 -0700"},
+            {"qty": 48.1, "date": "2026-07-02 03:00:00"},
+        ]},
+    ]}}), None)
+
+    hrv = [i for i in t.items if i["metric_source"] == "hrv#hae"][-1]
+    assert hrv["date_derivation"] == "mixed_source_derivations"
+    assert hrv["date_derivations"] == ["source_date_fallback", "source_offset"]
+    assert "source_utc_offset" not in hrv
+    assert "analysis_utc_offset" not in hrv
+
+
 # ─── HAE v2 nested shape ─────────────────────────────────────────────
 
 def test_hae_v2_nested_shape_hrv():

@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "shared"))
@@ -121,3 +122,37 @@ def test_withings_accepts_when_no_allowlist_configured(monkeypatch):
     resp = handler._handle_withings(event)
     assert resp["statusCode"] == 200
     assert called["n"] == 1
+
+
+def test_withings_absolute_timestamp_uses_home_analysis_date(monkeypatch):
+    handler = _fresh_handler(monkeypatch)
+    monkeypatch.setattr(handler, "_get_secret", lambda _n: {
+        "access_token": "tok",
+        "expires_at": int(time.time()) + 3600,
+    })
+    source_dt = datetime(2026, 7, 2, 0, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(handler, "_withings_getmeas", lambda *_a: {
+        "status": 0,
+        "body": {
+            "measuregrps": [{
+                "date": int(source_dt.timestamp()),
+                "measures": [{"type": 1, "value": 75, "unit": 0}],
+            }],
+        },
+    })
+    written = []
+    monkeypatch.setattr(handler, "put_item", lambda _table, item: written.append(item))
+
+    event = {
+        "body": "userid=anything&appli=1&startdate=1&enddate=2",
+        "isBase64Encoded": False,
+    }
+    response = handler._handle_withings(event)
+
+    assert response["statusCode"] == 200
+    assert len(written) == 1
+    assert written[0]["date"] == "2026-07-01"
+    assert written[0]["analysis_date"] == "2026-07-01"
+    assert written[0]["source_date"] == "2026-07-02"
+    assert written[0]["source_time"] == "2026-07-02T00:30:00+00:00"
+    assert written[0]["date_derivation"] == "home_timezone"

@@ -390,3 +390,8 @@ def test_strava_keeps_cardio_activity():
     assert t.items[0]["type"] == "Run"
     assert t.items[0]["source"] == "strava"
     assert t.items[0]["strain"] > 0
+    assert t.items[0]["date"] == "2026-06-30"
+    assert t.items[0]["analysis_date"] == "2026-06-30"
+    assert t.items[0]["source_date"] == "2026-06-30"
+    assert t.items[0]["source_start_time"] == "2026-06-30T07:00:00Z"
+    assert t.items[0]["date_derivation"] == "strava_start_date_local"

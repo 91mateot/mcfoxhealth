@@ -32,6 +32,25 @@ Browser / app  ──HTTP API /coach/* ───────▶ CoachFunction (B
 Shared business logic lives in `backend/shared/shared/` and is packaged as a
 Lambda layer (`SharedLayer`) imported by every function.
 
+## Temporal semantics
+
+Absolute timestamps are source truth; DynamoDB `date` fields are derived
+analysis context. `backend/shared/shared/timezone.py` centralizes parsing,
+source-date provenance, and calendar attribution. Aware timestamps use
+trustworthy source-local offsets when the ingestion contract supplies them;
+otherwise they are converted to the configured home timezone
+(`America/Los_Angeles`). Naive timestamps never acquire a fabricated timezone.
+
+For new Hevy ids, the workout and derived exercise rows use the Pacific
+analysis date because Hevy exposes absolute UTC instants without event-local
+timezone context. Rolled-up workout rows retain raw `start_time` / `end_time`
+and additive source/analysis metadata. Existing Hevy ids retain their stored
+partition-key date during updates/backfills; a differing `analysis_date` is
+recorded additively so this release does not re-key history. Strava continues
+to use `start_date_local`; HAE trusts explicit source offsets and preserves
+date-only/naive values through an explicit source-date fallback; Withings epoch
+values are converted from their absolute instant to the home timezone.
+
 ## Lift-learning engine (the core of the Hevy work)
 
 A complete set-level lift-tracking engine already existed and reads exclusively
@@ -135,7 +154,7 @@ preserves 3+ member groups without loss).
 | `workout_proposer.py` | Proposes next workout from history + program config. |
 | `scoring.py` | TRIMP / strain / HR-zone math + hot-swappable scoring weights. |
 | `sleep_quality.py` | Sleep-quality evaluation. |
-| `cost_service.py`, `db.py`, `timezone.py` | Cost tracking, DynamoDB helpers, local-time helpers. |
+| `cost_service.py`, `db.py`, `timezone.py` | Cost tracking, DynamoDB helpers, and centralized source-timestamp/analysis-date semantics. |
 
 ## Functions — `backend/functions/`
 
@@ -153,7 +172,7 @@ preserves 3+ member groups without loss).
 |---|---|---|
 | `fitness-health-metrics` | date (PK), metric_source (SK) | Per-metric daily values; source-suffixed (`#hae`, `#hevy`, …). |
 | `fitness-daily-scores` | date (PK) | Daily composite scores + weekly volume roll-ups (`week_<date>`). |
-| `fitness-workouts` | date (PK), strava_id (SK) | Rolled-up sessions (Strava cardio + Hevy strength, `hevy_<id>`). |
+| `fitness-workouts` | date (PK), strava_id (SK) | Rolled-up sessions (Strava cardio + Hevy strength, `hevy_<id>`). New Hevy rows add source timestamp/offset plus analysis-date provenance; legacy keys remain unchanged until a separate migration. |
 | `fitness-exercises` | canonical (PK), date (SK) | Per-exercise-per-day rows; the lift-learning engine's substrate. |
 | `fitness-user-config` | key (PK) | Config + caches (scoring weights, favorites, `hevy_exercise_templates`, `hevy_last_sync`). |
 | `fitness-nutrition` | date (PK), meal_id (SK) | Meals. |

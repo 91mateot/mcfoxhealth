@@ -278,6 +278,50 @@ def test_backfill_force_rewrites_even_fully_synced_workouts():
     assert len([i for i in exercises_table.items if i["canonical"] == "bench_press"]) == 1
 
 
+def test_backfill_preserves_legacy_utc_date_key_instead_of_rekeying_history():
+    """A pre-temporal-semantics Hevy row may live under its UTC date. A future
+    backfill can enrich that row, but must not create a second canonical-date
+    row or move the historical primary key as a side effect."""
+    h, tables = _fresh_module()
+    workouts_table = tables["WORKOUTS_TABLE"]
+    workout = {
+        "id": "legacy-evening",
+        "title": "Evening Lift",
+        # July 1 at 17:30 PDT, represented by Hevy as a July 2 UTC instant.
+        "start_time": "2026-07-02T00:30:00Z",
+        "end_time": "2026-07-02T01:30:00Z",
+        "exercises": [
+            {"title": "Bench", "sets": [{"weight_kg": 60, "reps": 10}]},
+        ],
+    }
+
+    legacy = h.workout_to_row(workout)
+    assert legacy["analysis_date"] == "2026-07-01"
+    legacy["date"] = "2026-07-02"  # old UTC-prefix partition key
+    for key in (
+        "analysis_date",
+        "analysis_timezone",
+        "date_derivation",
+        "source_date",
+        "source_utc_offset",
+        "source_start_time",
+        "source_end_time",
+    ):
+        legacy.pop(key, None)
+    workouts_table.put_item(Item=legacy)
+
+    _stub_offline(h, workouts=[workout])
+    response = h.lambda_handler({"action": "hevy_backfill"}, None)
+    body = json.loads(response["body"])
+
+    rows = [i for i in workouts_table.items if i["strava_id"] == "hevy_legacy-evening"]
+    assert len(rows) == 1
+    assert rows[0]["date"] == "2026-07-02"
+    assert rows[0]["analysis_date"] == "2026-07-01"
+    assert rows[0]["legacy_date_preserved"] is True
+    assert body["dates"] == ["2026-07-02"]
+
+
 def test_backfill_default_page_span_covers_full_history():
     """The backfill default max_pages (20) × pageSize (10) covers >= 200
     workouts — enough for Mateo's full history — without an event override."""
