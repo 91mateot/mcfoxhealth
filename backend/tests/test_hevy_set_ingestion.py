@@ -341,14 +341,18 @@ def test_fetch_workout_events_classifies_updates_and_deletes():
     ]}
     http = _fake_http([(events_body, 200)])
     result = hc.fetch_workout_events("k", since="2026-06-01T00:00:00Z", http_get=http)
-    assert [w["id"] for w in result["updated"]] == ["w1", "w3"]
-    assert result["deleted"] == ["w2"]
+    assert result.complete is True
+    assert [w["id"] for w in result.updated] == ["w1", "w3"]
+    assert result.deleted == ["w2"]
 
 
-def test_fetch_workout_events_degrades_on_error():
+def test_fetch_workout_events_reports_error_as_incomplete():
     http = _fake_http([(None, 503)])
     result = hc.fetch_workout_events("k", since="2026-06-01T00:00:00Z", http_get=http)
-    assert result == {"updated": [], "deleted": []}
+    assert result.updated == []
+    assert result.deleted == []
+    assert result.complete is False
+    assert result.status == "vendor_error"
 
 
 # ── Body-measurement unit conversion ────────────────────────────────

@@ -167,6 +167,32 @@ For a narrowly scoped release, preserve the currently deployed Coach artifact
 or stop; dependency pinning/lockfiles require their own reviewed PR. Do not
 silently ship the newly resolved package set with an unrelated change.
 
+### 2.12 Hevy watermark means a completed check, not the latest write time
+
+Hevy paginated reads carry explicit completeness metadata. HTTP errors,
+timeouts, malformed pages, and `max_pages` truncation are failed Lambda
+invocations; they must never be interpreted as a successful empty poll or
+advance `hevy_last_sync`.
+
+The handler captures `sync_started_at` before the first vendor request and
+stores that pre-fetch boundary only after workout events, writes, deletions,
+derived recomputation, and body-measurement ingestion complete. Incremental
+polls query from `hevy_last_sync - 48 hours`. This bounded replay covers events
+near the boundary; Hevy-id-keyed workout/exercise overwrites and repeated
+deletion events are idempotent.
+
+If a later workout in a multi-workout poll hits an unsafe legacy-date lookup,
+the handler stops additional workout writes, recomputes PR/e1RM, weekly volume,
+and daily scores for earlier writes, leaves the watermark unchanged, then
+raises so the scheduled invocation is observably failed.
+
+Deletion caveat: the events feed is the authoritative deletion path, and its
+48-hour replay makes ordinary retries safe. A full `/workouts` backfill cannot
+necessarily reconstruct a deletion after Hevy has removed the vendor record.
+Do not reset or discard the event watermark as a deletion-reconciliation
+strategy; broader historical reconciliation requires a separately reviewed
+change.
+
 ---
 
 ## 3. Deploy

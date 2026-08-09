@@ -9,6 +9,8 @@ and graceful degradation on API errors.
 import os
 import sys
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "shared"))
 
@@ -140,8 +142,9 @@ def test_fetch_single_page():
     rows = hevy_client.fetch_recent_workouts(
         "key", page_size=10, http_get=_fake_http([(body, 200)])
     )
-    assert len(rows) == 2
-    assert {r["hevy_id"] for r in rows} == {"a", "b"}
+    assert rows.complete is True
+    assert len(rows.items) == 2
+    assert {r["hevy_id"] for r in rows.items} == {"a", "b"}
 
 
 def test_fetch_stops_on_page_count():
@@ -151,7 +154,8 @@ def test_fetch_stops_on_page_count():
     rows = hevy_client.fetch_recent_workouts("key", page_size=10, max_pages=5, http_get=http)
     # Should fetch exactly 2 pages then stop (page >= page_count).
     assert http.calls["n"] == 2
-    assert len(rows) == 11
+    assert rows.complete is True
+    assert len(rows.items) == 11
 
 
 def test_fetch_stops_on_short_page():
@@ -160,23 +164,28 @@ def test_fetch_stops_on_short_page():
     http = _fake_http([(body, 200)])
     rows = hevy_client.fetch_recent_workouts("key", page_size=10, max_pages=5, http_get=http)
     assert http.calls["n"] == 1
-    assert len(rows) == 1
+    assert rows.complete is True
+    assert len(rows.items) == 1
 
 
-def test_fetch_degrades_on_api_error():
-    # Non-200 → log-and-stop, return whatever we had (nothing here).
+def test_fetch_reports_first_page_api_error_as_incomplete():
     http = _fake_http([(None, 401)])
     rows = hevy_client.fetch_recent_workouts("key", http_get=http)
-    assert rows == []
+    assert rows.items == []
+    assert rows.complete is False
+    assert rows.status == "http_error"
+    assert rows.pages_read == 0
 
 
-def test_fetch_degrades_on_server_error_mid_pagination():
+def test_fetch_reports_server_error_mid_pagination_with_partial_items():
     p1 = ({"page": 1, "page_count": 3, "workouts": [_workout("a")] * 10}, 200)
     p2 = (None, 500)
     http = _fake_http([p1, p2])
     rows = hevy_client.fetch_recent_workouts("key", page_size=10, max_pages=5, http_get=http)
-    # Keeps page 1's rows, stops when page 2 fails.
-    assert len(rows) == 10
+    assert len(rows.items) == 10
+    assert rows.complete is False
+    assert rows.status == "vendor_error"
+    assert rows.pages_read == 1
     assert http.calls["n"] == 2
 
 
@@ -185,4 +194,51 @@ def test_fetch_respects_max_pages():
     http = _fake_http([(full, 200)] * 10)
     rows = hevy_client.fetch_recent_workouts("key", page_size=10, max_pages=2, http_get=http)
     assert http.calls["n"] == 2
-    assert len(rows) == 20
+    assert len(rows.items) == 20
+    assert rows.complete is False
+    assert rows.truncated is True
+    assert rows.status == "truncated"
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_status"),
+    [
+        ((None, 429), "rate_limited"),
+        ((None, 503), "vendor_error"),
+        (({"page": 1, "page_count": 1}, 200), "malformed"),
+        (({"page": 1, "page_count": "bad", "workouts": []}, 200), "malformed"),
+        (("not-an-object", 200), "malformed"),
+    ],
+)
+def test_fetch_failure_kinds_never_look_complete(response, expected_status):
+    result = hevy_client.fetch_recent_workouts_full(
+        "key", http_get=_fake_http([response])
+    )
+    assert result.items == []
+    assert result.complete is False
+    assert result.status == expected_status
+
+
+def test_fetch_timeout_is_explicitly_incomplete():
+    def _timeout(_url, _api_key):
+        raise TimeoutError("simulated timeout")
+
+    result = hevy_client.fetch_recent_workouts_full("key", http_get=_timeout)
+    assert result.items == []
+    assert result.complete is False
+    assert result.status == "timeout"
+    assert result.pages_read == 0
+
+
+def test_legitimate_empty_page_is_complete_empty():
+    result = hevy_client.fetch_recent_workouts_full(
+        "key",
+        http_get=_fake_http([
+            ({"page": 1, "page_count": 1, "workouts": []}, 200),
+        ]),
+    )
+    assert result.items == []
+    assert result.complete is True
+    assert result.truncated is False
+    assert result.status == "empty"
+    assert result.pages_read == 1

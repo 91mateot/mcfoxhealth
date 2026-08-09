@@ -15,7 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import boto3
 
@@ -56,6 +56,8 @@ COMPUTE_FN = os.environ.get("COMPUTE_FUNCTION_NAME", "")
 # double-ingesting a session that's already logged in Hevy (de-dupe guard —
 # Hevy preferred for strength, Strava for cardio).
 STRAVA_STRENGTH_TYPES = {"weighttraining", "workout", "crossfit"}
+
+HEVY_REPLAY_OVERLAP_HOURS = 48
 
 WITHINGS_TOKEN_URL = "https://wbsapi.withings.net/v2/oauth2"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
@@ -1398,9 +1400,9 @@ def _handle_hevy_sync(event):
     ``#hevy`` source suffix, routed through the same merge/ordering-guard
     helpers the HAE path uses (never a bare put_item overwrite).
 
-    Failure modes are all soft — a missing key or a Hevy outage logs a clear
-    message and returns 200 so the daily cron never crashes and Strava/Compute
-    keep working.
+    Missing credentials remain a configuration skip. Once a vendor read starts,
+    incomplete fetches and apply failures raise so EventBridge/Lambda telemetry
+    records a failed check rather than a success-looking empty poll.
     """
     secret = _get_secret("hevy-api-key")
     api_key = (secret or {}).get("api_key") or (secret or {}).get("key") or ""
@@ -1411,6 +1413,11 @@ def _handle_hevy_sync(event):
             "with an {\"api_key\": \"...\"} value to enable gym/lifting ingest."
         )
         return _resp(200, {"status": "skipped", "reason": "hevy-api-key secret missing"})
+
+    # This is the safe upper boundary for the current poll. It must be captured
+    # before any vendor retrieval (including template refresh), then persisted
+    # only after the whole sync completes.
+    sync_started_at = _now_iso()
 
     # Backfill mode: an explicit {"action": "hevy_backfill"} invoke, or a normal
     # poll carrying force_full / reset_watermark. It IGNORES the watermark and
@@ -1447,27 +1454,48 @@ def _handle_hevy_sync(event):
     updated_workouts: list = []
     deleted_ids: list = []
     mode = "incremental"
+    replay_since = None
+    fetch_status = "unknown"
+    fetch_pages_read = 0
     try:
         if backfill:
             mode = "backfill"
-            updated_workouts = fetch_recent_workouts_full(
+            fetch_result = fetch_recent_workouts_full(
                 api_key, page_size=page_size, max_pages=max_pages
             )
+            updated_workouts = fetch_result.items
         elif last_sync:
-            ev = fetch_workout_events(api_key, since=last_sync)
-            updated_workouts = ev.get("updated", [])
-            deleted_ids = ev.get("deleted", [])
+            replay_since = _hevy_replay_since(last_sync)
+            ev = fetch_workout_events(
+                api_key,
+                since=replay_since,
+                page_size=page_size,
+                max_pages=int(event.get("max_pages", 20) or 20),
+            )
+            fetch_result = ev
+            updated_workouts = ev.updated
+            deleted_ids = ev.deleted
         else:
             mode = "cold_start"
-            updated_workouts = fetch_recent_workouts_full(
+            fetch_result = fetch_recent_workouts_full(
                 api_key, page_size=page_size, max_pages=max_pages
             )
+            updated_workouts = fetch_result.items
     except ValueError as e:
-        logger.warning("hevy sync aborted: %s", e)
-        return _resp(200, {"status": "skipped", "reason": str(e)})
-    except Exception:  # noqa: BLE001 — never let a poll failure crash the cron
+        logger.error("hevy sync configuration/boundary error: %s", e)
+        raise HevySyncError("hevy sync configuration is invalid") from e
+    except Exception as exc:  # noqa: BLE001 — surface an observable invocation failure
         logger.exception("hevy sync failed unexpectedly")
-        return _resp(200, {"status": "error", "reason": "hevy fetch failed"})
+        raise HevySyncError("hevy workout fetch failed") from exc
+
+    fetch_status = fetch_result.status
+    fetch_pages_read = fetch_result.pages_read
+    if not fetch_result.complete:
+        logger.error(
+            "hevy %s fetch incomplete: status=%s pages_read=%s truncated=%s",
+            mode, fetch_result.status, fetch_result.pages_read, fetch_result.truncated,
+        )
+        raise HevySyncError(f"hevy workout fetch incomplete: {fetch_result.status}")
 
     workouts_table = get_table("WORKOUTS_TABLE")
     exercises_table = get_table("EXERCISES_TABLE")
@@ -1477,6 +1505,7 @@ def _handle_hevy_sync(event):
     backfilled = 0
     affected_dates = set()
     affected_canonicals = set()
+    sync_failure = None
 
     # 3) Apply updates: rolled-up row + per-exercise rows.
     #
@@ -1502,11 +1531,8 @@ def _handle_hevy_sync(event):
                 "hevy sync stopped: legacy identity lookup failed for %s",
                 workout.get("id"),
             )
-            return _resp(200, {
-                "status": "error",
-                "reason": "hevy legacy lookup failed",
-                "retryable": True,
-            })
+            sync_failure = HevySyncError("hevy legacy lookup failed")
+            break
         if outcome is None:
             continue
         if outcome["workout_written"]:
@@ -1520,23 +1546,28 @@ def _handle_hevy_sync(event):
 
     # 4) Apply deletions: a workout removed in Hevy must leave McFox too.
     deleted = 0
-    for hevy_id in deleted_ids:
-        removed_dates = _delete_hevy_workout(workouts_table, exercises_table, hevy_id)
-        if removed_dates:
-            deleted += 1
-            affected_dates.update(removed_dates)
+    if sync_failure is None:
+        for hevy_id in deleted_ids:
+            try:
+                removed_dates = _delete_hevy_workout(
+                    workouts_table, exercises_table, hevy_id
+                )
+            except HevyDeleteError:
+                logger.exception("hevy sync stopped: deletion apply failed for %s", hevy_id)
+                sync_failure = HevySyncError("hevy deletion apply failed")
+                break
+            if removed_dates:
+                deleted += 1
+                affected_dates.update(removed_dates)
 
     # 5) Recompute PR flags + e1RM for touched canonicals and refresh the
     #    weekly volume roll-up, exactly as workout_service.annotate_workout does.
-    if affected_canonicals:
-        try:
-            recompute_prs_for_canonicals(sorted(affected_canonicals))
-        except Exception:
-            logger.exception("hevy PR recompute failed for %s", sorted(affected_canonicals))
-        try:
-            recompute_weekly_volume()
-        except Exception:
-            logger.exception("hevy weekly volume recompute failed")
+    _finalize_hevy_recomputations(affected_canonicals, affected_dates)
+
+    # A failure discovered after earlier writes remains a failed invocation,
+    # but only after those safe writes receive their required derived updates.
+    if sync_failure is not None:
+        raise sync_failure
 
     # 6) Body measurements → health-metrics via the merge/ordering-guard path.
     #    Distinguish "Mateo has genuinely never logged a body measurement" from
@@ -1544,18 +1575,23 @@ def _handle_hevy_sync(event):
     #    ambiguous (that ambiguity is exactly what hid the pageSize>10 → HTTP 400
     #    bug behind an innocent-looking zero on the first live runs).
     measurements = _ingest_hevy_body_measurements(api_key)
+    if not measurements["complete"]:
+        logger.error(
+            "hevy body-measurement sync incomplete: status=%s",
+            measurements["status"],
+        )
+        raise HevySyncError(
+            f"hevy body-measurement sync incomplete: {measurements['status']}"
+        )
 
-    # 7) Recompute daily scores for every date we touched.
-    for d in sorted(affected_dates):
-        _trigger_compute(d)
-
-    # 8) Advance the watermark so the next poll goes incremental. Use "now"
-    #    rather than a workout timestamp so nothing between polls is missed.
+    # 8) Advance only to the boundary captured before vendor retrieval. The
+    #    next incremental poll subtracts the replay overlap from this value.
     put_item(config_table, {
         "key": LAST_SYNC_KEY,
-        "last_sync": _now_iso(),
+        "last_sync": sync_started_at,
         "mode": mode,
         "updated_at": _now_iso(),
+        "replay_overlap_hours": HEVY_REPLAY_OVERLAP_HOURS,
     })
 
     logger.info(
@@ -1576,9 +1612,39 @@ def _handle_hevy_sync(event):
         "measurements_written": measurements["written"],
         "measurements_available": measurements["available"],
         "measurements_status": measurements["status"],
+        "fetch_status": fetch_status,
+        "fetch_pages_read": fetch_pages_read,
+        "sync_started_at": sync_started_at,
+        "watermark": sync_started_at,
+        "replay_since": replay_since,
         "canonicals_touched": sorted(affected_canonicals),
         "dates": sorted(affected_dates),
     })
+
+
+def _hevy_replay_since(last_sync):
+    """Return the bounded replay start for a stored absolute watermark."""
+    parsed = parse_timestamp(last_sync)
+    if parsed is None or parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("hevy_last_sync must be an absolute timestamp")
+    return (parsed.astimezone(timezone.utc) - timedelta(
+        hours=HEVY_REPLAY_OVERLAP_HOURS
+    )).isoformat()
+
+
+def _finalize_hevy_recomputations(affected_canonicals, affected_dates):
+    """Finish derived state for writes already completed in this invocation."""
+    if affected_canonicals:
+        try:
+            recompute_prs_for_canonicals(sorted(affected_canonicals))
+        except Exception:
+            logger.exception("hevy PR recompute failed for %s", sorted(affected_canonicals))
+        try:
+            recompute_weekly_volume()
+        except Exception:
+            logger.exception("hevy weekly volume recompute failed")
+    for date in sorted(affected_dates):
+        _trigger_compute(date)
 
 
 def _hevy_exercise_rows_exist(exercises_table, date, canonicals):
@@ -1601,8 +1667,16 @@ def _hevy_exercise_rows_exist(exercises_table, date, canonicals):
     return True
 
 
+class HevySyncError(RuntimeError):
+    """Raised so a scheduled Hevy invocation is observably unsuccessful."""
+
+
 class HevyLegacyLookupError(RuntimeError):
     """Raised when legacy Hevy identity cannot be determined safely."""
+
+
+class HevyDeleteError(RuntimeError):
+    """Raised when a deletion cannot be applied safely and should replay."""
 
 
 def _find_existing_hevy_row(table, row):
@@ -1819,22 +1893,24 @@ def _delete_hevy_workout(workouts_table, exercises_table, hevy_id):
         matches = resp.get("Items", [])
     except Exception:
         logger.exception("hevy delete scan failed for %s", strava_id)
-        return touched
+        raise HevyDeleteError(strava_id)
 
     for item in matches:
         date = item.get("date")
         if not date:
             continue
-        try:
-            workouts_table.delete_item(Key={"date": date, "strava_id": strava_id})
-        except Exception:
-            logger.exception("failed to delete workout row %s/%s", date, strava_id)
-            continue
-        touched.add(date)
         # Remove mirrored exercise rows for this session's date that came from
         # Hevy. Exercise rows are keyed (canonical, date); only delete rows we
         # sourced from Hevy so a same-day manual annotation isn't clobbered.
+        # Delete these first: if this step fails, retaining the workout row
+        # preserves the date needed for a safe event replay.
         _delete_hevy_exercise_rows_for_date(exercises_table, date)
+        try:
+            workouts_table.delete_item(Key={"date": date, "strava_id": strava_id})
+        except Exception as exc:
+            logger.exception("failed to delete workout row %s/%s", date, strava_id)
+            raise HevyDeleteError(strava_id) from exc
+        touched.add(date)
     return touched
 
 
@@ -1851,7 +1927,7 @@ def _delete_hevy_exercise_rows_for_date(exercises_table, date):
         rows = resp.get("Items", [])
     except Exception:
         logger.exception("hevy exercise-row delete scan failed for %s", date)
-        return
+        raise HevyDeleteError(date)
     for r in rows:
         canonical = r.get("canonical")
         if not canonical:
@@ -1860,6 +1936,7 @@ def _delete_hevy_exercise_rows_for_date(exercises_table, date):
             exercises_table.delete_item(Key={"canonical": canonical, "date": date})
         except Exception:
             logger.exception("failed to delete exercise row %s/%s", canonical, date)
+            raise HevyDeleteError(date)
 
 
 def _ingest_hevy_body_measurements(api_key):
@@ -1870,23 +1947,33 @@ def _ingest_hevy_body_measurements(api_key):
 
     Returns a summary dict so ``measurements_written: 0`` is never silently
     ambiguous:
-      {"written": int, "available": int, "status": str}
+      {"written": int, "available": int, "status": str, "complete": bool}
     where ``status`` is one of:
       • "ok"    — measurements were fetched and written
       • "empty" — the fetch succeeded but Mateo has genuinely logged none
-      • "error" — the fetch/parse raised (a real failure, not empty data)
+      • other failure status — incomplete fetch/write (never an empty success)
     ``available`` is the count of raw measurement records Hevy returned.
     """
     try:
-        measurements = fetch_body_measurements(api_key)
+        result = fetch_body_measurements(api_key)
     except Exception:
         logger.exception("hevy body-measurement fetch failed")
-        return {"written": 0, "available": 0, "status": "error"}
+        return {"written": 0, "available": 0, "status": "error", "complete": False}
+
+    if not result.complete:
+        return {
+            "written": 0,
+            "available": len(result.items),
+            "status": result.status,
+            "complete": False,
+        }
+
+    measurements = result.items
 
     if not measurements:
         # A valid, empty result. With the pageSize clamp in place this now
         # genuinely means "no measurements logged" rather than a masked 400.
-        return {"written": 0, "available": 0, "status": "empty"}
+        return {"written": 0, "available": 0, "status": "empty", "complete": True}
 
     table = get_table("HEALTH_METRICS_TABLE")
     written = 0
@@ -1906,9 +1993,19 @@ def _ingest_hevy_body_measurements(api_key):
                 written += 1
     except Exception:
         logger.exception("hevy body-measurement write failed")
-        return {"written": written, "available": len(measurements), "status": "error"}
+        return {
+            "written": written,
+            "available": len(measurements),
+            "status": "write_error",
+            "complete": False,
+        }
 
-    return {"written": written, "available": len(measurements), "status": "ok"}
+    return {
+        "written": written,
+        "available": len(measurements),
+        "status": "ok",
+        "complete": True,
+    }
 
 
 def _hevy_row_is_duplicate(row, existing=None):
