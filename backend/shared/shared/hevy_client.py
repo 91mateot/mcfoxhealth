@@ -102,7 +102,7 @@ LAST_SYNC_KEY = "hevy_last_sync"
 
 @dataclass(frozen=True)
 class HevyFetchResult:
-    """Completeness-aware result for a paginated Hevy collection fetch."""
+    """Transport completeness plus any isolated record-level issues."""
 
     items: list
     complete: bool
@@ -110,6 +110,7 @@ class HevyFetchResult:
     pages_read: int
     status: str
     error: Optional[str] = None
+    record_issues: tuple = ()
 
     @classmethod
     def success(cls, items, pages_read=1):
@@ -125,7 +126,7 @@ class HevyFetchResult:
 
 @dataclass(frozen=True)
 class HevyWorkoutEventsResult:
-    """Completeness-aware, classified workout-events response."""
+    """Transport completeness plus classified event/record diagnostics."""
 
     updated: list
     deleted: list
@@ -134,6 +135,8 @@ class HevyWorkoutEventsResult:
     pages_read: int
     status: str
     error: Optional[str] = None
+    record_issues: tuple = ()
+    ignored_events: tuple = ()
 
     @classmethod
     def success(cls, updated=None, deleted=None, pages_read=1):
@@ -687,6 +690,11 @@ def _fetch_paginated(
                 f"response contained invalid {collection_key} item",
             )
         page_count = body.get("page_count")
+        # Hevy may represent a legitimately empty collection as page 1 of zero
+        # pages. Accept only the empty first-page envelope; page_count=0 with
+        # records (or on a later page) remains malformed.
+        if not chunk and page == 1 and page_count == 0:
+            return HevyFetchResult.success(items, pages_read=pages_read)
         if page_count is not None and (
             not isinstance(page_count, int) or page_count < 1 or page > page_count
         ):
@@ -801,7 +809,8 @@ def fetch_workout_events(
     )
     updated = []
     deleted = []
-    malformed = False
+    record_issues = []
+    ignored_events = []
     for ev in result.items:
         etype = str(ev.get("type") or "").strip().lower()
         if etype == "deleted":
@@ -809,24 +818,65 @@ def fetch_workout_events(
             if eid:
                 deleted.append(str(eid))
             else:
-                malformed = True
+                record_issues.append({
+                    "record_id": "<missing-id>",
+                    "event_type": "deleted",
+                    "reason": "deleted event missing workout id",
+                })
         elif etype == "updated":
             w = ev.get("workout")
-            if isinstance(w, dict) and workout_to_row(w) is not None:
+            issue = _workout_mapping_issue(w)
+            if issue is None:
                 updated.append(w)
             else:
-                malformed = True
+                record_issues.append({
+                    "record_id": _workout_record_id(w, ev),
+                    "event_type": "updated",
+                    "reason": issue,
+                })
         else:
-            malformed = True
-    if malformed:
-        return HevyWorkoutEventsResult(
-            updated, deleted, False, result.truncated, result.pages_read,
-            "malformed", "response contained invalid workout event",
-        )
+            diagnostic = {
+                "record_id": _workout_record_id(ev.get("workout"), ev),
+                "event_type": etype or "<missing-type>",
+                "reason": "unsupported event type",
+            }
+            ignored_events.append(diagnostic)
+            logger.warning(
+                "hevy event ignored: id=%s type=%s reason=%s",
+                diagnostic["record_id"], diagnostic["event_type"],
+                diagnostic["reason"],
+            )
+    status = result.status
+    if result.complete and record_issues:
+        status = "records_degraded"
+    elif result.complete and ignored_events:
+        status = "ok_with_ignored_events"
     return HevyWorkoutEventsResult(
         updated, deleted, result.complete, result.truncated, result.pages_read,
-        result.status, result.error,
+        status, result.error, tuple(record_issues), tuple(ignored_events),
     )
+
+
+def _workout_record_id(workout, envelope=None):
+    """Return a sanitized vendor identity suitable for diagnostics/override."""
+    if isinstance(workout, dict) and workout.get("id") is not None:
+        return str(workout["id"])
+    if isinstance(envelope, dict) and envelope.get("id") is not None:
+        return str(envelope["id"])
+    return "<missing-id>"
+
+
+def _workout_mapping_issue(workout):
+    """Explain why a single workout cannot be mapped, without raw payloads."""
+    if not isinstance(workout, dict):
+        return "workout payload is not an object"
+    if not workout.get("id"):
+        return "workout id is missing"
+    if not workout.get("start_time"):
+        return "start_time is missing"
+    if workout_to_row(workout) is None:
+        return "start_time cannot derive an analysis date"
+    return None
 
 
 # ── Recent-workout page walk (cold-start fallback) ──────────────────────────
@@ -857,20 +907,13 @@ def fetch_recent_workouts(
         api_key, page_size=page_size, max_pages=max_pages, http_get=http_get,
     )
     rows = []
-    malformed = False
     for workout in raw.items:
         row = workout_to_row(workout)
-        if row is None:
-            malformed = True
-        else:
+        if row is not None:
             rows.append(row)
-    if malformed:
-        return HevyFetchResult(
-            rows, False, raw.truncated, raw.pages_read, "malformed",
-            "workout could not be mapped safely",
-        )
     return HevyFetchResult(
         rows, raw.complete, raw.truncated, raw.pages_read, raw.status, raw.error,
+        raw.record_issues,
     )
 
 
@@ -891,16 +934,30 @@ def fetch_recent_workouts_full(
         "workouts", api_key, "workouts", http_get,
         page_size=page_size, max_pages=max_pages,
     )
-    if any(workout_to_row(workout) is None for workout in result.items):
-        return HevyFetchResult(
-            result.items,
-            False,
-            result.truncated,
-            result.pages_read,
-            "malformed",
-            "response contained unusable workout",
-        )
-    return result
+    valid_workouts = []
+    record_issues = []
+    for workout in result.items:
+        issue = _workout_mapping_issue(workout)
+        if issue is None:
+            valid_workouts.append(workout)
+        else:
+            record_issues.append({
+                "record_id": _workout_record_id(workout),
+                "event_type": "workout",
+                "reason": issue,
+            })
+    status = result.status
+    if result.complete and record_issues:
+        status = "records_degraded"
+    return HevyFetchResult(
+        valid_workouts,
+        result.complete,
+        result.truncated,
+        result.pages_read,
+        status,
+        result.error,
+        tuple(record_issues),
+    )
 
 
 def fetch_body_measurements(

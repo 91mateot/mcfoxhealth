@@ -174,6 +174,10 @@ timeouts, malformed pages, and `max_pages` truncation are failed Lambda
 invocations; they must never be interpreted as a successful empty poll or
 advance `hevy_last_sync`.
 
+An empty first page is complete when Hevy reports either `page_count: 0` or
+`page_count: 1`. The zero-page envelope is valid only for an empty page;
+non-empty records with invalid page metadata still fail closed.
+
 The handler captures `sync_started_at` before the first vendor request and
 stores that pre-fetch boundary only after workout events, writes, deletions,
 derived recomputation, and body-measurement ingestion complete. Incremental
@@ -185,6 +189,23 @@ If a later workout in a multi-workout poll hits an unsafe legacy-date lookup,
 the handler stops additional workout writes, recomputes PR/e1RM, weekly volume,
 and daily scores for earlier writes, leaves the watermark unchanged, then
 raises so the scheduled invocation is observably failed.
+
+A completely retrieved response can also contain one unusable workout. Valid
+workouts are applied and recomputed, but the invocation raises with the bad
+Hevy id/type/reason and leaves the watermark unchanged. After inspecting that
+specific vendor record, an operator can acknowledge only the currently
+reported bad id:
+
+```python
+{"action":"hevy_poll", "skip_invalid_workout_ids":["<reviewed-hevy-id>"]}
+{"action":"hevy_backfill", "skip_invalid_workout_ids":["<reviewed-hevy-id>"]}
+```
+
+The override fails closed if an id is not present in that invocation's
+record-issue list, so it cannot skip an arbitrary healthy workout. Acknowledged
+ids and reasons are logged and returned as `reviewed_skips`. Unknown future
+event types are logged/returned as `ignored_events`; they are not guessed to be
+updates or deletions and do not block known events.
 
 Deletion caveat: the events feed is the authoritative deletion path, and its
 48-hour replay makes ordinary retries safe. A full `/workouts` backfill cannot

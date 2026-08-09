@@ -242,3 +242,28 @@ def test_legitimate_empty_page_is_complete_empty():
     assert result.truncated is False
     assert result.status == "empty"
     assert result.pages_read == 1
+
+
+@pytest.mark.parametrize("page_count", [0, 1])
+def test_empty_first_page_page_count_zero_or_one_is_complete(page_count):
+    result = hevy_client.fetch_recent_workouts_full(
+        "key",
+        http_get=_fake_http([
+            ({"page": 1, "page_count": page_count, "workouts": []}, 200),
+        ]),
+    )
+    assert result.complete is True
+    assert result.status == "empty"
+    assert result.items == []
+
+
+def test_nonempty_page_count_zero_remains_malformed():
+    result = hevy_client.fetch_recent_workouts_full(
+        "key",
+        http_get=_fake_http([
+            ({"page": 1, "page_count": 0, "workouts": [_workout("a")]}, 200),
+        ]),
+    )
+    assert result.complete is False
+    assert result.status == "malformed"
+    assert result.items == []

@@ -1457,6 +1457,8 @@ def _handle_hevy_sync(event):
     replay_since = None
     fetch_status = "unknown"
     fetch_pages_read = 0
+    record_issues = []
+    ignored_events = []
     try:
         if backfill:
             mode = "backfill"
@@ -1496,6 +1498,17 @@ def _handle_hevy_sync(event):
             mode, fetch_result.status, fetch_result.pages_read, fetch_result.truncated,
         )
         raise HevySyncError(f"hevy workout fetch incomplete: {fetch_result.status}")
+
+    record_issues = list(fetch_result.record_issues)
+    ignored_events = list(getattr(fetch_result, "ignored_events", ()))
+    pending_record_issues, reviewed_skips = _reviewed_hevy_record_overrides(
+        event, record_issues
+    )
+    for issue in record_issues:
+        logger.error(
+            "hevy record unusable: id=%s type=%s reason=%s",
+            issue["record_id"], issue["event_type"], issue["reason"],
+        )
 
     workouts_table = get_table("WORKOUTS_TABLE")
     exercises_table = get_table("EXERCISES_TABLE")
@@ -1569,6 +1582,13 @@ def _handle_hevy_sync(event):
     if sync_failure is not None:
         raise sync_failure
 
+    # Transport was complete, so valid records were safe to apply. A bad
+    # individual record still requires explicit operator review before the
+    # watermark can advance; this keeps it visible without stranding valid
+    # records. The exception carries sanitized record diagnostics.
+    if pending_record_issues:
+        raise HevyRecordIssueError(pending_record_issues)
+
     # 6) Body measurements → health-metrics via the merge/ordering-guard path.
     #    Distinguish "Mateo has genuinely never logged a body measurement" from
     #    "the fetch/parse failed" so measurements_written: 0 is never silently
@@ -1600,8 +1620,13 @@ def _handle_hevy_sync(event):
         mode, written, backfilled, ex_rows_written, deleted,
         len(affected_dates), measurements["written"], measurements["status"],
     )
+    response_status = "ok"
+    if reviewed_skips:
+        response_status = "ok_with_reviewed_skips"
+    elif ignored_events:
+        response_status = "ok_with_ignored_events"
     return _resp(200, {
-        "status": "ok",
+        "status": response_status,
         "mode": mode,
         "fetched": len(updated_workouts),
         "written": written,
@@ -1614,12 +1639,52 @@ def _handle_hevy_sync(event):
         "measurements_status": measurements["status"],
         "fetch_status": fetch_status,
         "fetch_pages_read": fetch_pages_read,
+        "record_issues": record_issues,
+        "reviewed_skips": reviewed_skips,
+        "ignored_events": ignored_events,
         "sync_started_at": sync_started_at,
         "watermark": sync_started_at,
         "replay_since": replay_since,
         "canonicals_touched": sorted(affected_canonicals),
         "dates": sorted(affected_dates),
     })
+
+
+def _reviewed_hevy_record_overrides(event, record_issues):
+    """Validate an intentional operator acknowledgment of known bad IDs.
+
+    Only IDs present in this completely retrieved response may be acknowledged;
+    a typo or healthy ID fails closed and cannot cause a record to be skipped.
+    """
+    requested = event.get("skip_invalid_workout_ids", [])
+    if requested is None:
+        requested = []
+    if not isinstance(requested, list) or any(
+        not isinstance(value, str) or not value.strip() for value in requested
+    ):
+        raise ValueError("skip_invalid_workout_ids must be a list of non-empty strings")
+    requested_ids = {value.strip() for value in requested}
+    issue_ids = {issue["record_id"] for issue in record_issues}
+    unknown_ids = sorted(requested_ids - issue_ids)
+    if unknown_ids:
+        raise ValueError(
+            "skip_invalid_workout_ids contains IDs not present in record issues: "
+            + ",".join(unknown_ids)
+        )
+
+    pending = []
+    reviewed = []
+    for issue in record_issues:
+        if issue["record_id"] in requested_ids:
+            reviewed.append(issue)
+            logger.warning(
+                "hevy unusable record intentionally skipped after review: "
+                "id=%s type=%s reason=%s",
+                issue["record_id"], issue["event_type"], issue["reason"],
+            )
+        else:
+            pending.append(issue)
+    return pending, reviewed
 
 
 def _hevy_replay_since(last_sync):
@@ -1669,6 +1734,19 @@ def _hevy_exercise_rows_exist(exercises_table, date, canonicals):
 
 class HevySyncError(RuntimeError):
     """Raised so a scheduled Hevy invocation is observably unsuccessful."""
+
+
+class HevyRecordIssueError(HevySyncError):
+    """A complete vendor response contained records requiring review."""
+
+    def __init__(self, record_issues):
+        self.record_issues = tuple(record_issues)
+        summary = "; ".join(
+            f"id={issue['record_id']} type={issue['event_type']} "
+            f"reason={issue['reason']}"
+            for issue in self.record_issues
+        )
+        super().__init__(f"hevy records require operator review: {summary}")
 
 
 class HevyLegacyLookupError(RuntimeError):
