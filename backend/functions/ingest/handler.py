@@ -38,7 +38,13 @@ from shared.hevy_client import (
 from shared.lift_compute import recompute_prs_for_canonicals, recompute_weekly_volume
 from shared.scoring import compute_trimp, compute_strain, classify_hr_zone, estimate_strain_simple, HR_ZONES, MAX_HR
 from shared.sleep_quality import evaluate_quality as _eval_sleep_quality
-from shared.timezone import local_today_str
+from shared.timezone import (
+    HOME_TIMEZONE,
+    local_today_str,
+    parse_timestamp,
+    source_date_str,
+    temporal_metadata,
+)
 
 secrets_client = boto3.client("secretsmanager")
 lambda_client = boto3.client("lambda")
@@ -188,6 +194,11 @@ def _handle_health(event):
     if not date_str:
         return _resp(400, {"error": "no date found in payload"})
 
+    # The legacy dict shape exposes only a calendar date at this point. Keep
+    # that backward-compatible date, but mark it as an explicit source-date
+    # fallback rather than pretending an absolute instant or timezone exists.
+    legacy_temporal = _hae_temporal_metadata(date_str)
+
     items_written = 0
 
     if "heart_rate_variability" in metrics or "heartRateVariability" in metrics:
@@ -197,20 +208,37 @@ def _handle_health(event):
             # Merge-guard fix (2026-07-27): same overwrite bug as the main
             # HAE array path — this legacy dict-shape fallback also needs
             # the samples-ledger merge, not a bare put_item.
-            _merge_samples_and_aggregate(table, date_str, "hrv#hae", "ms", "avg", [(_now_iso(), hrv_val)])
+            _merge_samples_and_aggregate(
+                table,
+                date_str,
+                "hrv#hae",
+                "ms",
+                "avg",
+                [(_now_iso(), hrv_val)],
+                temporal=legacy_temporal,
+            )
             items_written += 1
 
     if "resting_heart_rate" in metrics or "restingHeartRate" in metrics:
         rhr_data = metrics.get("resting_heart_rate") or metrics.get("restingHeartRate")
         rhr_val = _extract_value(rhr_data)
         if rhr_val is not None:
-            _merge_samples_and_aggregate(table, date_str, "rhr#hae", "bpm", "avg", [(_now_iso(), rhr_val)])
+            _merge_samples_and_aggregate(
+                table,
+                date_str,
+                "rhr#hae",
+                "bpm",
+                "avg",
+                [(_now_iso(), rhr_val)],
+                temporal=legacy_temporal,
+            )
             items_written += 1
 
     sleep = metrics.get("sleepAnalysis") or metrics.get("sleep_analysis") or metrics.get("sleep")
     if sleep:
         sleep_item = _normalize_sleep(sleep, date_str)
         if sleep_item:
+            sleep_item.update(legacy_temporal)
             put_item(table, sleep_item)
             items_written += 1
 
@@ -218,14 +246,30 @@ def _handle_health(event):
         steps_data = metrics.get("steps") or metrics.get("stepCount")
         steps_val = _extract_value(steps_data)
         if steps_val is not None:
-            _merge_samples_and_aggregate(table, date_str, "steps#hae", "count", "sum_int", [(_now_iso(), int(steps_val))])
+            _merge_samples_and_aggregate(
+                table,
+                date_str,
+                "steps#hae",
+                "count",
+                "sum_int",
+                [(_now_iso(), int(steps_val))],
+                temporal=legacy_temporal,
+            )
             items_written += 1
 
     if "active_energy" in metrics or "activeEnergyBurned" in metrics:
         cal_data = metrics.get("active_energy") or metrics.get("activeEnergyBurned")
         cal_val = _extract_value(cal_data)
         if cal_val is not None:
-            _merge_samples_and_aggregate(table, date_str, "active_cal#hae", "kcal", "sum_int", [(_now_iso(), round(cal_val))])
+            _merge_samples_and_aggregate(
+                table,
+                date_str,
+                "active_cal#hae",
+                "kcal",
+                "sum_int",
+                [(_now_iso(), round(cal_val))],
+                temporal=legacy_temporal,
+            )
             items_written += 1
 
     _trigger_compute(date_str)
@@ -264,12 +308,15 @@ def _handle_hae_metrics_array(data_list):
             for p in points:
                 # Aggregated form has totalSleep / inBed / asleep fields
                 if any(k in p for k in ("totalSleep", "asleep", "inBed")):
-                    d = _coerce_date(p.get("date") or p.get("sleepStart") or "")
+                    raw_date = p.get("date") or p.get("sleepStart") or ""
+                    sleep_temporal = _hae_temporal_metadata(raw_date)
+                    d = sleep_temporal.get("analysis_date")
                     if not d:
                         continue
                     # For stages "Asleep" etc. the date can be the following morning; keep it.
                     item = _normalize_sleep_aggregated(p, d)
                     if item:
+                        item.update(sleep_temporal)
                         put_item(table, item)
                         items_written += 1
                         latest_date = max(latest_date or d, d)
@@ -333,18 +380,21 @@ def _handle_hae_metrics_array(data_list):
                 end_dates = [s["endDate"] for s in session if s.get("endDate")]
                 if not end_dates:
                     continue
-                wake_date = _coerce_date(max(end_dates))
+                wake_source = max(end_dates)
+                wake_temporal = _hae_temporal_metadata(wake_source)
+                wake_date = wake_temporal.get("analysis_date")
                 if not wake_date:
                     continue
                 # If multiple sessions land on the same wake date (rare —
                 # e.g. a nap + a night), keep the longer one. The shorter
                 # gets dropped rather than merged to avoid garbled totals.
-                if wake_date not in by_date or len(session) > len(by_date[wake_date]):
-                    by_date[wake_date] = session
-            for d, segs in by_date.items():
+                if wake_date not in by_date or len(session) > len(by_date[wake_date][0]):
+                    by_date[wake_date] = (session, wake_temporal)
+            for d, (segs, sleep_temporal) in by_date.items():
                 item = _normalize_sleep(segs, d)
                 if not item:
                     continue
+                item.update(sleep_temporal)
                 # Merge guard — HAE sometimes sends partial unaggregated sessions
                 # (e.g. only the post-midnight slice of an overnight) that would
                 # otherwise clobber the full-night aggregated totals already on
@@ -387,11 +437,17 @@ def _handle_hae_metrics_array(data_list):
             prefix = metric_source.rsplit("#", 1)[0]  # "hr"
             src_suffix = metric_source.split("#", 1)[1]  # "hae"
             by_date_triple = {}
+            by_date_temporal = {}
             by_date_samples = {}  # date → [{ts, bpm}] — only populated if HAE sends per-sample HR
             for p in points:
-                d = _coerce_date(p.get("date") or p.get("startDate") or p.get("endDate") or "")
+                source_ts = p.get("date") or p.get("startDate") or p.get("endDate") or ""
+                point_temporal = _hae_temporal_metadata(source_ts)
+                d = point_temporal.get("analysis_date")
                 if not d:
                     continue
+                by_date_temporal[d] = _merge_hae_temporal_metadata(
+                    by_date_temporal.get(d), point_temporal
+                )
                 slot = by_date_triple.setdefault(d, {"min": [], "avg": [], "max": []})
                 has_stats = False
                 for key_raw, slot_key in (("Min", "min"), ("min", "min"),
@@ -447,13 +503,15 @@ def _handle_hae_metrics_array(data_list):
                         val = round(max(vals), 1)
                     else:
                         val = round(sum(vals) / len(vals), 1)
-                    put_item(table, {
+                    item = {
                         "date": d,
                         "metric_source": f"{prefix}_{slot_key}#{src_suffix}",
                         "value": val,
                         "unit": unit,
                         "ingested_at": _now_iso(),
-                    })
+                    }
+                    item.update(by_date_temporal.get(d) or {})
+                    put_item(table, item)
                     items_written += 1
                     latest_date = max(latest_date or d, d)
             # Per-sample sidecar for heart rate. Only written when HAE actually
@@ -464,12 +522,14 @@ def _handle_hae_metrics_array(data_list):
                     # Fewer than 5 timestamped samples in a day isn't worth
                     # storing — probably a single summary point misidentified.
                     continue
-                put_item(table, {
+                item = {
                     "date": d,
                     "metric_source": f"{prefix}#hae_samples",
                     "samples": samples,
                     "ingested_at": _now_iso(),
-                })
+                }
+                item.update(by_date_temporal.get(d) or {})
+                put_item(table, item)
                 items_written += 1
                 latest_date = max(latest_date or d, d)
             continue
@@ -492,10 +552,16 @@ def _handle_hae_metrics_array(data_list):
         # whether a given HAE automation sends a full-day resend or just an
         # incremental delta.
         by_date = {}
+        by_date_temporal = {}
         for p in points:
-            d = _coerce_date(p.get("date") or p.get("startDate") or p.get("endDate") or "")
+            source_ts = p.get("date") or p.get("startDate") or p.get("endDate") or ""
+            point_temporal = _hae_temporal_metadata(source_ts)
+            d = point_temporal.get("analysis_date")
             if not d:
                 continue
+            by_date_temporal[d] = _merge_hae_temporal_metadata(
+                by_date_temporal.get(d), point_temporal
+            )
             raw = p.get("qty") if p.get("qty") is not None else p.get("value")
             if raw is None:
                 continue
@@ -514,9 +580,25 @@ def _handle_hae_metrics_array(data_list):
                 # out-of-order webhook retry regressing a fresher value by
                 # comparing against whatever's already stored.
                 ts, val = max(pairs, key=lambda x: x[0])
-                _write_last_with_ordering_guard(table, d, metric_source, unit, ts, round(val, 2))
+                _write_last_with_ordering_guard(
+                    table,
+                    d,
+                    metric_source,
+                    unit,
+                    ts,
+                    round(val, 2),
+                    temporal=by_date_temporal.get(d),
+                )
             else:
-                _merge_samples_and_aggregate(table, d, metric_source, unit, kind, pairs)
+                _merge_samples_and_aggregate(
+                    table,
+                    d,
+                    metric_source,
+                    unit,
+                    kind,
+                    pairs,
+                    temporal=by_date_temporal.get(d),
+                )
             items_written += 1
             latest_date = max(latest_date or d, d)
 
@@ -526,7 +608,16 @@ def _handle_hae_metrics_array(data_list):
     return _resp(200, {"date": latest_date, "items_written": items_written})
 
 
-def _merge_samples_and_aggregate(table, date_str, metric_source, unit, kind, new_pairs):
+def _merge_samples_and_aggregate(
+    table,
+    date_str,
+    metric_source,
+    unit,
+    kind,
+    new_pairs,
+    *,
+    temporal=None,
+):
     """Merge-guard for cumulative/averaged HAE metrics (avg / sum_int / sum).
 
     HAE sends multiple automations per day, each carrying only the samples
@@ -541,6 +632,7 @@ def _merge_samples_and_aggregate(table, date_str, metric_source, unit, kind, new
     """
     samples_key = f"{metric_source}_samples"
     existing = get_item(table, {"date": date_str, "metric_source": samples_key}) or {}
+    stored_temporal = _merge_hae_temporal_metadata(existing, temporal)
     existing_samples = {s["ts"]: s["v"] for s in (existing.get("samples") or []) if s.get("ts")}
     for ts, val in new_pairs:
         if ts:
@@ -552,12 +644,14 @@ def _merge_samples_and_aggregate(table, date_str, metric_source, unit, kind, new
             existing_samples[f"_no_ts_{len(existing_samples)}"] = val
 
     merged_samples = [{"ts": ts, "v": v} for ts, v in existing_samples.items()]
-    put_item(table, {
+    samples_item = {
         "date": date_str,
         "metric_source": samples_key,
         "samples": merged_samples,
         "ingested_at": _now_iso(),
-    })
+    }
+    samples_item.update(stored_temporal)
+    put_item(table, samples_item)
 
     vals = list(existing_samples.values())
     if kind == "avg":
@@ -567,16 +661,27 @@ def _merge_samples_and_aggregate(table, date_str, metric_source, unit, kind, new
     else:  # "sum"
         val = round(sum(vals), 1)
 
-    put_item(table, {
+    aggregate_item = {
         "date": date_str,
         "metric_source": metric_source,
         "value": val,
         "unit": unit,
         "ingested_at": _now_iso(),
-    })
+    }
+    aggregate_item.update(stored_temporal)
+    put_item(table, aggregate_item)
 
 
-def _write_last_with_ordering_guard(table, date_str, metric_source, unit, incoming_ts, incoming_val):
+def _write_last_with_ordering_guard(
+    table,
+    date_str,
+    metric_source,
+    unit,
+    incoming_ts,
+    incoming_val,
+    *,
+    temporal=None,
+):
     """Merge-guard for "last"-kind metrics (weight, BMI).
 
     These aren't cumulative, so a samples ledger doesn't apply — but a
@@ -590,14 +695,16 @@ def _write_last_with_ordering_guard(table, date_str, metric_source, unit, incomi
         # Incoming payload is older than what's already stored — ignore it
         # rather than regress to a stale value.
         return
-    put_item(table, {
+    item = {
         "date": date_str,
         "metric_source": metric_source,
         "value": incoming_val,
         "unit": unit,
         "source_ts": incoming_ts,
         "ingested_at": _now_iso(),
-    })
+    }
+    item.update(temporal or {})
+    put_item(table, item)
 
 
 def _log_hae_summary(data_list):
@@ -620,17 +727,83 @@ def _log_hae_summary(data_list):
                 or points[0].get("endDate")
                 or ""
             )
-            sample_date = _coerce_date(raw) or raw[:10]
+            sample_date = _coerce_date(raw) or source_date_str(raw) or ""
         summary_parts.append(f"{name}:{count}@{sample_date}")
     print(f"HAE_SUMMARY metrics={len(data_list)} " + " ".join(summary_parts[:20]))
 
 
+def _hae_temporal_metadata(value):
+    """Derive HAE context without mistaking UTC for event-local time.
+
+    HAE's non-zero device offsets carry useful local-day context. A bare UTC
+    representation (``Z`` / ``+00:00``) supplies only an absolute instant, so
+    it must use the configured home timezone unless separate local context is
+    added in a future payload contract.
+    """
+    parsed = parse_timestamp(value)
+    source_offset_trusted = False
+    if parsed is not None and parsed.tzinfo is not None:
+        offset = parsed.utcoffset()
+        source_offset_trusted = offset is not None and offset.total_seconds() != 0
+    return temporal_metadata(
+        value,
+        source_timezone_trusted=source_offset_trusted,
+        allow_naive_source_date=True,
+    )
+
+
+def _merge_hae_temporal_metadata(*items):
+    """Combine derivation markers for values aggregated into one HAE row.
+
+    A daily row can merge samples from multiple webhook deliveries. Preserve a
+    confident derivation only when every contributing sample agrees; otherwise
+    record the contributing derivations without retaining a misleading offset.
+    """
+    metadata = [item for item in items if isinstance(item, dict) and item]
+    if not metadata:
+        return {}
+
+    derivations = set()
+    for item in metadata:
+        derivation = item.get("date_derivation")
+        if derivation == "mixed_source_derivations":
+            derivations.update(item.get("date_derivations") or [])
+        elif derivation:
+            derivations.add(derivation)
+
+    merged = {}
+    for field in ("source_date", "analysis_date"):
+        values = {item.get(field) for item in metadata if item.get(field)}
+        if len(values) == 1:
+            merged[field] = values.pop()
+
+    if len(derivations) == 1:
+        merged["date_derivation"] = next(iter(derivations))
+        for field in (
+            "source_utc_offset",
+            "analysis_utc_offset",
+            "source_timezone",
+            "analysis_timezone",
+        ):
+            values = {item.get(field) for item in metadata if item.get(field)}
+            if len(values) == 1:
+                merged[field] = values.pop()
+    elif derivations:
+        merged["date_derivation"] = "mixed_source_derivations"
+        merged["date_derivations"] = sorted(derivations)
+
+    return merged
+
+
 def _coerce_date(s):
-    """Extract YYYY-MM-DD from any HAE date string."""
-    if not s or not isinstance(s, str):
-        return None
-    m = re.match(r"(\d{4}-\d{2}-\d{2})", s)
-    return m.group(1) if m else None
+    """Derive an HAE analysis date while preserving its existing contract.
+
+    HAE's normal point timestamps carry a device/source offset, which is
+    treated as event-local context. Legacy date-only and naive values retain
+    their explicit source date without claiming a timezone; malformed values
+    remain unusable instead of falling back to string slicing.
+    """
+    return _hae_temporal_metadata(s).get("analysis_date")
 
 
 def _minutes_between(start, end):
@@ -647,21 +820,15 @@ def _parse_ts_min(ts):
     gap arithmetic. Returns None on unparseable input. Handles the 4 formats
     HAE has shipped historically: naive local, ISO with zone, ISO Z, and
     'YYYY-MM-DD HH:MM:SS ±HHMM'."""
-    if not ts or not isinstance(ts, str):
+    dt = parse_timestamp(ts)
+    if dt is None:
         return None
-    fmts = [
-        "%Y-%m-%d %H:%M:%S %z",
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%SZ",
-        "%Y-%m-%d %H:%M:%S",
-    ]
-    for fmt in fmts:
-        try:
-            dt = datetime.strptime(ts, fmt)
-            return dt.timestamp() / 60
-        except Exception:
-            continue
-    return None
+    if dt.tzinfo is not None and dt.utcoffset() is not None:
+        return dt.timestamp() / 60
+    # Duration/gap arithmetic between naive HAE values does not require a
+    # timezone. Use a naive epoch solely as an ordering coordinate rather than
+    # letting datetime.timestamp() silently assume the Lambda host timezone.
+    return (dt - datetime(1970, 1, 1)).total_seconds() / 60
 
 
 def _normalize_sleep(sleep, date_str):
@@ -888,7 +1055,11 @@ def _handle_withings(event):
     measure_types = {1: "weight", 6: "fat_ratio", 8: "fat_mass", 76: "muscle_mass", 77: "hydration"}
 
     for grp in data.get("body", {}).get("measuregrps", []):
-        grp_date = datetime.fromtimestamp(grp["date"], tz=timezone.utc).strftime("%Y-%m-%d")
+        source_time = datetime.fromtimestamp(grp["date"], tz=timezone.utc)
+        temporal = temporal_metadata(source_time)
+        grp_date = temporal.get("analysis_date")
+        if not grp_date:
+            continue
         for m in grp.get("measures", []):
             mtype = measure_types.get(m["type"])
             if not mtype:
@@ -901,13 +1072,16 @@ def _handle_withings(event):
             elif mtype == "fat_ratio":
                 value = round(value, 1)
 
-            put_item(table, {
+            item = {
                 "date": grp_date,
                 "metric_source": f"{mtype}#withings",
                 "value": value,
                 "unit": "lbs" if mtype != "fat_ratio" else "%",
+                "source_time": source_time.isoformat(),
                 "ingested_at": _now_iso(),
-            })
+            }
+            item.update(temporal)
+            put_item(table, item)
             items_written += 1
 
     return _resp(200, {"items_written": items_written})
@@ -1103,9 +1277,25 @@ def _handle_strava(event):
                 hr_stream = s.get("data", [])
                 break
 
-    start_date = activity.get("start_date_local", "")[:10]
-    if not start_date:
-        start_date = local_today_str()
+    source_start_time = activity.get("start_date_local")
+    absolute_start_time = activity.get("start_date")
+    source_date = source_date_str(source_start_time)
+    if source_date:
+        start_date = source_date
+        temporal = {
+            "source_date": source_date,
+            "analysis_date": source_date,
+            "date_derivation": "strava_start_date_local",
+        }
+    else:
+        temporal = temporal_metadata(absolute_start_time)
+        start_date = temporal.get("analysis_date") or local_today_str()
+        if not temporal.get("analysis_date"):
+            temporal = {
+                "analysis_date": start_date,
+                "analysis_timezone": HOME_TIMEZONE,
+                "date_derivation": "ingest_home_date_fallback",
+            }
 
     workout_item = {
         "date": start_date,
@@ -1119,6 +1309,18 @@ def _handle_strava(event):
         "source": "strava",
         "ingested_at": _now_iso(),
     }
+    workout_item.update(temporal)
+    if source_start_time:
+        workout_item["source_start_time"] = source_start_time
+    if absolute_start_time:
+        workout_item["start_time"] = absolute_start_time
+    elif source_start_time:
+        workout_item["start_time"] = source_start_time
+    source_timezone = activity.get("timezone")
+    if isinstance(source_timezone, str) and source_timezone.strip():
+        workout_item["source_timezone"] = source_timezone.strip()
+    if activity.get("utc_offset") is not None:
+        workout_item["source_utc_offset_seconds"] = activity.get("utc_offset")
 
     # De-dupe guard: Hevy is the source of truth for strength/lifting sessions.
     # If Strava classified this activity as strength (e.g. a "Workout" or
@@ -1288,9 +1490,23 @@ def _handle_hevy_sync(event):
     #    exercise write). So the dupe-check may only suppress the redundant
     #    fitness-workouts put_item; it must NEVER gate the exercise-row write.
     for workout in updated_workouts:
-        outcome = _apply_hevy_workout(
-            workout, templates, workouts_table, exercises_table, force=backfill
-        )
+        try:
+            outcome = _apply_hevy_workout(
+                workout, templates, workouts_table, exercises_table, force=backfill
+            )
+        except HevyLegacyLookupError:
+            # Identity is unknown, so writing under the newly derived date can
+            # duplicate a legacy UTC-keyed row. Stop before either store or the
+            # watermark advances; an ordinary future poll can retry safely.
+            logger.exception(
+                "hevy sync stopped: legacy identity lookup failed for %s",
+                workout.get("id"),
+            )
+            return _resp(200, {
+                "status": "error",
+                "reason": "hevy legacy lookup failed",
+                "retryable": True,
+            })
         if outcome is None:
             continue
         if outcome["workout_written"]:
@@ -1385,6 +1601,43 @@ def _hevy_exercise_rows_exist(exercises_table, date, canonicals):
     return True
 
 
+class HevyLegacyLookupError(RuntimeError):
+    """Raised when legacy Hevy identity cannot be determined safely."""
+
+
+def _find_existing_hevy_row(table, row):
+    """Find an existing Hevy row even when its historical date key differs.
+
+    Before temporal normalization, Hevy rows used the UTC timestamp prefix as
+    the partition key. Re-keying those rows is explicitly a separate migration,
+    so an update/backfill must discover the legacy key and keep writing there.
+    New Hevy ids use the canonical home-timezone date from ``workout_to_row``.
+    """
+    try:
+        existing = get_item(table, {"date": row["date"], "strava_id": row["strava_id"]})
+        if existing:
+            return existing
+
+        params = {
+            "FilterExpression": "strava_id = :sid",
+            "ExpressionAttributeValues": {":sid": row["strava_id"]},
+            "Limit": 1000,
+        }
+        while True:
+            resp = table.scan(**params)
+            for item in resp.get("Items", []):
+                if item.get("strava_id") == row["strava_id"]:
+                    return item
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            params["ExclusiveStartKey"] = last_key
+    except Exception as exc:
+        logger.exception("hevy legacy-date lookup failed for %s", row["strava_id"])
+        raise HevyLegacyLookupError(row["strava_id"]) from exc
+    return None
+
+
 def _apply_hevy_workout(workout, templates, workouts_table, exercises_table, force=False):
     """Upsert a single Hevy workout into BOTH stores, keeping the two writes
     decoupled.
@@ -1395,9 +1648,10 @@ def _apply_hevy_workout(workout, templates, workouts_table, exercises_table, for
         exercise rows, skip the redundant fitness-workouts put_item.
       • rolled-up row unchanged, exercise rows PRESENT → skip both (cheap
         no-op), UNLESS ``force`` (the explicit backfill entrypoint), which
-        always rewrites both. All writes are idempotent overwrites keyed on
-        (date, strava_id) and (canonical, date), so re-running never
-        duplicates rows or corrupts PR flags.
+        always rewrites both. Existing Hevy ids retain a legacy date key when
+        one exists, preventing this forward-only change from re-keying history.
+        All writes remain idempotent overwrites keyed on (date, strava_id) and
+        (canonical, date).
 
     Returns None when the workout is unusable (no id/date), else a dict:
       {workout_written, backfilled, ex_rows_written, touched, date, canonicals}
@@ -1407,12 +1661,20 @@ def _apply_hevy_workout(workout, templates, workouts_table, exercises_table, for
     row = workout_to_row(workout)
     if row is None:
         return None
-    date = row["date"]
+
+    existing = _find_existing_hevy_row(workouts_table, row)
+    canonical_date = row["date"]
+    date = (existing or {}).get("date") or canonical_date
+    if date != canonical_date:
+        # Preserve the historical primary key while retaining the newly
+        # derived canonical date as additive context for a future migration.
+        row["date"] = date
+        row["legacy_date_preserved"] = True
 
     ex_rows = workout_to_exercise_rows(workout, templates)
     canonicals = {er["canonical"] for er in ex_rows if er.get("canonical")}
 
-    is_dupe = (not force) and _hevy_row_is_duplicate(workouts_table, row)
+    is_dupe = (not force) and _hevy_row_is_duplicate(row, existing=existing)
     rows_exist = _hevy_exercise_rows_exist(exercises_table, date, canonicals)
 
     # Fully synced and nothing changed → cheap skip (only when not forced).
@@ -1649,7 +1911,7 @@ def _ingest_hevy_body_measurements(api_key):
     return {"written": written, "available": len(measurements), "status": "ok"}
 
 
-def _hevy_row_is_duplicate(table, row):
+def _hevy_row_is_duplicate(row, existing=None):
     """Idempotency check for a Hevy row against what's already stored.
 
     Hevy rows are keyed on their own id (strava_id = "hevy_<id>"), so an
@@ -1665,7 +1927,6 @@ def _hevy_row_is_duplicate(table, row):
     present (same volume + duration), meaning nothing changed and we can skip
     the redundant write. Any material change still upserts.
     """
-    existing = get_item(table, {"date": row["date"], "strava_id": row["strava_id"]})
     if not existing:
         return False
     same_volume = float(existing.get("volume_lb", -1) or -1) == float(row.get("volume_lb", 0) or 0)
@@ -1712,14 +1973,9 @@ def _extract_date(data):
         val = data.get(key, "")
         if not val:
             continue
-        if isinstance(val, str):
-            m = re.match(r"(\d{4}-\d{2}-\d{2})", val)
-            if m:
-                return m.group(1)
-            # HAE format: yyyy-MM-dd HH:mm:ss Z
-            m2 = re.match(r"(\d{4}-\d{2}-\d{2})\s", val)
-            if m2:
-                return m2.group(1)
+        parsed_date = _coerce_date(val)
+        if parsed_date:
+            return parsed_date
     return local_today_str()
 
 

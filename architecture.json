@@ -89,13 +89,13 @@
     {"path": "backend/shared/shared/scoring.py", "responsibility": "TRIMP/strain/HR-zone math + scoring weights."},
     {"path": "backend/shared/shared/sleep_quality.py", "responsibility": "Sleep-quality evaluation."},
     {"path": "backend/shared/shared/db.py", "responsibility": "DynamoDB helpers (get_table/get_item/put_item/query_items/batch_write)."},
-    {"path": "backend/shared/shared/timezone.py", "responsibility": "Local-time helpers (local_now, local_today_str)."},
+    {"path": "backend/shared/shared/timezone.py", "responsibility": "Central temporal contract: source timestamp parsing/provenance, trusted source-offset attribution, home-timezone analysis dates, and local today helpers."},
     {"path": "backend/shared/shared/cost_service.py", "responsibility": "Cost tracking."}
   ],
   "tables": [
     {"name": "fitness-health-metrics", "pk": "date", "sk": "metric_source", "purpose": "Per-metric daily values, source-suffixed (#hae, #hevy).", "hevy_sources": ["weight#hevy", "lean_mass#hevy", "bodyfat_hevy#hevy", "waist#hevy", "neck#hevy", "shoulder#hevy", "chest#hevy", "left_bicep#hevy", "right_bicep#hevy", "left_forearm#hevy", "right_forearm#hevy", "abdomen#hevy", "hips#hevy", "left_thigh#hevy", "right_thigh#hevy", "left_calf#hevy", "right_calf#hevy"]},
     {"name": "fitness-daily-scores", "pk": "date", "purpose": "Daily composite scores + weekly volume roll-ups (week_<date>)."},
-    {"name": "fitness-workouts", "pk": "date", "sk": "strava_id", "purpose": "Rolled-up sessions (Strava cardio + Hevy strength keyed hevy_<id>)."},
+    {"name": "fitness-workouts", "pk": "date", "sk": "strava_id", "purpose": "Rolled-up sessions (Strava cardio + Hevy strength keyed hevy_<id>). New Hevy rows preserve source timestamps/offset and analysis-date provenance; existing ids retain legacy date keys until a separate migration."},
     {"name": "fitness-exercises", "pk": "canonical", "sk": "date", "purpose": "Per-exercise-per-day rows; lift-learning engine substrate. Written by LLM parser and Hevy poller (source field)."},
     {"name": "fitness-user-config", "pk": "key", "purpose": "Config + caches.", "keys": ["scoring", "favorites", "lateral_chain_program", "lift_stalls", "hevy_exercise_templates", "hevy_last_sync"]},
     {"name": "fitness-nutrition", "pk": "date", "sk": "meal_id"},
@@ -120,14 +120,14 @@
       "steps": [
         "Refresh exercise-template cache (fitness-user-config key=hevy_exercise_templates) if older than ~7 days (forced on backfill). pageSize clamped to Hevy's max of 10.",
         "Fetch workouts per mode (incremental / cold_start / backfill above).",
-        "Per workout (_apply_hevy_workout), DECOUPLED writes: the rolled-up fitness-workouts row (workout_to_row) and the per-exercise fitness-exercises rows (workout_to_exercise_rows, source=hevy) are independent. The session-row dupe-check (_hevy_row_is_duplicate) only suppresses the redundant fitness-workouts put; it NEVER gates the exercise-row write. A workout whose session row is unchanged but whose exercise rows are missing is BACKFILLED (existence checked via _hevy_exercise_rows_exist on (canonical,date)); a fully-synced workout is a cheap skip; backfill/force_full rewrites both unconditionally. All writes are idempotent overwrites.",
+        "Per workout (_apply_hevy_workout), derive the analysis date from the absolute Hevy start_time in America/Los_Angeles, preserve raw/source temporal fields, then perform DECOUPLED writes: the rolled-up fitness-workouts row (workout_to_row) and per-exercise fitness-exercises rows (workout_to_exercise_rows, source=hevy) are independent. Existing Hevy ids retain a previously stored legacy date key rather than being re-keyed; new ids use the analysis date. The session-row dupe-check only suppresses the redundant fitness-workouts put and NEVER gates the exercise-row write. A workout whose session row is unchanged but whose exercise rows are missing is BACKFILLED; a fully-synced workout is a cheap skip; backfill/force_full rewrites both at the preserved key. All writes are idempotent overwrites.",
         "Delete workouts removed in Hevy from fitness-workouts and their source=hevy fitness-exercises rows.",
         "recompute_prs_for_canonicals + recompute_weekly_volume for touched canonicals (including backfilled ones); _trigger_compute for touched dates.",
         "Ingest GET /v1/body_measurements (pageSize clamped to Hevy's max of 10 -- an over-cap value 400s and silently returns empty, the measurements_written:0 root cause) into fitness-health-metrics under #hevy sources (cm->in, kg->lb) via merge/ordering-guard helpers. Summary reports measurements_status ok/empty/error so a zero is never ambiguous.",
         "Advance hevy_last_sync watermark in fitness-user-config."
       ],
       "summary_fields": ["mode", "fetched", "workouts_written", "backfilled", "exercise_rows_written", "deleted", "measurements_written", "measurements_available", "measurements_status", "canonicals_touched", "dates"],
-      "notes": "Hevy public API exposes no calories/HR: strain estimated, cal flagged cal_unavailable. Never a bare put_item overwrite for metrics (PR #2 regression guard)."
+      "notes": "Hevy public API exposes no calories/HR or trustworthy event-local timezone: strain is estimated, cal is flagged cal_unavailable, and absolute timestamps use the configured home timezone for analysis dates without fabricating travel-local context. Historical date repair is explicitly separate. Never a bare put_item overwrite for metrics (PR #2 regression guard)."
     },
     "muscle_group_mapping": {
       "source_enum_size": 20,

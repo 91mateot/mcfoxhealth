@@ -89,6 +89,99 @@ def _patch_auth(handler):
     handler._verify_api_key = lambda _k: True
 
 
+def test_hae_date_coercion_uses_offset_and_preserves_naive_source_date():
+    handler, _table = _fresh_module()
+    assert handler._coerce_date("2026-07-02 00:30:00 -0700") == "2026-07-02"
+    assert handler._coerce_date("2026-07-02") == "2026-07-02"
+    assert handler._coerce_date("not-a-timestamp") is None
+
+
+def test_hae_utc_only_offsets_use_home_timezone_for_analysis_date():
+    handler, _table = _fresh_module()
+    cases = (
+        ("2026-07-02T00:30:00Z", "2026-07-01"),
+        ("2026-07-02T00:30:00+00:00", "2026-07-01"),
+        ("2026-01-02T07:30:00Z", "2026-01-01"),
+    )
+    for source_ts, expected_date in cases:
+        metadata = handler._hae_temporal_metadata(source_ts)
+        assert metadata["analysis_date"] == expected_date
+        assert metadata["analysis_timezone"] == "America/Los_Angeles"
+        assert metadata["date_derivation"] == "home_timezone"
+        assert metadata["source_utc_offset"] == "+00:00"
+        assert "analysis_utc_offset" not in metadata
+
+
+def test_hae_nonzero_explicit_offset_remains_trusted_local_context():
+    handler, _table = _fresh_module()
+    metadata = handler._hae_temporal_metadata("2026-07-02T00:30:00-07:00")
+    assert metadata["analysis_date"] == "2026-07-02"
+    assert metadata["date_derivation"] == "source_offset"
+    assert metadata["source_utc_offset"] == "-07:00"
+    assert metadata["analysis_utc_offset"] == "-07:00"
+    assert "analysis_timezone" not in metadata
+
+
+def test_hae_utc_row_preserves_raw_timestamp_and_absolute_derivation():
+    h, t = _fresh_module()
+    _patch_auth(h)
+    source_ts = "2026-07-02T00:30:00Z"
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "heart_rate_variability", "units": "ms", "data": [
+            {"qty": 46.3, "date": source_ts},
+        ]},
+    ]}}), None)
+
+    hrv = [i for i in t.items if i["metric_source"] == "hrv#hae"][-1]
+    samples = [i for i in t.items if i["metric_source"] == "hrv#hae_samples"][-1]
+    assert hrv["date"] == "2026-07-01"
+    assert hrv["date_derivation"] == "home_timezone"
+    assert hrv["source_utc_offset"] == "+00:00"
+    assert samples["samples"] == [{"ts": source_ts, "v": 46.3}]
+
+
+def test_hae_rows_distinguish_offset_dates_from_source_date_fallbacks():
+    h, t = _fresh_module()
+    _patch_auth(h)
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "heart_rate_variability", "units": "ms", "data": [
+            {"qty": 46.3, "date": "2026-07-02 00:30:00 -0700"},
+        ]},
+        {"name": "step_count", "units": "count", "data": [
+            {"qty": 8500, "date": "2026-07-02"},
+        ]},
+    ]}}), None)
+
+    hrv = [i for i in t.items if i["metric_source"] == "hrv#hae"][-1]
+    steps = [i for i in t.items if i["metric_source"] == "steps#hae"][-1]
+
+    assert hrv["date_derivation"] == "source_offset"
+    assert hrv["source_utc_offset"] == "-07:00"
+    assert hrv["analysis_utc_offset"] == "-07:00"
+
+    assert steps["date_derivation"] == "source_date_fallback"
+    assert "source_utc_offset" not in steps
+    assert "analysis_utc_offset" not in steps
+    assert "analysis_timezone" not in steps
+
+
+def test_hae_mixed_timestamp_confidence_is_explicit_on_aggregate_row():
+    h, t = _fresh_module()
+    _patch_auth(h)
+    h.lambda_handler(_event({"data": {"metrics": [
+        {"name": "heart_rate_variability", "units": "ms", "data": [
+            {"qty": 46.3, "date": "2026-07-02 00:30:00 -0700"},
+            {"qty": 48.1, "date": "2026-07-02 03:00:00"},
+        ]},
+    ]}}), None)
+
+    hrv = [i for i in t.items if i["metric_source"] == "hrv#hae"][-1]
+    assert hrv["date_derivation"] == "mixed_source_derivations"
+    assert hrv["date_derivations"] == ["source_date_fallback", "source_offset"]
+    assert "source_utc_offset" not in hrv
+    assert "analysis_utc_offset" not in hrv
+
+
 # ─── HAE v2 nested shape ─────────────────────────────────────────────
 
 def test_hae_v2_nested_shape_hrv():
