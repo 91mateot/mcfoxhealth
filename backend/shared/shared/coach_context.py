@@ -142,14 +142,14 @@ Direct, data-first. Like a coach reviewing game film.
 
 def _today_block_from_snapshot(s: dict) -> str:
     """Build today's data block from the client-sent TodayResponse shape."""
-    recovery = s.get("recovery", "unknown")
-    zone = s.get("recoveryZone", "unknown")
+    recovery = s.get("recovery")
+    zone = s.get("recoveryZone")
     hrv = s.get("hrv")
     rhr = s.get("rhr")
     resp = s.get("resp")
     spo2 = s.get("spo2")
     wrist = s.get("wristTemp")
-    strain = s.get("strain", 0)
+    strain = s.get("strain")
     strain_target = s.get("strainTarget") or {}
     sleep = s.get("sleep") or {}
     sleep_need = s.get("sleepNeedTonight") or {}
@@ -157,12 +157,13 @@ def _today_block_from_snapshot(s: dict) -> str:
     steps_goal = s.get("stepsGoal")
     calories = s.get("calories") or {}
     meals = s.get("mealsToday") or []
-    water = s.get("water", 0)
+    water = s.get("water")
     water_goal = s.get("waterGoal", 100)
-    caffeine = s.get("caffeineMg", 0)
+    caffeine = s.get("caffeineMg")
     caffeine_goal = s.get("caffeineGoal", 400)
     nutrition_targets = s.get("nutritionTargets") or {}
     base = s.get("base") or {}
+    semantics = s.get("metricSemantics") or {}
 
     protein = sum(m.get("p", 0) for m in meals)
     carbs = sum(m.get("c", 0) for m in meals)
@@ -186,9 +187,9 @@ def _today_block_from_snapshot(s: dict) -> str:
     spo2_str = f"{spo2}%" if spo2 is not None else "n/a"
     wrist_str = f"{wrist}°C" if wrist is not None else "n/a"
 
-    hours = sleep.get("hours", 0)
-    minutes = sleep.get("minutes", 0)
-    sleep_str = f"{hours}h {minutes}m" if (hours or minutes) else "n/a"
+    hours = sleep.get("hours")
+    minutes = sleep.get("minutes")
+    sleep_str = f"{hours}h {minutes or 0}m" if hours is not None else "n/a"
 
     meal_lines = []
     for m in meals:
@@ -202,11 +203,19 @@ def _today_block_from_snapshot(s: dict) -> str:
     target_p = nutrition_targets.get("p", 180)
     target_c = nutrition_targets.get("c", 190)
     target_f = nutrition_targets.get("f", 65)
+    protein_available = semantics.get("protein", {}).get("availability") == "available" if semantics else bool(meals)
+    recovery_str = f"{recovery}% ({zone or 'zone unavailable'})" if recovery is not None else "n/a"
+    strain_str = f"{strain}/21" if strain is not None else "n/a"
+    sleep_score_str = sleep.get("score") if sleep.get("score") is not None else "n/a"
+    efficiency_str = f"{sleep.get('efficiency')}%" if sleep.get("efficiency") is not None else "n/a"
+
+    def _nutrition_value(value, suffix=""):
+        return f"{value}{suffix}" if protein_available else "n/a"
 
     return f"""## Today's Data (from live client snapshot — {s.get('date', '')})
 
 ### Recovery & Readiness
-- Recovery: {recovery}% ({zone})
+- Recovery: {recovery_str}
 - HRV: {hrv_str}
 - Resting HR: {rhr_str}
 - Respiratory rate: {resp_str}
@@ -214,25 +223,25 @@ def _today_block_from_snapshot(s: dict) -> str:
 - Wrist temperature: {wrist_str}
 
 ### Sleep Last Night
-- Score: {sleep.get('score', 'n/a')}/100
-- Duration: {sleep_str} ({sleep.get('efficiency', 0)}% efficiency)
-- Deep: {sleep.get('deep', 0)} min | REM: {sleep.get('rem', 0)} min | Core: {sleep.get('core', 0)} min | Awake: {sleep.get('awake', 0)} min
+- Score: {sleep_score_str}{'/100' if sleep_score_str != 'n/a' else ''}
+- Duration: {sleep_str} ({efficiency_str} efficiency)
+- Deep: {sleep.get('deep') if sleep.get('deep') is not None else 'n/a'} min | REM: {sleep.get('rem') if sleep.get('rem') is not None else 'n/a'} min | Core: {sleep.get('core') if sleep.get('core') is not None else 'n/a'} min | Awake: {sleep.get('awake') if sleep.get('awake') is not None else 'n/a'} min
 - Sleep need tonight: {sleep_need.get('totalMin', 'n/a')} min (bed by {sleep_need.get('bedtimeBy', 'n/a')})
 
 ### Strain & Activity
-- Strain so far: {strain}/21 (target {strain_target.get('low', '?')}-{strain_target.get('high', '?')}: {strain_target.get('reason', '')})
+- Strain so far: {strain_str} (target {strain_target.get('low', '?')}-{strain_target.get('high', '?')}: {strain_target.get('reason', '')})
 - Steps: {steps if steps is not None else 'n/a'} / {steps_goal if steps_goal else '—'}
-- Active calories: {calories.get('active', 'n/a')} kcal
+- Active calories: {calories.get('active') if calories.get('active') is not None else 'n/a'} kcal
 
 ### Nutrition So Far
 {meals_block}
 
-- Calories: {cals} / {target_cal} target
-- Protein: {protein}g / {target_p}g target
-- Carbs: {carbs}g / {target_c}g target
-- Fat: {fat}g / {target_f}g target
-- Water: {water} oz / {water_goal} oz target
-- Caffeine: {caffeine} mg / {caffeine_goal} mg cap"""
+- Calories: {_nutrition_value(cals)} / {target_cal} target
+- Protein: {_nutrition_value(protein, 'g')} / {target_p}g target
+- Carbs: {_nutrition_value(carbs, 'g')} / {target_c}g target
+- Fat: {_nutrition_value(fat, 'g')} / {target_f}g target
+- Water: {water if water is not None else 'n/a'} oz / {water_goal} oz target
+- Caffeine: {caffeine if caffeine is not None else 'n/a'} mg / {caffeine_goal} mg cap"""
 
 
 def _today_block_from_db(today_str, scores, meals_today, workouts_today, baselines):

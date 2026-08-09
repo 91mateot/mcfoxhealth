@@ -34,7 +34,10 @@ export function BarRow<T extends BarItem>({
   goalValue,
   belowGoalOpacity = 1,
 }: BarRowProps<T>) {
-  const max = Math.max(...items.map((i) => Number(i[accessor]) || 0), goalValue ?? 0) || 1;
+  const numericValues = items
+    .map((item) => item[accessor] as unknown)
+    .filter((value) => typeof value === "number" && Number.isFinite(value)) as number[];
+  const max = Math.max(...numericValues, goalValue ?? 0) || 1;
   // Bars occupy the top 82% of the chart area (matches the height calc
   // below). Translate `goalValue` into the same space so the reference
   // line aligns with bar tops that represent that value.
@@ -58,8 +61,10 @@ export function BarRow<T extends BarItem>({
         />
       )}
       {items.map((it, i) => {
-        const v = Number(it[accessor]) || 0;
-        const h = Math.max(4, (v / max) * height * 0.82);
+        const raw = it[accessor];
+        const available = typeof raw === "number" && Number.isFinite(raw);
+        const v = available ? raw : 0;
+        const h = available ? Math.max(4, (v / max) * height * 0.82) : 4;
         const col = colorFn ? colorFn(it, v) : C.primary;
         const isToday = Boolean(it[todayKey]);
         return (
@@ -77,7 +82,7 @@ export function BarRow<T extends BarItem>({
                   fontWeight: isToday ? 700 : 600,
                 }}
               >
-                {valueFn(it)}
+                {available ? valueFn(it) : "—"}
               </div>
             )}
             <div
@@ -85,12 +90,13 @@ export function BarRow<T extends BarItem>({
                 width: "100%",
                 borderRadius: "4px 4px 2px 2px",
                 height: h,
-                background: col,
+                background: available ? col : "transparent",
+                border: available ? "none" : `1px dashed ${C.t4}`,
                 opacity: v
                   ? goalValue != null && v < goalValue
                     ? belowGoalOpacity
                     : 1
-                  : 0.25,
+                  : available ? 0.25 : 0.5,
                 boxShadow: isToday ? `0 0 0 1.5px ${C.t}` : "none",
                 transition: "height 1s ease",
               }}

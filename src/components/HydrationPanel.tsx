@@ -7,7 +7,7 @@ import { logWater } from "../api";
 
 interface HydrationPanelProps {
   C: Palette;
-  water: number;
+  water: number | null;
   waterGoal: number;
   onOpenDetail?: () => void;
 }
@@ -40,11 +40,13 @@ export function HydrationPanel({ C, water, waterGoal, onOpenDetail }: HydrationP
     await add(n);
   };
 
-  const pct = waterGoal > 0 ? Math.round((water / waterGoal) * 100) : 0;
-  const remaining = Math.max(0, waterGoal - water);
+  const available = water != null;
+  const measuredWater = water ?? 0;
+  const pct = available && waterGoal > 0 ? Math.round((measuredWater / waterGoal) * 100) : null;
+  const remaining = available ? Math.max(0, waterGoal - measuredWater) : null;
 
   return (
-    <Panel C={C} title="Hydration" right={<Chip C={C} color={C.cyan}>{roundOz(water)} / {waterGoal} oz</Chip>}>
+    <Panel C={C} title="Hydration" right={<Chip C={C} color={available ? C.cyan : C.t3}>{available ? `${roundOz(measuredWater)} / ${waterGoal} oz` : "no data"}</Chip>}>
       <button
         type="button"
         onClick={onOpenDetail}
@@ -59,16 +61,16 @@ export function HydrationPanel({ C, water, waterGoal, onOpenDetail }: HydrationP
       >
         <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 8 }}>
           <div style={{ fontSize: 24, fontWeight: 800, fontFamily: MONO, color: C.cyan, letterSpacing: "-.04em" }}>
-            {roundOz(water)}
+            {available ? roundOz(measuredWater) : "—"}
           </div>
           <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO }}>
-            oz · {pct}% of daily
+            {available ? `oz · ${pct}% of daily` : "unavailable"}
           </div>
           <div style={{ marginLeft: "auto", fontSize: 11, color: C.t4, fontFamily: MONO }}>
-            {roundOz(remaining)} oz left
+            {remaining != null ? `${roundOz(remaining)} oz left` : ""}
           </div>
         </div>
-        <ProgressBar C={C} val={water} max={waterGoal} color={C.cyan} height={6} />
+        <ProgressBar C={C} val={measuredWater} max={waterGoal} color={C.cyan} height={6} />
       </button>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginTop: 10 }}>
         <WaterBtn C={C} label="+8 oz" onClick={() => add(8)} disabled={busy} />

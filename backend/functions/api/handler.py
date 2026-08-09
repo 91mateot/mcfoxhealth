@@ -141,6 +141,27 @@ def _mark_rest_day(event):
     return _resp(200, {"plannedWorkout": _prepare_planned_workout(proposal, todays_workouts)})
 
 
+def _present(row, key):
+    """Return a stored value without collapsing an observed zero into missing."""
+    return row.get(key) if key in row and row.get(key) is not None else None
+
+
+def _metric_semantics(kind=None, availability="available", **details):
+    semantics = {"availability": availability}
+    if kind:
+        semantics["kind"] = kind
+    semantics.update({key: value for key, value in details.items() if value is not None})
+    return semantics
+
+
+def _history_availability(samples, expected):
+    if samples == 0:
+        return "unavailable"
+    if samples < expected:
+        return "insufficient_history"
+    return "available"
+
+
 def _get_today():
     scores_table = get_table("DAILY_SCORES_TABLE")
     metrics_table = get_table("HEALTH_METRICS_TABLE")
@@ -168,16 +189,19 @@ def _get_today():
         d = (today_dt - timedelta(days=i)).strftime("%Y-%m-%d")
         d_dt = today_dt - timedelta(days=i)
         s = get_item(scores_table, {"date": d}) or {}
-        rec = s.get("recovery", 0)
-        zone = s.get("recovery_zone", "yellow")
+        rec = _present(s, "recovery")
+        zone = _present(s, "recovery_zone")
+        strain = _present(s, "strain")
         recovery_week.append({
             "d": short_days[d_dt.weekday()],
             "date": f"{d_dt.month}/{d_dt.day}",
             "rec": rec,
             "hrv": s.get("hrv"),
             "rhr": s.get("rhr"),
-            "sleep": round(s.get("sleep", {}).get("total_min", 0) / 60, 1) if s.get("sleep") else None,
-            "strain": s.get("strain", 0),
+            "sleep": round(s["sleep"]["total_min"] / 60, 1)
+            if isinstance(s.get("sleep"), dict) and _present(s["sleep"], "total_min") is not None
+            else None,
+            "strain": strain,
             "tag": zone,
             "today": i == 0,
         })
@@ -186,7 +210,7 @@ def _get_today():
     for i in range(29, -1, -1):
         d = (today_dt - timedelta(days=i)).strftime("%Y-%m-%d")
         s = get_item(scores_table, {"date": d}) or {}
-        hrv_30d.append(s.get("hrv") or baselines.get("hrv", 48))
+        hrv_30d.append(_present(s, "hrv"))
 
     steps_week = []
     for i in range(6, -1, -1):
@@ -195,7 +219,7 @@ def _get_today():
         s = get_item(scores_table, {"date": d}) or {}
         steps_week.append({
             "d": short_days[d_dt.weekday()],
-            "v": s.get("steps") or 0,
+            "v": _present(s, "steps"),
             "today": i == 0,
         })
 
@@ -248,32 +272,36 @@ def _get_today():
         d = (today_dt - timedelta(days=i)).strftime("%Y-%m-%d")
         d_dt = today_dt - timedelta(days=i)
         s = get_item(scores_table, {"date": d}) or {}
-        p = s.get("protein_total", 0)
-        cal = s.get("cal_total", 0)
+        p = _present(s, "protein_total")
+        cal = _present(s, "cal_total")
         protein_week.append({
             "d": short_days[d_dt.weekday()],
             "date": f"{d_dt.month}/{d_dt.day}",
             "p": p,
             "cal": cal,
-            "flag": p < 100 if p else False,
+            "flag": p < 100 if p is not None else False,
             "today": i == 0,
             "inProgress": i == 0,
         })
 
-    sleep = scores.get("sleep", {})
-    sleep_hours = sleep.get("total_min", 0) // 60
-    sleep_minutes = sleep.get("total_min", 0) % 60
+    sleep = scores.get("sleep") if isinstance(scores.get("sleep"), dict) else {}
+    sleep_total_min = _present(sleep, "total_min")
+    sleep_hours = sleep_total_min // 60 if sleep_total_min is not None else None
+    sleep_minutes = sleep_total_min % 60 if sleep_total_min is not None else None
 
     # Component breakdown for the RingDetail 2×3 card grid. Uses the same
     # duration target the score was computed against, so the breakdown and
     # top-line score stay in sync even after tuning.
     sleep_component_scores = None
-    if sleep:
+    sleep_efficiency = _present(sleep, "efficiency")
+    sleep_deep_min = _present(sleep, "deep_min")
+    sleep_rem_min = _present(sleep, "rem_min")
+    if all(value is not None for value in (sleep_total_min, sleep_efficiency, sleep_deep_min, sleep_rem_min)):
         sleep_component_scores = sleep_component_breakdown(
-            total_min=sleep.get("total_min", 0),
-            efficiency=sleep.get("efficiency", 0),
-            deep_min=sleep.get("deep_min", 0),
-            rem_min=sleep.get("rem_min", 0),
+            total_min=sleep_total_min,
+            efficiency=sleep_efficiency,
+            deep_min=sleep_deep_min,
+            rem_min=sleep_rem_min,
             duration_target_min=sleep.get("duration_target_used") or 450,
             continuity_idx=sleep.get("continuity_idx"),
             hr_dip_idx=sleep.get("hr_dip_idx"),
@@ -316,7 +344,12 @@ def _get_today():
         if ts and (updated_at is None or ts > updated_at):
             updated_at = ts
 
-    coach_insights = _build_coach_insights(scores, baselines, targets, water_total)
+    water_has_data = any(m.get("meal_id", "").startswith("water_") for m in meals)
+    caffeine_has_data = any(
+        m.get("meal_id", "").startswith("meal_") and "caffeine_mg" in m and m.get("caffeine_mg") is not None
+        for m in meals
+    )
+    coach_insights = _build_coach_insights(scores, baselines, targets, water_total, water_has_data)
 
     planned_workout = _prepare_planned_workout(scores.get("planned_workout"), todays_workouts)
 
@@ -339,23 +372,46 @@ def _get_today():
             "taken": tag in _today_tag_set if tag else False,
         })
 
+    recovery = _present(scores, "recovery")
+    recovery_zone = _present(scores, "recovery_zone")
+    strain = _present(scores, "strain")
+    sleep_score = _present(scores, "sleep_score")
+    steps = _present(scores, "steps")
+    active_cal = _present(scores, "active_cal")
+    hrv_samples = sum(v is not None for v in hrv_30d)
+    recovery_samples = sum(day["rec"] is not None for day in recovery_week)
+    strain_samples = sum(day["strain"] is not None for day in recovery_week)
+    steps_samples = sum(day["v"] is not None for day in steps_week)
+    protein_samples = sum(day["p"] is not None for day in protein_week)
+    strain_target = _present(scores, "strain_target")
+    if not isinstance(strain_target, dict):
+        strain_target = {"low": 8, "high": 12, "optimal": 10, "reason": "No data yet"}
+        strain_target_semantics = _metric_semantics("fallback")
+    else:
+        strain_target_semantics = _metric_semantics("derived")
+
+    baseline_hrv = _present(baselines, "hrv")
+    baseline_rhr = _present(baselines, "rhr")
+    baseline_resp = _present(baselines, "resp")
+    baseline_steps = _present(baselines, "steps")
+
     payload = {
         "date": date_display,
         "dateFull": date_full,
         "updatedAt": updated_at,
-        "recovery": scores.get("recovery", 0),
-        "recoveryZone": scores.get("recovery_zone", "yellow"),
-        "strain": scores.get("strain", 0),
-        "strainTarget": scores.get("strain_target", {"low": 8, "high": 12, "optimal": 10, "reason": "No data yet"}),
+        "recovery": recovery,
+        "recoveryZone": recovery_zone,
+        "strain": strain,
+        "strainTarget": strain_target,
         "sleep": {
-            "score": scores.get("sleep_score", 0),
+            "score": sleep_score,
             "hours": sleep_hours,
             "minutes": sleep_minutes,
-            "efficiency": sleep.get("efficiency", 0),
-            "deep": sleep.get("deep_min", 0),
-            "rem": sleep.get("rem_min", 0),
-            "core": sleep.get("core_min", 0),
-            "awake": sleep.get("awake_min", 0),
+            "efficiency": _present(sleep, "efficiency"),
+            "deep": _present(sleep, "deep_min"),
+            "rem": _present(sleep, "rem_min"),
+            "core": _present(sleep, "core_min"),
+            "awake": _present(sleep, "awake_min"),
             "qualityFlag": sleep.get("quality_flag"),
             "qualityReasons": sleep.get("quality_reasons") or [],
             "confidence": sleep.get("confidence"),
@@ -370,22 +426,22 @@ def _get_today():
             "componentScores": sleep_component_scores,
         },
         "sleepBank": sleep_bank,
-        "sleepNeedTonight": scores.get("sleep_need", {}),
+        "sleepNeedTonight": scores.get("sleep_need") if isinstance(scores.get("sleep_need"), dict) and scores.get("sleep_need") else None,
         "hrv": scores.get("hrv"),
         "rhr": scores.get("rhr"),
         "resp": scores.get("resp"),
         "spo2": scores.get("spo2"),
         "wristTemp": scores.get("wrist_temp"),
         "recoveryComponents": scores.get("recovery_components"),
-        "steps": scores.get("steps") or 0,
+        "steps": steps,
         "stepsGoal": 10000,
         "calories": {
-            "active": scores.get("active_cal") or 0,
-            "resting": 1680,
+            "active": active_cal,
+            "resting": None,
         },
-        "water": water_total,
+        "water": water_total if water_has_data else None,
         "waterGoal": targets.get("water", 100),
-        "caffeineMg": caffeine_total,
+        "caffeineMg": caffeine_total if caffeine_has_data else None,
         "caffeineGoal": targets.get("caffeine", 400),
         "nutritionHasData": nutrition_has_data,
         "recoveryWeek": recovery_week,
@@ -401,11 +457,44 @@ def _get_today():
         "journalLastNight": journal_last_night,
         "journalTagsToday": today_journal_tags,
         "base": {
-            "hrv": baselines.get("hrv", 48),
-            "rhr": baselines.get("rhr", 64),
-            "resp": baselines.get("resp", 14.5),
+            "hrv": baseline_hrv,
+            "rhr": baseline_rhr,
+            "resp": baseline_resp,
             "sleepNeed": 7.5,
-            "steps": baselines.get("steps", 10000),
+            "steps": baseline_steps,
+        },
+        "metricSemantics": {
+            "recovery": _metric_semantics("derived") if recovery is not None else _metric_semantics(availability="unavailable"),
+            "recoveryZone": _metric_semantics("derived") if recovery_zone is not None else _metric_semantics(availability="unavailable"),
+            "strain": _metric_semantics("derived") if strain is not None else _metric_semantics(availability="unavailable"),
+            "strainTarget": strain_target_semantics,
+            "sleep": _metric_semantics("derived") if sleep_score is not None else _metric_semantics(availability="unavailable"),
+            "sleepNeedTonight": _metric_semantics("derived") if scores.get("sleep_need") else _metric_semantics(availability="unavailable"),
+            "hrv": _metric_semantics("observed") if _present(scores, "hrv") is not None else _metric_semantics(availability="unavailable"),
+            "rhr": _metric_semantics("observed") if _present(scores, "rhr") is not None else _metric_semantics(availability="unavailable"),
+            "resp": _metric_semantics("observed") if _present(scores, "resp") is not None else _metric_semantics(availability="unavailable"),
+            "spo2": _metric_semantics("observed") if _present(scores, "spo2") is not None else _metric_semantics(availability="unavailable"),
+            "wristTemp": _metric_semantics("observed") if _present(scores, "wrist_temp") is not None else _metric_semantics(availability="unavailable"),
+            "steps": _metric_semantics("observed") if steps is not None else _metric_semantics(availability="unavailable"),
+            "stepsGoal": _metric_semantics("configured_target"),
+            "activeCalories": _metric_semantics("observed") if active_cal is not None else _metric_semantics(availability="unavailable"),
+            "restingCalories": _metric_semantics(availability="unavailable"),
+            "water": _metric_semantics("observed") if water_has_data else _metric_semantics(availability="unavailable"),
+            "waterGoal": _metric_semantics("configured_target" if "nutrition_targets" in config else "fallback"),
+            "caffeine": _metric_semantics("observed") if caffeine_has_data else _metric_semantics(availability="unavailable"),
+            "caffeineGoal": _metric_semantics("configured_target" if "nutrition_targets" in config else "fallback"),
+            "nutritionTargets": _metric_semantics("configured_target" if "nutrition_targets" in config else "fallback"),
+            "protein": _metric_semantics("derived") if _present(scores, "protein_total") is not None else _metric_semantics(availability="unavailable"),
+            "recoveryWeek": _metric_semantics("derived", _history_availability(recovery_samples, 7), samples=recovery_samples, expectedSamples=7),
+            "strainWeek": _metric_semantics("derived", _history_availability(strain_samples, 7), samples=strain_samples, expectedSamples=7),
+            "hrv30d": _metric_semantics("observed", _history_availability(hrv_samples, 30), samples=hrv_samples, expectedSamples=30),
+            "stepsWeek": _metric_semantics("observed", _history_availability(steps_samples, 7), samples=steps_samples, expectedSamples=7),
+            "proteinWeek": _metric_semantics("derived", _history_availability(protein_samples, 7), samples=protein_samples, expectedSamples=7),
+            "baseHrv": _metric_semantics("derived") if baseline_hrv is not None else _metric_semantics(availability="insufficient_history"),
+            "baseRhr": _metric_semantics("derived") if baseline_rhr is not None else _metric_semantics(availability="insufficient_history"),
+            "baseResp": _metric_semantics("derived") if baseline_resp is not None else _metric_semantics(availability="insufficient_history"),
+            "baseSteps": _metric_semantics("derived") if baseline_steps is not None else _metric_semantics(availability="insufficient_history"),
+            "baseSleepNeed": _metric_semantics("configured_target"),
         },
     }
 
@@ -905,35 +994,35 @@ def _prepare_planned_workout(proposal, todays_workouts):
     }
 
 
-def _build_coach_insights(scores, baselines, targets, water_total):
+def _build_coach_insights(scores, baselines, targets, water_total, water_has_data):
     """Generate coach insight cards based on current state."""
     insights = []
 
-    recovery = scores.get("recovery", 0)
-    zone = scores.get("recovery_zone", "yellow")
+    recovery = _present(scores, "recovery")
+    zone = _present(scores, "recovery_zone")
     hrv = scores.get("hrv")
     rhr = scores.get("rhr")
     strain_target = scores.get("strain_target", {})
 
-    if zone == "green":
+    if recovery is not None and zone == "green":
         body = f"Nervous system's fresh"
         if hrv:
             body += f" (HRV {hrv} ms"
-            base_hrv = baselines.get("hrv", 48)
-            if hrv > base_hrv:
+            base_hrv = _present(baselines, "hrv")
+            if base_hrv is not None and hrv > base_hrv:
                 body += ", above your usual"
             body += ")"
         if rhr:
             body += f". Heart's relaxed (pulse {rhr})"
         body += f". {strain_target.get('reason', 'Train hard today')}."
         insights.append({"type": "recovery", "title": "You're recovered — go train", "body": body, "tag": "green", "icon": "🟢"})
-    elif zone == "yellow":
+    elif recovery is not None and zone == "yellow":
         insights.append({"type": "recovery", "title": "Moderate recovery — train smart", "body": f"Recovery at {recovery}%. Keep intensity moderate, listen to your body.", "tag": "yellow", "icon": "🟡"})
-    else:
+    elif recovery is not None and zone == "red":
         insights.append({"type": "recovery", "title": "Low recovery — rest day", "body": f"Recovery at {recovery}%. Your body needs rest. Walk or stretch only.", "tag": "red", "icon": "🔴"})
 
-    protein = scores.get("protein_total", 0)
-    if protein < 180:
+    protein = _present(scores, "protein_total")
+    if protein is not None and protein < 180:
         gap = 180 - protein
         insights.append({
             "type": "protein",
@@ -944,7 +1033,7 @@ def _build_coach_insights(scores, baselines, targets, water_total):
         })
 
     water_goal = targets.get("water", 100)
-    if water_total < water_goal * 0.5:
+    if water_has_data and water_total < water_goal * 0.5:
         remaining = water_goal - water_total
         insights.append({
             "type": "hydration",

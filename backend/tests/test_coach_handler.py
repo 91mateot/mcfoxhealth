@@ -315,11 +315,11 @@ def test_snapshot_with_null_vitals(patched_context):
     """A snapshot with no HRV/RHR yet should degrade gracefully."""
     snapshot = {
         "date": "Tue, Apr 28",
-        "recovery": 70,
-        "recoveryZone": "yellow",
+        "recovery": None,
+        "recoveryZone": None,
         "hrv": None,
         "rhr": None,
-        "strain": 0,
+        "strain": None,
         "strainTarget": {},
         "sleep": {},
         "sleepNeedTonight": {},
@@ -327,8 +327,18 @@ def test_snapshot_with_null_vitals(patched_context):
         "mealsToday": [],
         "nutritionTargets": {},
         "base": {},
+        "metricSemantics": {
+            "recovery": {"availability": "unavailable"},
+            "strain": {"availability": "unavailable"},
+            "protein": {"availability": "unavailable"},
+        },
     }
     prompt = patched_context.build_system_prompt(snapshot)
     assert "HRV: n/a" in prompt
     assert "Resting HR: n/a" in prompt
+    assert "Recovery: n/a" in prompt
+    assert "Strain so far: n/a" in prompt
+    assert "Protein: n/a" in prompt
+    assert "Water: n/a" in prompt
+    assert "None%" not in prompt
     assert "No meals logged yet today." in prompt

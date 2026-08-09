@@ -10,7 +10,7 @@ interface HydrationDetailProps {
   open: boolean;
   onClose: () => void;
   date: string;
-  water: number;
+  water: number | null;
   waterGoal: number;
   waterLogs: WaterLog[];
   meals: Meal[];
@@ -63,8 +63,10 @@ export function HydrationDetail({ C, open, onClose, date, water, waterGoal, wate
   }, [waterLogs, meals]);
 
   const totalShown = rows.reduce((s, r) => s + r.oz, 0);
-  const pct = waterGoal > 0 ? Math.round((water / waterGoal) * 100) : 0;
-  const remaining = Math.max(0, waterGoal - water);
+  const available = water != null;
+  const measuredWater = water ?? 0;
+  const pct = available && waterGoal > 0 ? Math.round((measuredWater / waterGoal) * 100) : null;
+  const remaining = available ? Math.max(0, waterGoal - measuredWater) : null;
 
   const onDelete = async (id: string) => {
     if (busyId) return;
@@ -83,16 +85,16 @@ export function HydrationDetail({ C, open, onClose, date, water, waterGoal, wate
     <Sheet C={C} open={open} onClose={onClose} title="Hydration" height="72%">
       <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 8 }}>
         <div style={{ fontSize: 32, fontWeight: 800, fontFamily: MONO, color: C.cyan, letterSpacing: "-.04em" }}>
-          {roundOz(water)}
+          {available ? roundOz(measuredWater) : "—"}
         </div>
         <div style={{ fontSize: 12, color: C.t3, fontFamily: MONO }}>
-          / {waterGoal} oz · {pct}%
+          {available ? `/ ${waterGoal} oz · ${pct}%` : "unavailable"}
         </div>
         <div style={{ marginLeft: "auto", fontSize: 11, color: C.t4, fontFamily: MONO }}>
-          {roundOz(remaining)} oz left
+          {remaining != null ? `${roundOz(remaining)} oz left` : ""}
         </div>
       </div>
-      <ProgressBar C={C} val={water} max={waterGoal} color={C.cyan} height={6} />
+      <ProgressBar C={C} val={measuredWater} max={waterGoal} color={C.cyan} height={6} />
 
       <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 14, marginBottom: 6, letterSpacing: ".05em" }}>
         CONTRIBUTIONS ({rows.length})
@@ -155,7 +157,7 @@ export function HydrationDetail({ C, open, onClose, date, water, waterGoal, wate
         </div>
       ))}
 
-      {Math.abs(totalShown - water) > 0.5 && (
+      {water != null && Math.abs(totalShown - water) > 0.5 && (
         <div style={{ fontSize: 10, color: C.t4, fontFamily: MONO, marginTop: 10 }}>
           Note: contributions total {roundOz(totalShown)} oz. Discrepancy vs {roundOz(water)} oz panel total is usually a beverage whose companion water row is missing its source link.
         </div>

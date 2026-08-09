@@ -35,7 +35,7 @@ export function RingDetailSheet({ C, open, onClose, which, today }: RingDetailSh
       const rows: { k: string; v: string; sub: string; w: string; col: string }[] = [
         { k: "HRV · nervous system", v: today.hrv != null ? `${today.hrv} ms` : "—", sub: "higher = more rested", w: "main driver", col: C.primary },
         { k: "Resting pulse", v: today.rhr != null ? `${today.rhr} bpm` : "—", sub: "lower than usual = good", w: "supporting", col: C.primary },
-        { k: "Sleep last night", v: `${today.sleep.score}%`, sub: `${today.sleep.hours}h ${today.sleep.minutes}m`, w: "supporting", col: C.primary },
+        { k: "Sleep last night", v: today.sleep.score != null ? `${today.sleep.score}%` : "—", sub: today.sleep.hours != null ? `${today.sleep.hours}h ${today.sleep.minutes ?? 0}m` : "unavailable", w: "supporting", col: C.primary },
       ];
       if (today.resp != null) {
         rows.push({ k: "Breathing rate", v: `${today.resp} /min`, sub: "while asleep · low and steady is ideal", w: "minor", col: C.primary });
@@ -47,10 +47,10 @@ export function RingDetailSheet({ C, open, onClose, which, today }: RingDetailSh
         rows.push({ k: "Skin temperature", v: `${today.wristTemp}°`, sub: "early signal for illness or inflammation", w: "minor", col: C.primary });
       }
       return {
-        title: `Recovered · ${today.recovery}%`,
+        title: today.recovery != null ? `Recovered · ${today.recovery}%` : "Recovery unavailable",
         color: C.primary,
-        hero: String(today.recovery),
-        heroUnit: "%",
+        hero: today.recovery != null ? String(today.recovery) : "—",
+        heroUnit: today.recovery != null ? "%" : "",
         what: "How ready your body is, on a 0–100 scale.",
         blurb:
           "Built mostly from how much your heart-rate varies (HRV), how hard your heart's working at rest, and how well you slept. Higher = more recovered.",
@@ -60,12 +60,12 @@ export function RingDetailSheet({ C, open, onClose, which, today }: RingDetailSh
     strain: {
       title: "Strain today",
       color: C.warn,
-      hero: (today.strain ?? 0).toFixed(1),
+      hero: today.strain != null ? today.strain.toFixed(1) : "—",
       heroUnit: "/21",
       what: "How hard you've pushed your heart today.",
       blurb: `A 0–21 score of total cardiovascular work — time at elevated heart rate. Target today: ${today.strainTarget.low}–${today.strainTarget.high} (${today.strainTarget.reason}).`,
       rows: [
-        { k: "Calories burned", v: `${today.calories.active} kcal`, sub: "day so far", w: "", col: C.warn },
+        { k: "Calories burned", v: today.calories.active != null ? `${today.calories.active} kcal` : "—", sub: today.calories.active != null ? "day so far" : "unavailable", w: "", col: C.warn },
         { k: "Target low", v: String(today.strainTarget.low), sub: "bottom of band", w: "", col: C.warn },
         { k: "Target high", v: String(today.strainTarget.high), sub: "top of band", w: "", col: C.warn },
         { k: "Optimal", v: String(today.strainTarget.optimal), sub: "midpoint", w: "", col: C.warn },
@@ -74,18 +74,18 @@ export function RingDetailSheet({ C, open, onClose, which, today }: RingDetailSh
     sleep: (() => {
       const s = today.sleep;
       const rows: { k: string; v: string; sub: string; w: string; col: string }[] = [
-        { k: "Total time asleep", v: `${s.hours}h ${s.minutes}m`, sub: "needed 7h 30m", w: "", col: C.cyan },
-        { k: "Sleep efficiency", v: `${s.efficiency}%`, sub: "how still you were", w: "good >90%", col: C.cyan },
+        { k: "Total time asleep", v: s.hours != null ? `${s.hours}h ${s.minutes ?? 0}m` : "—", sub: s.hours != null ? "needed 7h 30m" : "unavailable", w: "", col: C.cyan },
+        { k: "Sleep efficiency", v: s.efficiency != null ? `${s.efficiency}%` : "—", sub: s.efficiency != null ? "how still you were" : "unavailable", w: s.efficiency != null ? "good >90%" : "", col: C.cyan },
         {
           k: "Deep sleep",
-          v: `${Math.floor(s.deep / 60)}h ${s.deep % 60}m`,
+          v: s.deep != null ? `${Math.floor(s.deep / 60)}h ${s.deep % 60}m` : "—",
           sub: "physical recovery",
           w: "healthy",
           col: "#3b5cff",
         },
         {
           k: "Dream sleep (REM)",
-          v: `${Math.floor(s.rem / 60)}h ${s.rem % 60}m`,
+          v: s.rem != null ? `${Math.floor(s.rem / 60)}h ${s.rem % 60}m` : "—",
           sub: "memory & mood",
           w: "healthy",
           col: C.purple,
@@ -122,10 +122,12 @@ export function RingDetailSheet({ C, open, onClose, which, today }: RingDetailSh
       return {
         title: "Sleep last night",
         color: C.cyan,
-        hero: `${s.hours}:${String(s.minutes).padStart(2, "0")}`,
+        hero: s.hours != null ? `${s.hours}:${String(s.minutes ?? 0).padStart(2, "0")}` : "—",
         heroUnit: "",
         what: "How much and how well you slept.",
-        blurb: `You slept ${s.hours}h ${s.minutes}m. ${s.efficiency}% of that was actually asleep.`,
+        blurb: s.hours != null
+          ? `You slept ${s.hours}h ${s.minutes ?? 0}m. ${s.efficiency != null ? `${s.efficiency}% of that was actually asleep.` : "Efficiency is unavailable."}`
+          : "No sleep observation is available for last night.",
         rows,
       };
     })(),
@@ -165,11 +167,11 @@ export function RingDetailSheet({ C, open, onClose, which, today }: RingDetailSh
         <SleepComponentGrid
           C={C}
           scores={today.sleep.componentScores}
-          deepMin={today.sleep.deep}
-          remMin={today.sleep.rem}
-          hours={today.sleep.hours}
-          minutes={today.sleep.minutes}
-          efficiency={today.sleep.efficiency}
+          deepMin={today.sleep.deep ?? 0}
+          remMin={today.sleep.rem ?? 0}
+          hours={today.sleep.hours ?? 0}
+          minutes={today.sleep.minutes ?? 0}
+          efficiency={today.sleep.efficiency ?? 0}
           arousalCount={today.sleep.arousalCount}
           hrDipPct={today.sleep.hrDipPct ?? null}
         />
