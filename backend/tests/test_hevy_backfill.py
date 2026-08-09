@@ -24,6 +24,8 @@ import json
 import os
 import sys
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "shared"))
 sys.path.insert(0, os.path.join(ROOT, "functions", "ingest"))
@@ -320,6 +322,156 @@ def test_backfill_preserves_legacy_utc_date_key_instead_of_rekeying_history():
     assert rows[0]["analysis_date"] == "2026-07-01"
     assert rows[0]["legacy_date_preserved"] is True
     assert body["dates"] == ["2026-07-02"]
+
+
+def test_legacy_lookup_failure_stops_before_writes_and_watermark_advance():
+    h, tables = _fresh_module()
+    workout = {
+        "id": "lookup-failure",
+        "title": "Evening Lift",
+        "start_time": "2026-07-02T00:30:00Z",
+        "end_time": "2026-07-02T01:30:00Z",
+        "exercises": [
+            {"title": "Bench", "sets": [{"weight_kg": 60, "reps": 10}]},
+        ],
+    }
+    legacy = h.workout_to_row(workout)
+    assert legacy["analysis_date"] == "2026-07-01"
+    legacy["date"] = "2026-07-02"
+    for key in (
+        "analysis_date",
+        "analysis_timezone",
+        "date_derivation",
+        "source_date",
+        "source_utc_offset",
+        "source_start_time",
+        "source_end_time",
+    ):
+        legacy.pop(key, None)
+    tables["WORKOUTS_TABLE"].put_item(Item=legacy)
+    tables["EXERCISES_TABLE"].put_item(Item={
+        "canonical": "bench_press",
+        "date": "2026-07-02",
+        "source": "hevy",
+    })
+    old_watermark = "2026-07-27T00:00:00Z"
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": old_watermark,
+    })
+    _stub_offline(h, events={"updated": [workout], "deleted": []})
+
+    def fail_scan(**_kwargs):
+        raise RuntimeError("simulated DynamoDB scan failure")
+
+    tables["WORKOUTS_TABLE"].scan = fail_scan
+    response = h.lambda_handler({"action": "hevy_poll"}, None)
+    body = json.loads(response["body"])
+
+    assert body == {
+        "status": "error",
+        "reason": "hevy legacy lookup failed",
+        "retryable": True,
+    }
+    workout_rows = [
+        item for item in tables["WORKOUTS_TABLE"].items
+        if item["strava_id"] == "hevy_lookup-failure"
+    ]
+    exercise_rows = [
+        item for item in tables["EXERCISES_TABLE"].items
+        if item["canonical"] == "bench_press"
+    ]
+    assert len(workout_rows) == 1
+    assert workout_rows[0]["date"] == "2026-07-02"
+    assert not any(item["date"] == "2026-07-01" for item in workout_rows)
+    assert len(exercise_rows) == 1
+    assert exercise_rows[0]["date"] == "2026-07-02"
+    assert not any(item["date"] == "2026-07-01" for item in exercise_rows)
+    watermark = tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]
+    assert watermark["last_sync"] == old_watermark
+
+
+def test_confirmed_legacy_not_found_allows_legitimate_new_write():
+    h, tables = _fresh_module()
+    outcome = h._apply_hevy_workout(
+        _hevy_workout("new-workout"),
+        {},
+        tables["WORKOUTS_TABLE"],
+        tables["EXERCISES_TABLE"],
+        force=False,
+    )
+
+    assert outcome["workout_written"] is True
+    assert outcome["ex_rows_written"] == 1
+    assert len(tables["WORKOUTS_TABLE"].items) == 1
+    assert len(tables["EXERCISES_TABLE"].items) == 1
+
+
+def test_lookup_exception_from_apply_is_distinct_from_confirmed_not_found():
+    h, tables = _fresh_module()
+
+    def fail_scan(**_kwargs):
+        raise RuntimeError("simulated DynamoDB scan failure")
+
+    tables["WORKOUTS_TABLE"].scan = fail_scan
+    with pytest.raises(h.HevyLegacyLookupError):
+        h._apply_hevy_workout(
+            _hevy_workout("unsafe-identity"),
+            {},
+            tables["WORKOUTS_TABLE"],
+            tables["EXERCISES_TABLE"],
+            force=False,
+        )
+    assert tables["WORKOUTS_TABLE"].items == []
+    assert tables["EXERCISES_TABLE"].items == []
+
+
+def test_incremental_poll_preserves_existing_legacy_date_key():
+    h, tables = _fresh_module()
+    workout = {
+        "id": "legacy-incremental",
+        "title": "Evening Lift",
+        "start_time": "2026-07-02T00:30:00Z",
+        "end_time": "2026-07-02T01:30:00Z",
+        "exercises": [
+            {"title": "Bench", "sets": [{"weight_kg": 60, "reps": 10}]},
+        ],
+    }
+    legacy = h.workout_to_row(workout)
+    assert legacy["analysis_date"] == "2026-07-01"
+    legacy["date"] = "2026-07-02"
+    legacy["volume_lb"] = 0  # ensure the incremental update performs a write
+    for key in (
+        "analysis_date",
+        "analysis_timezone",
+        "date_derivation",
+        "source_date",
+        "source_utc_offset",
+        "source_start_time",
+        "source_end_time",
+    ):
+        legacy.pop(key, None)
+    tables["WORKOUTS_TABLE"].put_item(Item=legacy)
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": "2026-07-27T00:00:00Z",
+    })
+    _stub_offline(h, events={"updated": [workout], "deleted": []})
+
+    response = h.lambda_handler({"action": "hevy_poll"}, None)
+    body = json.loads(response["body"])
+    rows = [
+        item for item in tables["WORKOUTS_TABLE"].items
+        if item["strava_id"] == "hevy_legacy-incremental"
+    ]
+
+    assert body["mode"] == "incremental"
+    assert len(rows) == 1
+    assert rows[0]["date"] == "2026-07-02"
+    assert rows[0]["analysis_date"] == "2026-07-01"
+    assert rows[0]["legacy_date_preserved"] is True
 
 
 def test_backfill_default_page_span_covers_full_history():

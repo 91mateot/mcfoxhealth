@@ -733,10 +733,21 @@ def _log_hae_summary(data_list):
 
 
 def _hae_temporal_metadata(value):
-    """Derive HAE calendar context without inventing missing timezone data."""
+    """Derive HAE context without mistaking UTC for event-local time.
+
+    HAE's non-zero device offsets carry useful local-day context. A bare UTC
+    representation (``Z`` / ``+00:00``) supplies only an absolute instant, so
+    it must use the configured home timezone unless separate local context is
+    added in a future payload contract.
+    """
+    parsed = parse_timestamp(value)
+    source_offset_trusted = False
+    if parsed is not None and parsed.tzinfo is not None:
+        offset = parsed.utcoffset()
+        source_offset_trusted = offset is not None and offset.total_seconds() != 0
     return temporal_metadata(
         value,
-        source_timezone_trusted=True,
+        source_timezone_trusted=source_offset_trusted,
         allow_naive_source_date=True,
     )
 
@@ -1479,9 +1490,23 @@ def _handle_hevy_sync(event):
     #    exercise write). So the dupe-check may only suppress the redundant
     #    fitness-workouts put_item; it must NEVER gate the exercise-row write.
     for workout in updated_workouts:
-        outcome = _apply_hevy_workout(
-            workout, templates, workouts_table, exercises_table, force=backfill
-        )
+        try:
+            outcome = _apply_hevy_workout(
+                workout, templates, workouts_table, exercises_table, force=backfill
+            )
+        except HevyLegacyLookupError:
+            # Identity is unknown, so writing under the newly derived date can
+            # duplicate a legacy UTC-keyed row. Stop before either store or the
+            # watermark advances; an ordinary future poll can retry safely.
+            logger.exception(
+                "hevy sync stopped: legacy identity lookup failed for %s",
+                workout.get("id"),
+            )
+            return _resp(200, {
+                "status": "error",
+                "reason": "hevy legacy lookup failed",
+                "retryable": True,
+            })
         if outcome is None:
             continue
         if outcome["workout_written"]:
@@ -1576,6 +1601,10 @@ def _hevy_exercise_rows_exist(exercises_table, date, canonicals):
     return True
 
 
+class HevyLegacyLookupError(RuntimeError):
+    """Raised when legacy Hevy identity cannot be determined safely."""
+
+
 def _find_existing_hevy_row(table, row):
     """Find an existing Hevy row even when its historical date key differs.
 
@@ -1584,16 +1613,16 @@ def _find_existing_hevy_row(table, row):
     so an update/backfill must discover the legacy key and keep writing there.
     New Hevy ids use the canonical home-timezone date from ``workout_to_row``.
     """
-    existing = get_item(table, {"date": row["date"], "strava_id": row["strava_id"]})
-    if existing:
-        return existing
-
-    params = {
-        "FilterExpression": "strava_id = :sid",
-        "ExpressionAttributeValues": {":sid": row["strava_id"]},
-        "Limit": 1000,
-    }
     try:
+        existing = get_item(table, {"date": row["date"], "strava_id": row["strava_id"]})
+        if existing:
+            return existing
+
+        params = {
+            "FilterExpression": "strava_id = :sid",
+            "ExpressionAttributeValues": {":sid": row["strava_id"]},
+            "Limit": 1000,
+        }
         while True:
             resp = table.scan(**params)
             for item in resp.get("Items", []):
@@ -1603,8 +1632,9 @@ def _find_existing_hevy_row(table, row):
             if not last_key:
                 break
             params["ExclusiveStartKey"] = last_key
-    except Exception:
+    except Exception as exc:
         logger.exception("hevy legacy-date lookup failed for %s", row["strava_id"])
+        raise HevyLegacyLookupError(row["strava_id"]) from exc
     return None
 
 
