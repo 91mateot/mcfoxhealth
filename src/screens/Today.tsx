@@ -37,15 +37,19 @@ interface TodayScreenProps {
 export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMeal, onLogWorkout, onOpenJournal, onOpenJournalHistory }: TodayScreenProps) {
   const [hydrationOpen, setHydrationOpen] = useState(false);
   const need = data.sleepNeedTonight;
-  const zone = data.recoveryZone ?? (data.recovery >= 67 ? "green" : data.recovery >= 34 ? "yellow" : "red");
-  const zoneColor = zone === "green" ? C.primary : zone === "yellow" ? C.yellow : C.danger;
-  const zoneLabel = zone === "green" ? "Recovered" : zone === "yellow" ? "Moderate" : "Depleted";
+  const recoveryAvailable = data.recovery != null && data.recoveryZone != null;
+  const sleepAvailable = data.sleep.score != null && data.sleep.qualityFlag !== "truncated";
+  const zone = recoveryAvailable ? data.recoveryZone : null;
+  const zoneColor = zone === "green" ? C.primary : zone === "yellow" ? C.yellow : zone === "red" ? C.danger : C.t3;
+  const zoneLabel = zone === "green" ? "Recovered" : zone === "yellow" ? "Moderate" : zone === "red" ? "Depleted" : "Data pending";
   const zoneHeadline =
     zone === "green"
       ? "Train today."
       : zone === "yellow"
       ? "Train smart."
-      : "Active recovery.";
+      : zone === "red"
+      ? "Active recovery."
+      : "Recovery unavailable.";
   const hour = new Date().getHours();
   const greeting =
     hour < 5 ? "Late night" : hour < 12 ? "Morning" : hour < 17 ? "Afternoon" : "Evening";
@@ -63,7 +67,7 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
           <span style={{ color: zoneColor }}>{zoneLabel}.</span> {zoneHeadline}
         </div>
         <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-          <Chip C={C} color={zoneColor}>● {zone.toUpperCase()}</Chip>
+          <Chip C={C} color={zoneColor}>● {zone?.toUpperCase() ?? "NO DATA"}</Chip>
           <Chip C={C} color={C.t3}>RECOMP</Chip>
           <FreshnessIndicator C={C} updatedAt={data.updatedAt} />
         </div>
@@ -77,41 +81,45 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 7, marginBottom: 10 }}>
         <BigRing
           C={C}
-          val={data.recovery}
+          val={data.recovery ?? 0}
           max={100}
           color={zoneColor}
           label="Recovery"
-          display={data.recovery}
-          unit="%"
-          tag={zone === "green" ? "Ready" : zone === "yellow" ? "Mod" : "Rest"}
+          display={data.recovery ?? "—"}
+          unit={recoveryAvailable ? "%" : "unavailable"}
+          tag={zone === "green" ? "Ready" : zone === "yellow" ? "Mod" : zone === "red" ? "Rest" : "No data"}
           tagC={zoneColor}
+          pending={!recoveryAvailable}
           onClick={() => onRingTap("recovery")}
         />
         <StrainRing C={C} data={data} onClick={() => onRingTap("strain")} />
         <BigRing
           C={C}
-          val={data.sleep.qualityFlag === "truncated" ? 0 : data.sleep.score}
+          val={sleepAvailable ? data.sleep.score ?? 0 : 0}
           max={100}
           color={data.sleep.qualityFlag === "truncated" ? C.t3 : C.cyan}
           label="Sleep"
-          display={data.sleep.qualityFlag === "truncated" ? "—" : data.sleep.score}
-          unit={data.sleep.qualityFlag === "truncated" ? "incomplete" : `${data.sleep.hours}h ${data.sleep.minutes}m`}
+          display={sleepAvailable ? data.sleep.score ?? "—" : "—"}
+          unit={data.sleep.qualityFlag === "truncated" ? "incomplete" : sleepAvailable ? `${data.sleep.hours}h ${data.sleep.minutes}m` : "unavailable"}
           tag={
             data.sleep.qualityFlag === "truncated"
               ? "Data"
-              : data.sleep.score >= 80
+              : !sleepAvailable
+              ? "No data"
+              : data.sleep.score != null && data.sleep.score >= 80
               ? "Solid"
-              : data.sleep.score >= 60
+              : data.sleep.score != null && data.sleep.score >= 60
               ? "Ok"
               : "Low"
           }
           tagC={data.sleep.qualityFlag === "truncated" ? C.t3 : C.cyan}
+          pending={!sleepAvailable}
           onClick={() => onRingTap("sleep")}
         />
       </div>
 
       {/* Sleep Bank — rolling 7-night surplus/deficit. Advisory only. */}
-      {data.sleepBank && <SleepBankCard C={C} bank={data.sleepBank} bedtimeBy={need.bedtimeBy} />}
+      {data.sleepBank && <SleepBankCard C={C} bank={data.sleepBank} bedtimeBy={need?.bedtimeBy} />}
 
       {/* Today's workout card */}
       {data.plannedWorkout && (
@@ -124,9 +132,9 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
           In plain English
         </div>
         <div style={{ fontSize: 13, color: C.t, marginTop: 6, lineHeight: 1.5, fontWeight: 500 }}>
-          Recovery is <span style={{ color: zoneColor, fontWeight: 700 }}>{data.recovery}%</span>.
+          {recoveryAvailable ? <>Recovery is <span style={{ color: zoneColor, fontWeight: 700 }}>{data.recovery}%</span>. </> : <>Recovery data is <span style={{ color: C.t3, fontWeight: 700 }}>unavailable</span>. </>}
           Strain target <span style={{ color: C.warn, fontWeight: 700 }}>{data.strainTarget.low}–{data.strainTarget.high}</span>,
-          then in bed by <span style={{ color: C.cyan, fontWeight: 700 }}>{need.bedtimeBy}</span>.
+          {need?.bedtimeBy ? <> then in bed by <span style={{ color: C.cyan, fontWeight: 700 }}>{need.bedtimeBy}</span>.</> : <> with sleep need pending.</>}
         </div>
         <button
           onClick={() => onRingTap("primer")}
@@ -243,7 +251,7 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
         C={C}
         title="HRV · nervous system freshness"
         right={
-          data.hrv != null ? (
+          data.hrv != null && data.base.hrv != null ? (
             <Chip C={C} color={data.hrv >= data.base.hrv ? C.primary : C.warn}>
               {data.hrv >= data.base.hrv ? "fresh today" : "below baseline"}
             </Chip>
@@ -259,16 +267,16 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
         <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 6 }}>
           <div style={{ fontSize: 24, fontWeight: 700, fontFamily: MONO, color: C.primary, letterSpacing: "-.04em" }}>
             {data.hrv ?? "—"}
-            <span style={{ fontSize: 12, color: C.t3, marginLeft: 3 }}>ms</span>
+            {data.hrv != null && <span style={{ fontSize: 12, color: C.t3, marginLeft: 3 }}>ms</span>}
           </div>
-          {data.hrv != null && (
+          {data.hrv != null && data.base.hrv != null && (
             <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO }}>
               today · {data.hrv >= data.base.hrv ? "above" : "below"} your {data.base.hrv} avg
             </div>
           )}
           <div style={{ marginLeft: "auto", fontSize: 11, color: C.t4, fontFamily: MONO }}>
             30d avg {(() => {
-              const vals = data.hrv30d.filter((v) => v > 0);
+              const vals = data.hrv30d.filter((v): v is number => v != null);
               return vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length) : "—";
             })()}
           </div>
@@ -280,7 +288,7 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
       <Panel C={C} title="7-day recovery" right={<Chip C={C}>tap a day</Chip>}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4 }}>
           {data.recoveryWeek.map((d, i) => {
-            const col = d.tag === "green" ? C.primary : d.tag === "yellow" ? C.yellow : C.danger;
+            const col = d.tag === "green" ? C.primary : d.tag === "yellow" ? C.yellow : d.tag === "red" ? C.danger : C.t4;
             return (
               <div
                 key={i}
@@ -297,10 +305,10 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
                 </div>
                 <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 1 }}>{d.date}</div>
                 <div style={{ fontSize: 14, fontWeight: 800, fontFamily: MONO, color: col, letterSpacing: "-.03em", marginTop: 4 }}>
-                  {d.rec || "·"}
+                  {d.rec ?? "·"}
                 </div>
                 <div style={{ height: 2.5, borderRadius: 2, background: C.s4, margin: "4px 4px 0", overflow: "hidden" }}>
-                  <div style={{ height: "100%", width: `${d.rec}%`, background: col }} />
+                  <div style={{ height: "100%", width: `${d.rec ?? 0}%`, background: col }} />
                 </div>
               </div>
             );
@@ -311,7 +319,7 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
       {/* Hydration + Caffeine */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <HydrationPanel C={C} water={data.water} waterGoal={data.waterGoal} onOpenDetail={nutrition ? () => setHydrationOpen(true) : undefined} />
-        <CaffeinePanel C={C} mg={data.caffeineMg ?? 0} goal={data.caffeineGoal ?? 400} />
+        <CaffeinePanel C={C} mg={data.caffeineMg ?? null} goal={data.caffeineGoal ?? 400} />
       </div>
       {nutrition && (
         <HydrationDetail
@@ -415,7 +423,16 @@ function FreshnessIndicator({ C, updatedAt }: { C: Palette; updatedAt: string | 
 }
 
 // Strain hero ring with target band overlay
-function StrainSoFar({ C, current, low, high }: { C: Palette; current: number; low: number; high: number }) {
+function StrainSoFar({ C, current, low, high }: { C: Palette; current: number | null; low: number; high: number }) {
+  if (current == null) {
+    return (
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase", letterSpacing: ".1em", fontWeight: 700 }}>Strain so far</div>
+        <div style={{ fontSize: 20, fontWeight: 800, fontFamily: MONO, color: C.t3, marginTop: 3 }}>—</div>
+        <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 2 }}>data unavailable</div>
+      </div>
+    );
+  }
   // Progress within the target band. Above the band we're "over",
   // below we're "to go", inside we're "on pace".
   const status: "under" | "in" | "over" = current < low ? "under" : current > high ? "over" : "in";
@@ -490,6 +507,7 @@ function SleepBankCard({
 function StrainRing({ C, data, onClick }: { C: Palette; data: TodayResponse; onClick: () => void }) {
   const max = 21;
   const val = data.strain;
+  const available = val != null;
   const tgt = data.strainTarget;
   const lowPct = tgt.low / max;
   const highPct = tgt.high / max;
@@ -505,7 +523,7 @@ function StrainRing({ C, data, onClick }: { C: Palette; data: TodayResponse; onC
   return (
     <button
       onClick={onClick}
-      aria-label={`Strain ${val.toFixed(1)} of 21, target ${tgt.low} to ${tgt.high}`}
+      aria-label={available ? `Strain ${val.toFixed(1)} of 21, target ${tgt.low} to ${tgt.high}` : `Strain unavailable, target ${tgt.low} to ${tgt.high}`}
       style={{
         background: C.s,
         borderRadius: 22,
@@ -544,16 +562,16 @@ function StrainRing({ C, data, onClick }: { C: Palette; data: TodayResponse; onC
             fill="none"
             strokeLinecap="round"
             strokeDasharray={ci}
-            strokeDashoffset={ci - (val / max) * ci}
+            strokeDashoffset={ci - ((val ?? 0) / max) * ci}
             style={{ transition: "stroke-dashoffset 1.2s cubic-bezier(.2,.8,.2,1)" }}
           />
         </svg>
         <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
           <div style={{ fontSize: 26, fontWeight: 700, fontFamily: MONO, letterSpacing: "-.05em", lineHeight: 1, color: C.warn }}>
-            {val.toFixed(1)}
+            {available ? val.toFixed(1) : "—"}
           </div>
           <div style={{ fontSize: 11, fontWeight: 500, color: C.t3, marginTop: 2, fontFamily: MONO }}>
-            aim {tgt.low}–{tgt.high}
+            {available ? `aim ${tgt.low}–${tgt.high}` : "unavailable"}
           </div>
         </div>
       </div>
@@ -569,7 +587,7 @@ function StrainRing({ C, data, onClick }: { C: Palette; data: TodayResponse; onC
           letterSpacing: ".08em",
         }}
       >
-        In progress
+        {available ? "In progress" : "No data"}
       </span>
     </button>
   );

@@ -12,11 +12,11 @@ export interface Mateo {
 }
 
 export interface Baselines {
-  hrv: number;
-  rhr: number;
+  hrv: number | null;
+  rhr: number | null;
   resp: number | null;
   sleepNeed: number;
-  steps: number;
+  steps: number | null;
 }
 
 export interface StrainTarget {
@@ -53,14 +53,14 @@ export interface SleepComponentScores {
 }
 
 export interface SleepStages {
-  score: number;
-  hours: number;
-  minutes: number;
-  efficiency: number;
-  deep: number;
-  rem: number;
-  core: number;
-  awake: number;
+  score: number | null;
+  hours: number | null;
+  minutes: number | null;
+  efficiency: number | null;
+  deep: number | null;
+  rem: number | null;
+  core: number | null;
+  awake: number | null;
   /** Band-2 additions. Optional for back-compat with older score rows. */
   qualityFlag?: SleepQualityFlag;
   qualityReasons?: string[];
@@ -98,26 +98,26 @@ export interface SleepNeed {
 export interface RecoveryDay {
   d: string;
   date: string;
-  rec: number;
+  rec: number | null;
   hrv: number | null;
   rhr: number | null;
   sleep: number | null;
-  strain: number;
-  tag: RecoveryTag;
+  strain: number | null;
+  tag: RecoveryTag | null;
   today?: boolean;
 }
 
 export interface StepsDay {
   d: string;
-  v: number;
+  v: number | null;
   today?: boolean;
 }
 
 export interface ProteinDay {
   d: string;
   date: string;
-  p: number;
-  cal: number;
+  p: number | null;
+  cal: number | null;
   flag?: boolean;
   today?: boolean;
   inProgress?: boolean;
@@ -241,19 +241,32 @@ export interface ACWR {
   interpretation: string;
 }
 
+export type MetricKind = "observed" | "derived" | "configured_target" | "fallback";
+export type MetricAvailability = "available" | "unavailable" | "insufficient_history";
+
+export interface MetricSemantics {
+  kind?: MetricKind;
+  availability: MetricAvailability;
+  samples?: number;
+  expectedSamples?: number;
+  reason?: string;
+}
+
+export type TodayMetricSemantics = Record<string, MetricSemantics>;
+
 export interface TodayResponse {
   date: string;
   dateFull: string;
   updatedAt?: string | null;
-  recovery: number;
-  recoveryZone?: RecoveryTag;
+  recovery: number | null;
+  recoveryZone?: RecoveryTag | null;
   recoveryComponents?: RecoveryComponents;
-  strain: number;
+  strain: number | null;
   strainProjected?: number;
   strainTarget: StrainTarget;
   acwr?: ACWR;
   sleep: SleepStages;
-  sleepNeedTonight: SleepNeed;
+  sleepNeedTonight: SleepNeed | null;
   /** 7-night rolling sleep bank. Null when no daily_scores rows carry a
    * sleep_bank_delta yet. */
   sleepBank?: SleepBank | null;
@@ -262,15 +275,16 @@ export interface TodayResponse {
   resp: number | null;
   spo2?: number | null;
   wristTemp?: number | null;
-  steps: number;
+  steps: number | null;
   stepsGoal: number;
-  calories: { active: number; resting: number };
-  water: number;
+  calories: { active: number | null; resting: number | null };
+  water: number | null;
   waterGoal: number;
-  caffeineMg?: number;
+  caffeineMg?: number | null;
   caffeineGoal?: number;
+  nutritionHasData?: boolean;
   recoveryWeek: RecoveryDay[];
-  hrv30d: number[];
+  hrv30d: Array<number | null>;
   stepsWeek: StepsDay[];
   mealsToday: Meal[];
   mealPlanned?: Meal;
@@ -280,6 +294,11 @@ export interface TodayResponse {
   coachInsights: CoachInsight[];
   plannedWorkout?: PlannedWorkout | null;
   base: Baselines;
+  /** Additive provenance/availability metadata for values that retain the
+   * legacy top-level response shape. Null remains the value-level signal for
+   * unavailable observations; this map explains why and distinguishes
+   * observations, derived values, targets, and legacy fallbacks. */
+  metricSemantics: TodayMetricSemantics;
   journal?: JournalToday;
   journalLastNight?: JournalLastNight;
   /** Raw tag list on today's journal row. Set whether or not the morning

@@ -68,7 +68,7 @@ export function TrainScreen({ C, today, workouts, onLogWorkout, onOpenWorkout, o
           items={today.recoveryWeek}
           accessor="strain"
           colorFn={(_it, v) => (v >= 14 ? C.warn : v >= 10 ? C.yellow : C.primary)}
-          valueFn={(it) => (it.strain ?? 0).toFixed(0)}
+          valueFn={(it) => it.strain != null ? it.strain.toFixed(0) : "—"}
         />
       </Panel>
 

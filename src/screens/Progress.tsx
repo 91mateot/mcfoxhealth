@@ -115,15 +115,18 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
   const leanMass = body.current?.leanMass ?? MATEO.leanMass;
   const avgWt = weight14d.length ? (weight14d.reduce((a, b) => a + b, 0) / weight14d.length).toFixed(1) : currentWeight.toFixed(1);
   const stepsWeek = today.stepsWeek ?? [];
-  const stepsSum = stepsWeek.reduce((a, s) => a + s.v, 0);
-  const stepsAvg = stepsWeek.length ? Math.round(stepsSum / stepsWeek.length) : 0;
+  const measuredSteps = stepsWeek.filter((day): day is typeof day & { v: number } => day.v != null);
+  const stepsSum = measuredSteps.reduce((a, s) => a + s.v, 0);
+  const stepsAvg = measuredSteps.length ? Math.round(stepsSum / measuredSteps.length) : null;
   const stepsGoal = today.stepsGoal || 1;
-  const stepsPct = Math.min(1, today.steps / stepsGoal);
-  const stepsPctDisplay = Math.round((today.steps / stepsGoal) * 100);
-  const stepsStatusColor = today.steps >= stepsGoal ? C.primary : today.steps >= stepsGoal * 0.7 ? C.yellow : C.warn;
-  const daysHit = stepsWeek.filter((d) => d.v >= stepsGoal).length;
+  const todaySteps = today.steps;
+  const stepsAvailable = todaySteps != null;
+  const stepsPct = todaySteps != null ? Math.min(1, todaySteps / stepsGoal) : 0;
+  const stepsPctDisplay = todaySteps != null ? Math.round((todaySteps / stepsGoal) * 100) : null;
+  const stepsStatusColor = todaySteps == null ? C.t3 : todaySteps >= stepsGoal ? C.primary : todaySteps >= stepsGoal * 0.7 ? C.yellow : C.warn;
+  const daysHit = measuredSteps.filter((d) => d.v >= stepsGoal).length;
   const peakDay = stepsWeek.reduce<{ d: string; v: number } | null>(
-    (best, s) => (best == null || s.v > best.v ? { d: s.d, v: s.v } : best),
+    (best, s) => s.v != null && (best == null || s.v > best.v) ? { d: s.d, v: s.v } : best,
     null,
   );
   // BMI = 703 × lb / in². Mateo's height is 5'8" = 68in. If MATEO.height
@@ -172,7 +175,7 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
       <Panel C={C}>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
           <div style={{ fontSize: 28, fontWeight: 800, color: C.t, fontFamily: MONO, letterSpacing: "-.04em", lineHeight: 1 }}>
-            {today.steps.toLocaleString()}
+            {todaySteps?.toLocaleString() ?? "—"}
           </div>
           <div
             style={{
@@ -186,7 +189,7 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
               letterSpacing: "-.01em",
             }}
           >
-            {stepsPctDisplay}%
+            {stepsPctDisplay != null ? `${stepsPctDisplay}%` : "no data"}
           </div>
         </div>
         <div style={{ height: 4, borderRadius: 2, background: C.s4, marginTop: 10, overflow: "hidden" }}>
@@ -201,9 +204,11 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
           />
         </div>
         <div style={{ fontSize: 11, color: C.t4, fontFamily: MONO, marginTop: 6, letterSpacing: ".02em" }}>
-          {today.steps >= stepsGoal
-            ? `+${(today.steps - stepsGoal).toLocaleString()} past ${(stepsGoal / 1000).toFixed(0)}k goal`
-            : `${(stepsGoal - today.steps).toLocaleString()} to ${(stepsGoal / 1000).toFixed(0)}k goal`}
+          {!stepsAvailable
+            ? "Step data unavailable"
+            : todaySteps != null && todaySteps >= stepsGoal
+            ? `+${(todaySteps - stepsGoal).toLocaleString()} past ${(stepsGoal / 1000).toFixed(0)}k goal`
+            : `${(stepsGoal - (todaySteps ?? 0)).toLocaleString()} to ${(stepsGoal / 1000).toFixed(0)}k goal`}
         </div>
 
         <div style={{ marginTop: 18 }}>
@@ -219,8 +224,8 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 6, marginTop: 14 }}>
-          <Stat C={C} label="7d avg" value={stepsAvg.toLocaleString()} sub="steps/day" valueC={C.primary} />
-          <Stat C={C} label="Days hit" value={`${daysHit} / 7`} sub={`of ${(stepsGoal / 1000).toFixed(0)}k goal`} />
+          <Stat C={C} label="7d avg" value={stepsAvg?.toLocaleString() ?? "—"} sub={measuredSteps.length ? `${measuredSteps.length} measured days` : "no measured days"} valueC={C.primary} />
+          <Stat C={C} label="Days hit" value={measuredSteps.length ? `${daysHit} / ${measuredSteps.length}` : "—"} sub={`of ${(stepsGoal / 1000).toFixed(0)}k goal`} />
           <Stat
             C={C}
             label="Best day"
@@ -232,6 +237,10 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
 
       <SectionHead C={C} kicker="Last night" title="Sleep stages" />
       <Panel C={C}>
+        {today.sleep.hours == null || today.sleep.minutes == null ? (
+          <div style={{ fontSize: 12, color: C.t3, textAlign: "center", padding: "18px 0" }}>Sleep data unavailable.</div>
+        ) : (
+          <>
         <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginBottom: 4 }}>
           <div style={{ fontSize: 32, fontWeight: 800, color: C.cyan, fontFamily: MONO, letterSpacing: "-.04em" }}>
             {today.sleep.hours}
@@ -239,7 +248,7 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
             <span style={{ fontSize: 18 }}>m</span>
           </div>
           <div style={{ fontSize: 11, color: C.t3, fontFamily: MONO, marginLeft: 4 }}>
-            {today.sleep.efficiency}% of time in bed was asleep
+            {today.sleep.efficiency != null ? `${today.sleep.efficiency}% of time in bed was asleep` : "Efficiency unavailable"}
           </div>
           {today.sleepBank && (
             <div
@@ -269,17 +278,19 @@ function NowSection({ C, today, body }: { C: Palette; today: TodayResponse; body
           <span style={{ color: C.cyan, fontWeight: 600 }}> Light</span> is the in-between.
         </div>
         <div style={{ display: "flex", height: 10, borderRadius: 5, overflow: "hidden", marginBottom: 10 }}>
-          <div style={{ flex: today.sleep.deep, background: "#3b5cff" }} />
-          <div style={{ flex: today.sleep.rem, background: C.purple }} />
-          <div style={{ flex: today.sleep.core, background: C.cyan, opacity: 0.6 }} />
-          <div style={{ flex: today.sleep.awake, background: C.t4 }} />
+          <div style={{ flex: today.sleep.deep ?? 0, background: "#3b5cff" }} />
+          <div style={{ flex: today.sleep.rem ?? 0, background: C.purple }} />
+          <div style={{ flex: today.sleep.core ?? 0, background: C.cyan, opacity: 0.6 }} />
+          <div style={{ flex: today.sleep.awake ?? 0, background: C.t4 }} />
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6 }}>
-          <SleepStage C={C} label="Deep" min={today.sleep.deep} col="#3b5cff" />
-          <SleepStage C={C} label="REM" min={today.sleep.rem} col={C.purple} />
-          <SleepStage C={C} label="Light" min={today.sleep.core} col={C.cyan} />
-          <SleepStage C={C} label="Awake" min={today.sleep.awake} col={C.t4} />
+          <SleepStage C={C} label="Deep" min={today.sleep.deep ?? 0} col="#3b5cff" />
+          <SleepStage C={C} label="REM" min={today.sleep.rem ?? 0} col={C.purple} />
+          <SleepStage C={C} label="Light" min={today.sleep.core ?? 0} col={C.cyan} />
+          <SleepStage C={C} label="Awake" min={today.sleep.awake ?? 0} col={C.t4} />
         </div>
+          </>
+        )}
       </Panel>
     </>
   );

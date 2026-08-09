@@ -98,6 +98,15 @@ params={'TableName':'fitness-exercises', 'Select':'COUNT',
 | `cal` on Hevy rows | **Hevy's API has no calorie field at all.** The phone shows calories by reading Apple Health/Watch, then writes the workout back to HealthKit. So lifting calories DO reach McFox — via `active_cal#hae` in the daily total, just unattributed to the session. Flagged with `cal_unavailable: true`. |
 | `volume_lb` / `working_volume` | Volume = Σ(reps × weight). Bodyweight, timed, and distance work (planks, ski erg, rowing, air bike) legitimately score 0 despite being real training. **Do not read 0 as "no work done."** |
 
+`GET /api/today` preserves this distinction in its read contract. Missing
+observations are `null`, while a stored zero remains `0`. `metricSemantics`
+labels values as `observed`, `derived`, `configured_target`, or `fallback` and
+reports availability as `available`, `unavailable`, or
+`insufficient_history`. History arrays retain their calendar slots with
+`null` gaps; consumers must not connect or render those gaps as measurements.
+Fixed goals may remain numeric, but their semantics must identify them as
+targets/fallbacks rather than observations.
+
 ### 2.7 `hevy_backfill` exceeds the Lambda timeout — and that's survivable
 
 IngestFunction is **30s / 256 MB**. A full backfill (~32 workouts × per-exercise writes + PR/volume recompute) reliably hits `Sandbox.Timedout`.

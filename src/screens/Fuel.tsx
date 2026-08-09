@@ -100,7 +100,7 @@ export function FuelScreen({ C, today, nutrition, onLogMeal, onOpenMeal, onOpenM
       {/* Hydration + Caffeine */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <HydrationPanel C={C} water={today.water} waterGoal={today.waterGoal} onOpenDetail={() => setHydrationOpen(true)} />
-        <CaffeinePanel C={C} mg={today.caffeineMg ?? 0} goal={today.caffeineGoal ?? 400} />
+        <CaffeinePanel C={C} mg={today.caffeineMg ?? null} goal={today.caffeineGoal ?? 400} />
       </div>
       <HydrationDetail
         C={C}
@@ -175,7 +175,7 @@ export function FuelScreen({ C, today, nutrition, onLogMeal, onOpenMeal, onOpenM
           accessor="p"
           height={56}
           colorFn={(_it, v) => (v >= T.p ? C.primary : v >= 100 ? C.yellow : C.danger)}
-          valueFn={(it) => it.p + "g"}
+          valueFn={(it) => it.p != null ? `${it.p}g` : "—"}
         />
       </Panel>
 

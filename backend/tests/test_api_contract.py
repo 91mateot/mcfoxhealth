@@ -25,7 +25,7 @@ REQUIRED_TODAY_FIELDS = {
     "sleep", "sleepNeedTonight", "hrv", "rhr", "steps", "stepsGoal",
     "calories", "water", "waterGoal", "recoveryWeek", "hrv30d",
     "stepsWeek", "mealsToday", "nutritionTargets", "proteinWeek",
-    "supplements", "coachInsights", "base",
+    "supplements", "coachInsights", "base", "metricSemantics",
 }
 
 REQUIRED_SLEEP_FIELDS = {"score", "hours", "minutes", "efficiency", "deep", "rem", "core", "awake"}
@@ -84,6 +84,16 @@ def test_today_recovery_zone_valid():
     d = _get("/api/today")
     if d.get("recoveryZone"):
         assert d["recoveryZone"] in ("green", "yellow", "red")
+
+
+def test_today_metric_semantics_shape():
+    d = _get("/api/today")
+    semantics = d["metricSemantics"]
+    for key in ("recovery", "strain", "sleep", "hrv", "steps", "protein", "hrv30d"):
+        assert semantics[key]["availability"] in ("available", "unavailable", "insufficient_history")
+    for key, value in (("recovery", d["recovery"]), ("strain", d["strain"]), ("hrv", d["hrv"]), ("steps", d["steps"])):
+        if semantics[key]["availability"] == "unavailable":
+            assert value is None, f"{key} must be null when unavailable"
 
 
 # ─── /api/workouts ──────────────────────────────────────────────────
