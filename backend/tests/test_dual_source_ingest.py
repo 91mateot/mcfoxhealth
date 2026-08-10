@@ -95,6 +95,9 @@ def _fresh_module(multi_table=False):
         del sys.modules["handler"]
     import handler  # noqa
     handler._trigger_compute = lambda *_a, **_k: None
+    handler._ensure_oauth_access_token = lambda vendor, **_k: (
+        "tok" if vendor == "strava" else pytest.fail(f"unexpected OAuth vendor: {vendor}")
+    )
     return handler, fake
 
 
@@ -352,7 +355,6 @@ def _strava_event(body):
 
 def test_strava_drops_strength_activity():
     h, t = _fresh_module()
-    h._get_secret = lambda name: {"access_token": "tok", "expires_at": 9999999999}
     # Return a WeightTraining activity — should be dropped, not written.
     h._strava_get = lambda url, token: (
         {"id": 111, "name": "Lift", "sport_type": "WeightTraining",
@@ -372,7 +374,6 @@ def test_strava_drops_strength_activity():
 
 def test_strava_keeps_cardio_activity():
     h, t = _fresh_module()
-    h._get_secret = lambda name: {"access_token": "tok", "expires_at": 9999999999}
     calls = {"n": 0}
 
     def _sget(url, token):

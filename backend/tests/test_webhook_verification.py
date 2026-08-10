@@ -36,6 +36,9 @@ def _fresh_handler(monkeypatch):
 
     handler._trigger_compute = lambda *_a, **_k: None
     handler._strava_get = lambda *_a, **_k: (None, 502)  # force short-circuit if verification passes
+    handler._ensure_oauth_access_token = lambda vendor, **_k: (
+        handler._get_secret(f"{vendor}-oauth") or {}
+    ).get("access_token", "")
     handler._refresh_strava_token = lambda: "tok"
     handler._now_iso = lambda: "2026-05-04T00:00:00Z"
     handler.put_item = lambda *_a, **_k: None
