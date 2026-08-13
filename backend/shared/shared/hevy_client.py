@@ -635,9 +635,20 @@ def _fetch_paginated(
     max_pages: int = 20,
     extra_query: Optional[dict] = None,
 ) -> HevyFetchResult:
-    """Walk a paginated endpoint without losing fetch-completeness state."""
+    """Walk a paginated endpoint without losing fetch-completeness state.
+
+    The walk is driven by the vendor's own ``page_count``: it keeps requesting
+    pages while Hevy advertises more, and stops naturally the moment the last
+    advertised page (or a short/empty page) is read. ``max_pages`` is ONLY a
+    safety stop to bound a runaway walk — it is deliberately sized so it cannot
+    be hit for a single-user account under normal growth. If it IS the reason
+    the walk ended, that is logged loudly (ERROR, with the vendor page_count vs
+    the max_pages ceiling) so the next occurrence is diagnosable from one log
+    line rather than by reading pagination code.
+    """
     items: list = []
     pages_read = 0
+    last_page_count: Optional[int] = None
     page_size = _clamp_page_size(page_size)
     for page in range(1, max_pages + 1):
         query = {"page": page, "pageSize": page_size}
@@ -690,6 +701,8 @@ def _fetch_paginated(
                 f"response contained invalid {collection_key} item",
             )
         page_count = body.get("page_count")
+        if isinstance(page_count, int):
+            last_page_count = page_count
         # Hevy may represent a legitimately empty collection as page 1 of zero
         # pages. Accept only the empty first-page envelope; page_count=0 with
         # records (or on a later page) remains malformed.
@@ -714,13 +727,24 @@ def _fetch_paginated(
         if len(chunk) < page_size:
             return HevyFetchResult.success(items, pages_read=pages_read)
 
+    # The loop exhausted max_pages without a natural stop. This is the safety
+    # stop, not a normal boundary — surface it loudly with the vendor page_count
+    # so the fix (raise max_pages) is obvious from a single log line.
+    logger.error(
+        "hevy %s fetch hit max_pages safety stop: max_pages=%s pages_read=%s "
+        "vendor_page_count=%s — raise max_pages for this endpoint",
+        path, max_pages, pages_read, last_page_count,
+    )
     return HevyFetchResult(
         items=items,
         complete=False,
         truncated=True,
         pages_read=pages_read,
         status="truncated",
-        error=f"reached max_pages={max_pages} before completion",
+        error=(
+            f"reached max_pages={max_pages} before completion "
+            f"(vendor page_count={last_page_count})"
+        ),
     )
 
 
@@ -729,7 +753,7 @@ def _fetch_paginated(
 def fetch_exercise_templates(
     api_key: str,
     page_size: int = 10,
-    max_pages: int = 30,
+    max_pages: int = 200,
     http_get: Callable[[str, str], tuple] = _http_get,
 ) -> dict:
     """Fetch ALL exercise templates and return id → template dict.
@@ -737,6 +761,15 @@ def fetch_exercise_templates(
     Each template dict holds {title, type, primary_muscle_group,
     secondary_muscle_groups, equipment_category, is_custom}. Degrades to {} on
     API failure — callers then fall back to muscle_group "other".
+
+    ``page_size`` is fixed at Hevy's per-endpoint max (10 — anything larger
+    returns HTTP 400). Completeness therefore depends on walking enough pages,
+    NOT on a bigger page. ``max_pages`` is a safety stop only: at 200 pages ×
+    10 = 2000 templates it cannot be reached by any real account (Hevy's public
+    catalogue plus custom entries is a few hundred), so the walk stops on the
+    vendor's page_count. If the safety stop is ever hit, _fetch_paginated logs
+    it loudly and this returns {} (the historical silent-"other" degradation is
+    now diagnosable in one log line).
     """
     if not api_key:
         raise ValueError("hevy api key is empty")
@@ -963,13 +996,20 @@ def fetch_recent_workouts_full(
 def fetch_body_measurements(
     api_key: str,
     page_size: int = 10,
-    max_pages: int = 10,
+    max_pages: int = 200,
     http_get: Callable[[str, str], tuple] = _http_get,
 ) -> HevyFetchResult:
     """Fetch all body measurements with explicit completeness metadata.
 
     ``page_size`` is clamped to Hevy's per-endpoint max (10) by _fetch_paginated;
     the default here already sits at the ceiling so the request is always valid.
+    Since page_size cannot be raised (Hevy returns HTTP 400 above 10), the whole
+    history is retrieved by walking pages. ``max_pages`` is a safety stop only:
+    at 200 pages × 10 = 2000 records it cannot be reached in practice for a
+    single-user app, so the walk stops on the vendor's page_count rather than a
+    hard record ceiling. (The old default of 10 pages capped the fetch at 100
+    records; once Mateo logged past 100 every poll returned status="truncated"
+    and permanently froze the sync watermark.)
     """
     if not api_key:
         raise ValueError("hevy api key is empty")

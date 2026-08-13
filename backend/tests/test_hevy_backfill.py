@@ -709,24 +709,38 @@ def test_partial_run_recomputes_prior_write_then_fails_without_watermark_advance
     assert ids.count("hevy_b") == 1
 
 
-def test_incomplete_measurement_fetch_does_not_advance_workout_watermark():
+def test_incomplete_measurement_fetch_advances_watermark_but_still_errors():
+    """A truncated/incomplete body-measurement fetch is a VENDOR PAGINATION
+    limit — growth-triggered and self-perpetuating. It must NOT permanently
+    freeze the sync, so the watermark advances to sync_started_at. But the
+    invocation must STILL surface an observable error (not degrade to a silent
+    success), so the failure stays visible in CloudWatch.
+
+    This is the exact regression that froze hevy_last_sync for days: the old
+    code raised BEFORE the watermark write, so every poll re-read an
+    ever-growing replay window and died on the same line."""
     h, tables = _fresh_module()
     old_watermark = "2026-08-01T12:00:00+00:00"
+    sync_started_at = "2026-08-06T12:00:00+00:00"
     tables["USER_CONFIG_TABLE"].put_item(Item={
         "key": "hevy_last_sync",
         "last_sync": old_watermark,
     })
     _stub_offline(h, events=hc.HevyWorkoutEventsResult.success())
+    h._now_iso = lambda: sync_started_at
     h.fetch_body_measurements = lambda _key, **_kwargs: hc.HevyFetchResult(
-        [], False, False, 0, "vendor_error", "status 503"
+        [], False, True, 200, "truncated", "reached max_pages=200 before completion"
     )
 
+    # The failure is STILL surfaced — no silent success.
     with pytest.raises(h.HevySyncError, match="body-measurement sync incomplete"):
         h.lambda_handler({"action": "hevy_poll"}, None)
 
+    # ...but the watermark advanced to the pre-retrieval boundary, so the next
+    # poll makes forward progress instead of replaying the same window forever.
     assert tables["USER_CONFIG_TABLE"].get_item(
         Key={"key": "hevy_last_sync"}
-    )["Item"]["last_sync"] == old_watermark
+    )["Item"]["last_sync"] == sync_started_at
 
 
 def test_good_record_applies_before_bad_record_requires_operator_review(caplog):

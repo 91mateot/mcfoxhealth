@@ -1549,18 +1549,29 @@ def _handle_hevy_sync(event):
     #    "the fetch/parse failed" so measurements_written: 0 is never silently
     #    ambiguous (that ambiguity is exactly what hid the pageSize>10 → HTTP 400
     #    bug behind an innocent-looking zero on the first live runs).
+    #
+    #    NOTE ON ORDERING: unlike the two fail-closed paths above (a legacy
+    #    identity failure or an unusable record legitimately must NOT advance the
+    #    watermark, so they raise before step 8), a body-measurement fetch that
+    #    is merely *truncated* by a vendor pagination limit is growth-triggered
+    #    and self-perpetuating: if it blocked the watermark, every later poll
+    #    would re-read an ever-growing replay window and die on the same line
+    #    forever. So we ingest whatever complete records we have, ADVANCE THE
+    #    WATERMARK (step 8) regardless, and only THEN surface the incompleteness
+    #    as a failed invocation — forward progress is preserved while the error
+    #    stays visible in CloudWatch. The watermark boundary (sync_started_at)
+    #    was captured before any vendor retrieval, so no data is skipped.
     measurements = _ingest_hevy_body_measurements(api_key)
     if not measurements["complete"]:
         logger.error(
             "hevy body-measurement sync incomplete: status=%s",
             measurements["status"],
         )
-        raise HevySyncError(
-            f"hevy body-measurement sync incomplete: {measurements['status']}"
-        )
 
     # 8) Advance only to the boundary captured before vendor retrieval. The
     #    next incremental poll subtracts the replay overlap from this value.
+    #    This runs BEFORE the body-measurement completeness raise below so a
+    #    vendor pagination limit can never again permanently freeze the sync.
     put_item(config_table, {
         "key": LAST_SYNC_KEY,
         "last_sync": sync_started_at,
@@ -1568,6 +1579,15 @@ def _handle_hevy_sync(event):
         "updated_at": _now_iso(),
         "replay_overlap_hours": HEVY_REPLAY_OVERLAP_HOURS,
     })
+
+    # Now that forward progress is durably recorded, surface an incomplete
+    # body-measurement fetch as an observable invocation failure. The watermark
+    # has already advanced, so this does NOT re-freeze the sync — it just keeps
+    # the failure visible instead of degrading to a silent success.
+    if not measurements["complete"]:
+        raise HevySyncError(
+            f"hevy body-measurement sync incomplete: {measurements['status']}"
+        )
 
     logger.info(
         "hevy sync complete (%s): %s written (%s backfilled), %s exercise rows, "

@@ -267,3 +267,93 @@ def test_nonempty_page_count_zero_remains_malformed():
     assert result.complete is False
     assert result.status == "malformed"
     assert result.items == []
+
+
+# ── Paginator record-ceiling fix (body measurements + templates) ────────────
+#
+# Regression guard for the hard record ceiling that permanently froze the sync
+# watermark: page_size CANNOT be raised (Hevy 400s above pageSize=10), so the
+# whole history must be reachable by walking pages. max_pages is a safety stop
+# only, driven by the vendor's page_count.
+
+def _measurement(mid="m1", when="2026-08-01T08:00:00+00:00", weight_kg=80.0):
+    return {"id": mid, "date": when, "weight_kg": weight_kg}
+
+
+def _measurement_pages(total_records, page_count, page_size=10):
+    """Build ``page_count`` full pages of ``page_size`` measurements each so a
+    fetch must walk every advertised page to be complete."""
+    pages = []
+    made = 0
+    for p in range(1, page_count + 1):
+        remaining = total_records - made
+        n = min(page_size, remaining) if remaining > 0 else 0
+        chunk = [_measurement(f"m{made + i}") for i in range(n)]
+        made += n
+        pages.append(({"page": p, "page_count": page_count,
+                       "body_measurements": chunk}, 200))
+    return pages
+
+
+def test_body_measurements_walks_past_old_100_record_ceiling():
+    # 15 full pages (150 records) — impossible under the OLD max_pages=10 (which
+    # capped at 100). The walk must now complete via the vendor's page_count.
+    pages = _measurement_pages(total_records=150, page_count=15)
+    http = _fake_http(pages)
+    result = hevy_client.fetch_body_measurements("key", http_get=http)
+    assert result.complete is True
+    assert result.truncated is False
+    assert result.status == "ok"
+    assert len(result.items) == 150
+    assert result.pages_read == 15
+
+
+def test_body_measurements_safety_stop_still_truncates_and_logs(caplog):
+    # Vendor claims far more pages than max_pages allows: the safety stop must
+    # fire, return truncated/incomplete, and log an ERROR naming page_count.
+    full = ({"page": 1, "page_count": 500,
+             "body_measurements": [_measurement("m")] * 10}, 200)
+    http = _fake_http([full] * 10)
+    with caplog.at_level("ERROR"):
+        result = hevy_client.fetch_body_measurements(
+            "key", max_pages=3, http_get=http
+        )
+    assert result.complete is False
+    assert result.truncated is True
+    assert result.status == "truncated"
+    assert http.calls["n"] == 3
+    assert "max_pages safety stop" in caplog.text
+    assert "vendor_page_count=500" in caplog.text
+
+
+def test_exercise_templates_walks_past_old_300_record_ceiling():
+    # 40 full pages (400 templates) — impossible under the OLD max_pages=30
+    # (which capped at 300). The walk must now return every template id.
+    pages = []
+    made = 0
+    for p in range(1, 41):
+        chunk = [{"id": f"t{made + i}", "title": f"Ex {made + i}",
+                  "type": "weight_reps", "primary_muscle_group": "chest"}
+                 for i in range(10)]
+        made += 10
+        pages.append(({"page": p, "page_count": 40,
+                       "exercise_templates": chunk}, 200))
+    http = _fake_http(pages)
+    templates = hevy_client.fetch_exercise_templates("key", http_get=http)
+    assert len(templates) == 400
+    assert http.calls["n"] == 40
+
+
+def test_exercise_templates_safety_stop_degrades_to_empty_and_logs(caplog):
+    full = ({"page": 1, "page_count": 500,
+             "exercise_templates": [{"id": "t1", "title": "Ex"}] * 10}, 200)
+    http = _fake_http([full] * 10)
+    with caplog.at_level("ERROR"):
+        templates = hevy_client.fetch_exercise_templates(
+            "key", max_pages=2, http_get=http
+        )
+    # Incomplete template fetch degrades to {} (callers fall back to "other"),
+    # but the safety stop is now diagnosable in the logs.
+    assert templates == {}
+    assert http.calls["n"] == 2
+    assert "max_pages safety stop" in caplog.text
