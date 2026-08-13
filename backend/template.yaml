@@ -310,6 +310,17 @@ Resources:
     Properties:
       CodeUri: functions/ingest/
       Handler: handler.lambda_handler
+      # Override the 30s/256MB Globals defaults for the SCHEDULED hevy_poll path.
+      # Hevy's API caps pageSize at 10 (larger returns HTTP 400 — hard vendor
+      # limit), so a complete paginated walk of body_measurements and
+      # exercise_templates needs many SEQUENTIAL HTTPS round-trips that cannot
+      # finish inside the 30s default (observed Sandbox.Timedout at 30s). The
+      # 512MB is NOT for memory headroom — actual usage is ~110MB — it is for
+      # Lambda's CPU scaling, which speeds up the many TLS handshakes and JSON
+      # parses on a sequential walk. Do not "optimize" these back down.
+      # (HttpApi webhook routes are still bounded by API Gateway's own timeout.)
+      Timeout: 300
+      MemorySize: 512
       Layers:
         - !Ref SharedLayer
       Policies:
