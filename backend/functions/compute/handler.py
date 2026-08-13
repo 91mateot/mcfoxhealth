@@ -14,6 +14,7 @@ import statistics
 from datetime import datetime, timedelta, timezone
 
 from shared.db import get_table, put_item, get_item, query_items
+from shared.samples_ledger import merge_samples_from_map
 from shared.insight_templates import PAIRS as NUMERIC_PAIRS, confidence_tier, render_insight
 from shared.pearson import linreg, pearson_r
 from shared.sleep_quality import (
@@ -226,7 +227,12 @@ def _compute_day(date_str):
 
         # Sleep-window HR: intersect per-sample HR with sleep_start/sleep_end
         # when both are available. Falls back cleanly to None otherwise.
+        # Reassemble every shard of the samples ledger (hr#hae_samples plus any
+        # #NNN overflow rows) so the intersection sees the FULL day, not just
+        # shard 0 — a partial read would be silently wrong. metric_map already
+        # holds every row for the day, so this costs no extra DynamoDB reads.
         hr_samples_item = metric_map.get("hr#hae_samples")
+        hr_samples = merge_samples_from_map(metric_map, "hr#hae_samples")
         sleep_start = sleep_item.get("sleep_start")
         sleep_end = sleep_item.get("sleep_end")
         # Fall back to segment span when the top-level start/end are missing.
@@ -242,7 +248,7 @@ def _compute_day(date_str):
                 sleep_end = max(ends)
         if hr_samples_item and sleep_start and sleep_end:
             avg_hr_sleep, min_hr_sleep = _sleep_window_hr_stats(
-                hr_samples_item.get("samples") or [],
+                hr_samples,
                 sleep_start,
                 sleep_end,
             )
@@ -258,9 +264,10 @@ def _compute_day(date_str):
         # to the full-day average (already in `hrv`) when there's no sleep
         # window or too few in-window samples to trust.
         hrv_samples_item = metric_map.get("hrv#hae_samples")
+        hrv_samples = merge_samples_from_map(metric_map, "hrv#hae_samples")
         if hrv_samples_item and sleep_start and sleep_end:
             overnight_hrv = _sleep_window_avg(
-                hrv_samples_item.get("samples") or [],
+                hrv_samples,
                 sleep_start,
                 sleep_end,
             )

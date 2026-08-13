@@ -23,6 +23,7 @@ logger = logging.getLogger("ingest")
 logger.setLevel(logging.INFO)
 
 from shared.db import get_item, get_table, put_item, query_items
+from shared.samples_ledger import read_merged_samples, write_sharded_ledger
 from shared.hevy_client import (
     body_measurement_to_metrics,
     fetch_body_measurements,
@@ -638,29 +639,45 @@ def _merge_samples_and_aggregate(
     it, then recompute the daily aggregate over the FULL merged set. This
     is correct whether a given automation sends a full-day resend or an
     incremental delta, since dedup-by-timestamp makes re-sends idempotent.
+
+    Item-size cap (2026-08): a single high-frequency metric's daily ledger
+    (~9,226 samples for steps#hae_samples) outgrew DynamoDB's 400KB per-item
+    limit, so the unbounded single-row put_item raised ValidationException
+    and aborted the WHOLE ingest request — silent data loss. The ledger is
+    now SHARDED across `<metric_source>_samples`, `_samples#001`, `#002`, ...
+    (shard 0 keeps the bare key for backward compatibility). Reads merge
+    every shard and dedup runs over the full cross-shard set, so the
+    recomputed aggregate is still over ALL samples, not one shard. A legacy
+    single large `_samples` row is read as shard 0 and re-sharded forward on
+    this write without dropping points. See shared.samples_ledger.
     """
     samples_key = f"{metric_source}_samples"
-    existing = get_item(table, {"date": date_str, "metric_source": samples_key}) or {}
-    stored_temporal = _merge_hae_temporal_metadata(existing, temporal)
-    existing_samples = {s["ts"]: s["v"] for s in (existing.get("samples") or []) if s.get("ts")}
+    # Read shard 0 (the legacy/base key) plus any overflow shards, merging
+    # every stored point into one timestamp-keyed dict. Dedup therefore spans
+    # all shards, and a large pre-existing shard-0 row migrates forward here.
+    existing_samples, shard0_item = read_merged_samples(
+        get_item, table, date_str, samples_key
+    )
+    stored_temporal = _merge_hae_temporal_metadata(shard0_item, temporal)
     for ts, val in new_pairs:
         if ts:
             existing_samples[ts] = val
         else:
-            # No usable timestamp — still fold the value in under a
-            # synthetic key so it isn't silently dropped, but it can't be
-            # deduped against a future re-send of the same point.
+            # No usable timestamp — still fold the value in under a synthetic
+            # key so it isn't silently dropped, but it can't be deduped
+            # against a future re-send of the same point. len() is the count
+            # across ALL shards, so these keys stay unique cross-shard.
             existing_samples[f"_no_ts_{len(existing_samples)}"] = val
 
-    merged_samples = [{"ts": ts, "v": v} for ts, v in existing_samples.items()]
-    samples_item = {
-        "date": date_str,
-        "metric_source": samples_key,
-        "samples": merged_samples,
-        "ingested_at": _now_iso(),
-    }
-    samples_item.update(stored_temporal)
-    put_item(table, samples_item)
+    write_sharded_ledger(
+        put_item,
+        table,
+        date_str,
+        samples_key,
+        existing_samples,
+        extra=stored_temporal,
+        ingested_at=_now_iso(),
+    )
 
     vals = list(existing_samples.values())
     if kind == "avg":

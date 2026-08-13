@@ -154,6 +154,7 @@ preserves 3+ member groups without loss).
 | `workout_proposer.py` | Proposes next workout from history + program config. |
 | `scoring.py` | TRIMP / strain / HR-zone math + hot-swappable scoring weights. |
 | `sleep_quality.py` | Sleep-quality evaluation. |
+| `samples_ledger.py` | **(new)** Shard-aware per-day HAE samples ledger. Reads/writes the `<metric_source>_samples` sidecar across shards (`_samples`, `_samples#001`, ...) capped at 2000 samples/shard to stay under DynamoDB's 400KB item limit. Shared by ingest (write/merge) and compute (shard-reassembling reader). |
 | `cost_service.py`, `db.py`, `timezone.py` | Cost tracking, DynamoDB helpers, and centralized source-timestamp/analysis-date semantics. |
 
 ## Functions — `backend/functions/`
