@@ -4,7 +4,9 @@
 >
 > **Audience:** primarily AI coding tools; secondarily Mateo on periodic review.
 > **Scope:** the AWS backend + data pipeline. Frontend/product docs live in `HANDOFF.md`, architecture in `ARCHITECTURE.md` / `architecture.json`, stack conventions in `CLAUDE.md`.
-> **Last verified against live AWS:** 2026-07-27
+> **Last verified against live AWS:** 2026-07-27. HAE/API Gateway incident
+> evidence was refreshed 2026-08-25; all unrelated entries retain their
+> stated verification dates.
 
 ---
 
@@ -250,6 +252,40 @@ The daily check is not a substitute for webhook processing or historical data
 reconciliation. Do not add a high-frequency unconditional refresh schedule;
 that increases token-rotation races without improving data completeness.
 
+### 2.14 HAE HTTP 413 is an API Gateway loss, not a Lambda error
+
+`POST /ingest/health` is behind the stack's API Gateway **HTTP API**, whose
+request payload ceiling is a hard 10 MB. An oversized Health Auto Export (HAE)
+request is rejected at API Gateway with `413 Request Entity Too Large` before
+the Ingest Lambda is invoked. Therefore, clean Lambda logs (including no
+`HAE_SUMMARY`) do **not** prove HAE is healthy.
+
+Use the API access-log group `/aws/apigateway/fitness-dashboard` whenever HAE
+looks incomplete. The incident PR adds `dataProcessed` (API Gateway's
+byte-count context field) alongside `routeKey`, `status`, `integrationStatus`,
+`error`, `userAgent`, and response length. It is only present in the live logs
+after this PR is deployed:
+
+```text
+fields @timestamp, status, userAgent, integrationStatus, error
+| filter routeKey = "POST /ingest/health" and status = "413"
+| sort @timestamp desc
+```
+
+The current access logs do not record request `Content-Length`; `responseLength`
+is the small API response body, not the rejected request size. After deployment,
+`dataProcessed` is a byte-volume diagnostic, not the raw request body. The logs
+also do not capture HAE's `automation-name` / `automation-id` request headers,
+so group rejections by client user-agent and timing only; do not attribute a 413
+to a named automation without separate phone-side evidence. Do not try to raise
+the API Gateway limit or infer a rejected body from Lambda logs.
+
+HAE configuration is Mateo-only. The supported transport mitigation is to
+enable HAE **Batch Requests** and use a bounded/incremental date range for the
+Health Metrics automation, then prove a clean live run before any backfill.
+Keep Workouts/GPX as a separately verified automation; do not assume it shares
+the Health Metrics route.
+
 ---
 
 ## 3. Deploy
@@ -367,9 +403,9 @@ Every `source: hevy` date in `fitness-workouts` must have matching rows in `fitn
 | Withings | ✅ Live |
 | Strava (incl. HR streams → Edwards TRIMP zones) | ✅ Live |
 | Lift engine (e1RM, PR, stall detection, weekly volume) | ✅ Live |
-| **Apple Health / HAE** | 🔴 **Degraded — Mateo's to fix.** 2026-07-26 landed 3 metrics vs 13–14 normal. Phone-side. |
+| **Apple Health / HAE** | 🔴 **Active transport incident.** API Gateway is rejecting oversized HAE requests with 413 before Lambda. Server-side 413 cannot be raised; Mateo must batch/bound the Health Metrics automation and complete a clean live validation before backfill. |
 | Historical HAE backfill (6/29 → present) | ⏸️ Blocked on a manual export from the HAE iPhone app |
-| HAE metric coverage | ⚠️ `HAE_NAME_MAP` recognizes ~24 names; **unmapped metrics are silently dropped at ingest** (`if not mapping: continue`). Candidates: VO2 Max, blood pressure, blood glucose, body fat %, lean mass, waist, walking speed/asymmetry, mobility metrics, symptoms, state of mind. Deferred until HAE is healthy — and match names against a real export, not Apple's docs (see §2.1's lesson). |
+| HAE metric coverage | ⚠️ Observed `walking_asymmetry_percentage` and `vo2_max` now map to source observations (`walking_asymmetry#hae`, `%`; `vo2_max#hae`, `ml/kg/min`) with raw sample ledgers. Other unknown HAE names remain unpersisted but emit sanitized `HAE_UNMAPPED_METRIC` name/count logs; map only after a real received payload confirms semantics. |
 | Nutrition | ⚪ Frozen 2026-05-09, no automated feed |
 | Per-session lifting calories | ⏸️ Design exists: join Apple-Health workout active energy to the Hevy session by `start_time`/`end_time`, mirroring the `hr#hae_samples` sleep-window intersection. Not built. |
 | Non-weighted load metric | ⏸️ `duration_seconds`/`distance_meters` are now persisted per set, so a real load metric for timed/distance work is available to build. Not built. |
