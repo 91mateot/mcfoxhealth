@@ -51,6 +51,32 @@ to use `start_date_local`; HAE trusts explicit source offsets and preserves
 date-only/naive values through an explicit source-date fallback; Withings epoch
 values are converted from their absolute instant to the home timezone.
 
+## PRISM product evolution
+
+This file and `architecture.json` describe the current executable topology.
+[`PRISM_PRODUCT_ARCHITECTURE.md`](PRISM_PRODUCT_ARCHITECTURE.md) is the
+canonical record for future product capability ownership, roadmap gates, and
+reference requirements.
+
+Future longitudinal architecture preserves three logical layers rather than a
+single universal event table: observations/evidence, interventions, and
+derivations/inferences. Measured and user-reported evidence retain provenance;
+interventions record what happened without implying an outcome; derived
+associations and inferences cite their inputs and never convert temporal
+proximity into causality.
+
+The future workout/activity model is source-neutral across Hevy, HAE/Apple
+Health, Strava, and possible native PRISM execution. It preserves source
+observations independently and supports richer semantics than weight and reps,
+including duration/distance, bodyweight and added load, per-side work, timed
+work, carries, supersets, cardio, RPE/RIR, substitutions, planned versus actual
+performance, progression rationale, symptoms, and tolerance. These are design
+requirements, not current runtime fields.
+
+PR5 (Provenance, Metric Semantics & Source Health) remains blocked on the
+manual HAE Source Validation Gate. A representative real HAE workout payload
+is a separate hard gate for HAE workout-ingestion semantics in PR7.
+
 ## Lift-learning engine (the core of the Hevy work)
 
 A complete set-level lift-tracking engine already existed and reads exclusively

@@ -2,6 +2,12 @@
 
 Personal health/fitness dashboard. Vite+TS PWA on Vercel, AWS Lambda backend, Whoop-calibrated scoring.
 
+> **Product direction:** McFox is evolving into PRISM, a personal performance
+> operating surface rather than another tracker or readiness-score clone. Read
+> [`PRISM_PRODUCT_ARCHITECTURE.md`](PRISM_PRODUCT_ARCHITECTURE.md) before
+> product, evidence-model, longitudinal-reasoning, source-health, or roadmap
+> work. PR5 remains blocked on the manual HAE Source Validation Gate.
+
 ## Stack
 
 - **Frontend**: Vite 5 + React 18 + TypeScript + SWR. No CSS framework. Deployed to Vercel (`mcfoxhealth.vercel.app`, auto-deploy on push to `main`).

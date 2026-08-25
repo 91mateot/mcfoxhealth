@@ -3,6 +3,11 @@
 Personal performance dashboard. iPhone-first PWA, dark theme, real data from
 Apple Health + Withings + Strava + Hevy, AI coach on Bedrock.
 
+> **Future product direction:** [`PRISM_PRODUCT_ARCHITECTURE.md`](PRISM_PRODUCT_ARCHITECTURE.md)
+> defines McFox's evolution into PRISM, including capability ownership,
+> evidence-layer boundaries, the HAE validation gate, future roadmap, and
+> product reference register. This handoff describes the current application.
+
 > ⚙️ **Operating this system?** See [`RUNBOOK.md`](RUNBOOK.md) — deploy recipe, health checks, feed ownership (which breakages only Mateo can fix), and the traps that have already caused real bugs. This file covers *what* the system is; the runbook covers *how to run it without breaking it*.
 
 ## Live
