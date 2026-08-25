@@ -12,6 +12,7 @@ Covers:
   - "last" kind for weight / BMI
   - substring-safe sleep dispatch (does NOT catch "apple sleeping wrist temperature")
 """
+import logging
 import os
 import sys
 
@@ -370,17 +371,77 @@ def test_wrist_temperature_is_NOT_routed_to_sleep():
     assert len(sleep) == 0, "wrist_temp must not leak into sleep#hae"
 
 
-# ─── Unknown metrics are silently ignored ────────────────────────────
+# ─── Unknown metrics are not persisted, but are observable ───────────
 
-def test_unknown_metric_name_is_ignored():
+def test_unknown_metric_name_is_not_persisted_but_is_logged_without_values(caplog):
+    h, t = _fresh_module()
+    _patch_auth(h)
+    with caplog.at_level(logging.WARNING, logger="ingest"):
+        h.lambda_handler(_event({"data": {"metrics": [
+            {"name": "some_future_metric_we_havent_mapped",
+             "data": [{"qty": 42, "date": "2026-04-20"}]}
+        ]}}), None)
+
+    # The unknown metric still does not become an invented source row, but it
+    # must be diagnosable by its raw name and point count without logging qty.
+    assert all("some_future" not in (i.get("metric_source", "")) for i in t.items)
+    assert (
+        "HAE_UNMAPPED_METRIC "
+        "metric_name=some_future_metric_we_havent_mapped point_count=1"
+    ) in caplog.text
+    assert "42" not in caplog.text
+
+
+# ─── Observed mobility / capacity metrics ────────────────────────────
+
+def test_walking_asymmetry_ingestion_preserves_samples_units_and_temporal_metadata():
     h, t = _fresh_module()
     _patch_auth(h)
     h.lambda_handler(_event({"data": {"metrics": [
-        {"name": "some_future_metric_we_havent_mapped",
-         "data": [{"qty": 42, "date": "2026-04-20"}]}
+        {"name": "walking_asymmetry_percentage", "units": "%",
+         "data": [
+             {"qty": 1.2, "date": "2026-08-22 01:02:04 -0700"},
+             {"qty": 1.8, "date": "2026-08-22 13:02:04 -0700"},
+         ]},
     ]}}), None)
-    # No rows written for the unmapped metric; handler returned 200
-    assert all("some_future" not in (i.get("metric_source", "")) for i in t.items)
+
+    observed = [i for i in t.items if i["metric_source"] == "walking_asymmetry#hae"][-1]
+    ledger = [i for i in t.items if i["metric_source"] == "walking_asymmetry#hae_samples"][-1]
+
+    assert observed["value"] == 1.5
+    assert observed["unit"] == "%"
+    assert observed["date"] == "2026-08-22"
+    assert observed["date_derivation"] == "source_offset"
+    assert observed["source_utc_offset"] == "-07:00"
+    assert ledger["samples"] == [
+        {"ts": "2026-08-22 01:02:04 -0700", "v": 1.2},
+        {"ts": "2026-08-22 13:02:04 -0700", "v": 1.8},
+    ]
+
+
+def test_vo2_max_ingestion_is_idempotent_with_sample_ledger():
+    h, t = _fresh_module()
+    _patch_auth(h)
+    payload = {"data": {"metrics": [
+        {"name": "vo2_max", "units": "ml/kg/min",
+         "data": [
+             {"qty": 48.2, "date": "2026-08-17 06:00:00 -0700"},
+             {"qty": 49.0, "date": "2026-08-17 18:00:00 -0700"},
+         ]},
+    ]}}
+
+    h.lambda_handler(_event(payload), None)
+    h.lambda_handler(_event(payload), None)  # HAE retry / full-day resend
+
+    observed = [i for i in t.items if i["metric_source"] == "vo2_max#hae"][-1]
+    ledger = [i for i in t.items if i["metric_source"] == "vo2_max#hae_samples"][-1]
+
+    assert observed["value"] == 48.6
+    assert observed["unit"] == "ml/kg/min"
+    assert observed["date_derivation"] == "source_offset"
+    assert observed["source_utc_offset"] == "-07:00"
+    assert len(ledger["samples"]) == 2
+    assert [sample["v"] for sample in ledger["samples"]] == [48.2, 49.0]
 
 
 # ─── Numeric aggregation kinds ───────────────────────────────────────

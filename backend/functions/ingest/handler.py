@@ -119,6 +119,12 @@ HAE_NAME_MAP = {
     "flightsclimbed":         ("flights#hae", "count", "sum_int"),
     "walking heart rate average": ("walk_hr#hae", "bpm", "avg"),
     "walkingheartrateaverage":    ("walk_hr#hae", "bpm", "avg"),
+    # Direct Apple Health mobility / capacity observations. Keep these as
+    # source observations; do not turn them into a derived score at ingest.
+    "walking asymmetry percentage": ("walking_asymmetry#hae", "%", "avg"),
+    "walkingasymmetrypercentage":  ("walking_asymmetry#hae", "%", "avg"),
+    "vo2 max":                     ("vo2_max#hae", "ml/kg/min", "avg"),
+    "vo2max":                       ("vo2_max#hae", "ml/kg/min", "avg"),
     "heart rate recovery one minute": ("hr_recovery#hae", "bpm/min", "avg"),
     "heartraterecoveryone minute":    ("hr_recovery#hae", "bpm/min", "avg"),
     "heart rate recovery":            ("hr_recovery#hae", "bpm/min", "avg"),
@@ -302,7 +308,8 @@ def _handle_hae_metrics_array(data_list):
     _log_hae_summary(data_list)
 
     for entry in data_list:
-        raw_name = (entry.get("name") or "").strip().lower()
+        raw_metric_name = str(entry.get("name") or "").strip()
+        raw_name = raw_metric_name.lower()
         # HAE v2 uses snake_case (heart_rate_variability); v1 docs showed title case.
         # Map by both forms — with and without separators.
         name = raw_name
@@ -436,6 +443,7 @@ def _handle_hae_metrics_array(data_list):
 
         mapping = HAE_NAME_MAP.get(name) or HAE_NAME_MAP.get(name_no_sep) or HAE_NAME_MAP.get(raw_name.replace("_", " "))
         if not mapping:
+            _log_hae_unmapped_metric(raw_metric_name, len(points))
             continue
         metric_source, unit, kind = mapping
 
@@ -756,6 +764,21 @@ def _log_hae_summary(data_list):
             sample_date = _coerce_date(raw) or source_date_str(raw) or ""
         summary_parts.append(f"{name}:{count}@{sample_date}")
     print(f"HAE_SUMMARY metrics={len(data_list)} " + " ".join(summary_parts[:20]))
+
+
+def _log_hae_unmapped_metric(raw_metric_name, point_count):
+    """Warn about a dropped HAE metric without logging observation values.
+
+    Unknown metric names are useful configuration/coverage evidence. Keep the
+    name readable for diagnosis, but remove control characters and bound it so
+    an unexpected sender cannot forge log lines or create unbounded log data.
+    """
+    metric_name = re.sub(r"[\x00-\x1f\x7f]+", " ", str(raw_metric_name)).strip()[:128]
+    logger.warning(
+        "HAE_UNMAPPED_METRIC metric_name=%s point_count=%d",
+        metric_name or "?",
+        int(point_count),
+    )
 
 
 def _hae_temporal_metadata(value):
