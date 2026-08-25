@@ -261,8 +261,10 @@ the Ingest Lambda is invoked. Therefore, clean Lambda logs (including no
 `HAE_SUMMARY`) do **not** prove HAE is healthy.
 
 Use the API access-log group `/aws/apigateway/fitness-dashboard` whenever HAE
-looks incomplete. Its current access-log format records `routeKey`, `status`,
-`integrationStatus`, `error`, `userAgent`, and response length:
+looks incomplete. The incident PR adds `dataProcessed` (API Gateway's
+byte-count context field) alongside `routeKey`, `status`, `integrationStatus`,
+`error`, `userAgent`, and response length. It is only present in the live logs
+after this PR is deployed:
 
 ```text
 fields @timestamp, status, userAgent, integrationStatus, error
@@ -271,11 +273,12 @@ fields @timestamp, status, userAgent, integrationStatus, error
 ```
 
 The current access logs do not record request `Content-Length`; `responseLength`
-is the small API response body, not the rejected request size. They also do not
-capture HAE's `automation-name` / `automation-id` request headers, so group
-rejections by client user-agent and timing only; do not attribute a 413 to a
-named automation without separate phone-side evidence. Do not try to raise the
-API Gateway limit or infer a rejected body from Lambda logs.
+is the small API response body, not the rejected request size. After deployment,
+`dataProcessed` is a byte-volume diagnostic, not the raw request body. The logs
+also do not capture HAE's `automation-name` / `automation-id` request headers,
+so group rejections by client user-agent and timing only; do not attribute a 413
+to a named automation without separate phone-side evidence. Do not try to raise
+the API Gateway limit or infer a rejected body from Lambda logs.
 
 HAE configuration is Mateo-only. The supported transport mitigation is to
 enable HAE **Batch Requests** and use a bounded/incremental date range for the

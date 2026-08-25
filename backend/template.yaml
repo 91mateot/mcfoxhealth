@@ -2,6 +2,10 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: Mateo Fitness Dashboard — serverless backend
 
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@2
+
 Globals:
   Function:
     Runtime: python3.13
@@ -75,7 +79,9 @@ Resources:
         MaxAge: 3600
       AccessLogSettings:
         DestinationArn: !GetAtt ApiAccessLogGroup.Arn
-        Format: '{"requestId":"$context.requestId","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","path":"$context.path","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","integrationStatus":"$context.integrationStatus","integrationErrorMessage":"$context.integrationErrorMessage","error":"$context.error.message","userAgent":"$context.identity.userAgent","sourceIp":"$context.identity.sourceIp"}'
+        # HAE 413s are rejected before Lambda. Record byte volume only, never
+        # request bodies, so access logs can distinguish size-related loss.
+        Format: '{"requestId":"$context.requestId","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","path":"$context.path","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","dataProcessed":"$context.dataProcessed","integrationStatus":"$context.integrationStatus","integrationErrorMessage":"$context.integrationErrorMessage","error":"$context.error.message","userAgent":"$context.identity.userAgent","sourceIp":"$context.identity.sourceIp"}'
 
   # ── DynamoDB Tables ──────────────────────────────────────────
   HealthMetricsTable:
