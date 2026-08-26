@@ -365,6 +365,7 @@ _HAE_DAILY_PERIOD_TOKENS = {
     "previousday",
 }
 _HAE_RAW_AGGREGATION_TOKENS = {
+    "default",
     "none",
     "off",
     "raw",

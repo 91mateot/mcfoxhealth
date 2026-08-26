@@ -55,6 +55,11 @@ RAW_HEADERS = {
     "session-id": "sanitized-session-vitals",
 }
 
+DEFAULT_RAW_HEADERS = {
+    **RAW_HEADERS,
+    "automation-aggregation": "Default",
+}
+
 
 def _latest(table, metric_source):
     return [item for item in table.items if item["metric_source"] == metric_source][-1]
@@ -455,13 +460,16 @@ def test_summary_resolver_prefers_completed_daily_over_legacy_raw_without_double
     )["source"] == "legacy_hae_aggregate"
 
 
-def test_raw_vitals_stream_preserves_metadata_and_does_not_sum_physical_effort():
+def test_default_raw_vitals_stream_preserves_metadata_and_does_not_sum_physical_effort():
     handler, table = _fresh_module()
     _patch_auth(handler)
     payload = _fixture("hae_v2_vitals_mobility_sanitized.json")
 
-    handler.lambda_handler(_hae_event(payload, RAW_HEADERS), None)
-    handler.lambda_handler(_hae_event(payload, RAW_HEADERS), None)
+    first = handler.lambda_handler(_hae_event(payload, DEFAULT_RAW_HEADERS), None)
+    second = handler.lambda_handler(_hae_event(payload, DEFAULT_RAW_HEADERS), None)
+    assert first["statusCode"] == 200
+    assert second["statusCode"] == 200
+    assert json.loads(first["body"])["hae_semantics"] == "raw_observation"
 
     effort = _latest(table, "physical_effort#hae")
     ledger = _latest(table, "physical_effort#hae_samples")
@@ -475,6 +483,29 @@ def test_raw_vitals_stream_preserves_metadata_and_does_not_sum_physical_effort()
     assert effort["hae_automation_id"] == "sanitized-vitals-mobility"
     assert effort["hae_automation_period"] == "Since Last Sync"
     assert len(ledger["samples"]) == 2
+
+
+def test_hae_stream_classifier_accepts_default_no_grouping_and_keeps_fail_closed_matrix():
+    handler, _table = _fresh_module()
+
+    cases = [
+        ("Default", "Since Last Sync", "raw_observation"),
+        ("default", "Since Last Sync", "raw_observation"),
+        ("  DeFaUlT  ", "  Since Last Sync  ", "raw_observation"),
+        ("None", "Since Last Sync", "raw_observation"),
+        ("Days", "Since Last Sync", "unsupported_or_ambiguous"),
+        ("Days", "Yesterday", "completed_daily_summary"),
+    ]
+    for aggregation, period, expected_semantics in cases:
+        request_context = handler._hae_request_context(
+            {
+                "automation-aggregation": aggregation,
+                "automation-period": period,
+            }
+        )
+        assert request_context["semantics"] == expected_semantics
+
+    assert handler._hae_request_context({})["semantics"] == "legacy_unclassified"
 
 
 def test_new_raw_metric_mappings_are_source_observations_not_scores():
@@ -543,7 +574,7 @@ def test_existing_tier_one_mappings_remain_distinct_and_unchanged():
         assert handler.HAE_NAME_MAP[raw_name] == mapping
 
 
-def test_missing_headers_keep_legacy_raw_compatibility_and_unsupported_aggregation_is_rejected():
+def test_missing_headers_keep_legacy_raw_compatibility():
     handler, table = _fresh_module()
     _patch_auth(handler)
     raw_payload = _fixture("hae_v2_vitals_mobility_sanitized.json")
@@ -553,17 +584,26 @@ def test_missing_headers_keep_legacy_raw_compatibility_and_unsupported_aggregati
     assert json.loads(response["body"])["hae_semantics"] == "legacy_unclassified"
     assert _latest(table, "physical_effort#hae")["hae_semantics"] == "legacy_unclassified"
 
+
+def test_days_since_last_sync_remains_rejected_without_writes():
+    handler, table = _fresh_module()
+    _patch_auth(handler)
+    raw_payload = _fixture("hae_v2_vitals_mobility_sanitized.json")
+
     rejected = handler.lambda_handler(
         _hae_event(
             raw_payload,
             {
-                "automation-aggregation": "Minutes",
-                "automation-period": "Yesterday",
+                "automation-aggregation": "Days",
+                "automation-period": "Since Last Sync",
             },
         ),
         None,
     )
     assert rejected["statusCode"] == 422
+    assert json.loads(rejected["body"])["hae_semantics"] == "unsupported_or_ambiguous"
+    assert table.items == []
+
 
 
 def test_unknown_metric_logging_retains_routing_context_without_health_values(caplog):

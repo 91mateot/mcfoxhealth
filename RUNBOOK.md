@@ -372,6 +372,7 @@ Configure a separate HAE REST automation with:
 |---|---|
 | Format | JSON, Export Version v2 |
 | Summarize Data | **Off** |
+| Time Grouping | **Default** (no aggregation / raw data points) |
 | Date Range | **Since Last Sync** |
 | Batch Requests | **On** |
 
@@ -440,8 +441,12 @@ Mateo-only changes (do not alter these from AWS or an agent):
 
 1. Edit/create **PRISM Activity Daily** exactly as section A; keep Workouts and
    GPX out of this Health Metrics automation.
-2. Edit/create **PRISM Vitals & Mobility** exactly as section B; keep raw
-   evidence unsummarized and incremental.
+2. Edit/create **PRISM Vitals & Mobility** exactly as section B. To set its
+   raw grouping, temporarily enable **Summarize Data** only if HAE requires it
+   to expose **Time Grouping**, select **Default**, turn **Summarize Data**
+   back **Off**, then Save/Update the automation. **Default = no aggregation /
+   raw data points.** Confirm the first production request is classified as
+   `raw_observation`.
 3. Leave dedicated Heart Rate and Sleep automations unchanged. Do not create a
    production minute-summary activity stream.
 4. After deploy, run one normal Activity Daily export after a day completes,
