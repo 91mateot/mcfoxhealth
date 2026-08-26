@@ -7,6 +7,7 @@ Ingest Lambda — handles incoming health data from three sources:
 """
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -18,11 +19,19 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import boto3
+from boto3.dynamodb.conditions import Attr
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger("ingest")
 logger.setLevel(logging.INFO)
 
-from shared.db import get_item, get_table, put_item, query_items
+from shared.db import (
+    get_item,
+    get_table,
+    put_item,
+    put_item_conditionally,
+    query_items,
+)
 from shared.samples_ledger import read_merged_samples, write_sharded_ledger
 from shared.hevy_client import (
     body_measurement_to_metrics,
@@ -363,6 +372,9 @@ _HAE_RAW_AGGREGATION_TOKENS = {
     "disaggregated",
     "nogrouping",
 }
+_HAE_DAILY_SUMMARY_GUARD_PREFIX = "hae_daily_summary_guard"
+_HAE_DAILY_SUMMARY_SUPERSEDED_SESSION_LIMIT = 16
+_HAE_DAILY_SUMMARY_GUARD_MAX_ATTEMPTS = 3
 
 
 def _normalized_request_headers(event):
@@ -388,6 +400,227 @@ def _safe_hae_metadata_value(value, limit=256):
 def _hae_header_token(value):
     safe = _safe_hae_metadata_value(value, limit=128)
     return re.sub(r"[^a-z0-9]+", "", safe.lower()) if safe else ""
+
+
+def _hae_metadata_fingerprint(value):
+    """Return a short deterministic identifier suitable for bounded logs."""
+    safe = _safe_hae_metadata_value(value, limit=256)
+    if not safe:
+        return "unknown"
+    return hashlib.sha256(safe.encode("utf-8")).hexdigest()[:16]
+
+
+def _hae_daily_summary_session_identity(request_context):
+    """Return the documented session identity required for guarded summaries."""
+    metadata = request_context.get("metadata") or {}
+    session_id = _safe_hae_metadata_value(metadata.get("hae_session_id"), 256)
+    automation_id = _safe_hae_metadata_value(metadata.get("hae_automation_id"), 256)
+    if not session_id:
+        return None, "missing_session_id"
+    if not automation_id:
+        return None, "missing_automation_id"
+    return {
+        "session_id": session_id,
+        "automation_id": automation_id,
+    }, None
+
+
+def _hae_daily_summary_guard_key(date_str, automation_id):
+    """Use a private, deterministic automation fingerprint in the row key."""
+    automation_hash = hashlib.sha256(
+        automation_id.encode("utf-8"),
+    ).hexdigest()
+    return {
+        "date": date_str,
+        "metric_source": (
+            f"{_HAE_DAILY_SUMMARY_GUARD_PREFIX}"
+            f"#{automation_hash}"
+        ),
+    }
+
+
+def _is_conditional_check_failure(exc):
+    return (
+        isinstance(exc, ClientError)
+        and exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException"
+    )
+
+
+def _conditional_put_item(table, item, condition_expression):
+    """Return false only for an expected DynamoDB conditional conflict."""
+    try:
+        put_item_conditionally(
+            table,
+            item,
+            condition_expression=condition_expression,
+        )
+    except ClientError as exc:
+        if _is_conditional_check_failure(exc):
+            return False
+        raise
+    return True
+
+
+def _hae_daily_summary_guard_version(item):
+    try:
+        version = int((item or {}).get("hae_session_guard_version"))
+    except (TypeError, ValueError):
+        return None
+    return version if version > 0 else None
+
+
+def _hae_daily_summary_superseded_sessions(item):
+    raw_history = (item or {}).get("hae_superseded_session_ids")
+    if not isinstance(raw_history, list):
+        return None
+    history = []
+    for session_id in raw_history:
+        safe = _safe_hae_metadata_value(session_id, 256)
+        if safe and safe not in history:
+            history.append(safe)
+    return history[:_HAE_DAILY_SUMMARY_SUPERSEDED_SESSION_LIMIT]
+
+
+def _new_hae_daily_summary_guard_item(
+    *,
+    date_str,
+    request_context,
+    session_identity,
+    current_session_id,
+    superseded_session_ids,
+    version,
+):
+    """Build a same-table control row; it is not a health metric observation."""
+    item = {
+        "date": date_str,
+        "metric_source": _hae_daily_summary_guard_key(
+            date_str,
+            session_identity["automation_id"],
+        )["metric_source"],
+        "hae_semantics": "completed_daily_summary_session_guard",
+        "hae_current_session_id": current_session_id,
+        "hae_superseded_session_ids": superseded_session_ids,
+        "hae_session_guard_version": version,
+        "ingested_at": _now_iso(),
+    }
+    item.update(request_context.get("metadata") or {})
+    return item
+
+
+def _acquire_hae_daily_summary_session_guard(
+    table,
+    date_str,
+    request_context,
+    session_identity,
+):
+    """Classify one automation/date session with optimistic concurrency.
+
+    A guard update happens before any canonical summary metric row is written.
+    Metric rows are additionally fenced by the accepted guard version so an
+    in-flight older session cannot overwrite a later accepted correction.
+    """
+    session_id = session_identity["session_id"]
+    guard_key = _hae_daily_summary_guard_key(
+        date_str,
+        session_identity["automation_id"],
+    )
+
+    for _attempt in range(_HAE_DAILY_SUMMARY_GUARD_MAX_ATTEMPTS):
+        existing = get_item(table, guard_key)
+        if not existing:
+            item = _new_hae_daily_summary_guard_item(
+                date_str=date_str,
+                request_context=request_context,
+                session_identity=session_identity,
+                current_session_id=session_id,
+                superseded_session_ids=[],
+                version=1,
+            )
+            if _conditional_put_item(
+                table,
+                item,
+                Attr("metric_source").not_exists(),
+            ):
+                return {"state": "new", "version": 1}
+            continue
+
+        current_session_id = _safe_hae_metadata_value(
+            existing.get("hae_current_session_id"),
+            256,
+        )
+        superseded_session_ids = _hae_daily_summary_superseded_sessions(existing)
+        version = _hae_daily_summary_guard_version(existing)
+        if not current_session_id or superseded_session_ids is None or version is None:
+            return {"state": "conflict", "reason": "invalid_guard_state"}
+
+        if session_id == current_session_id:
+            return {"state": "current", "version": version}
+        if session_id in superseded_session_ids:
+            return {"state": "stale", "version": version}
+
+        new_history = [current_session_id]
+        new_history.extend(
+            prior_session_id
+            for prior_session_id in superseded_session_ids
+            if prior_session_id not in {session_id, current_session_id}
+        )
+        item = _new_hae_daily_summary_guard_item(
+            date_str=date_str,
+            request_context=request_context,
+            session_identity=session_identity,
+            current_session_id=session_id,
+            superseded_session_ids=(
+                new_history[:_HAE_DAILY_SUMMARY_SUPERSEDED_SESSION_LIMIT]
+            ),
+            version=version + 1,
+        )
+        if _conditional_put_item(
+            table,
+            item,
+            Attr("hae_session_guard_version").eq(version),
+        ):
+            return {"state": "new", "version": version + 1}
+
+    return {"state": "conflict", "reason": "conditional_write_conflict"}
+
+
+def _put_hae_daily_summary_metric(table, item, guard_version):
+    """Write only if no later accepted daily-summary guard has fenced it out."""
+    item["hae_session_guard_version"] = guard_version
+    return _conditional_put_item(
+        table,
+        item,
+        (
+            Attr("hae_session_guard_version").not_exists()
+            | Attr("hae_session_guard_version").lte(guard_version)
+        ),
+    )
+
+
+def _log_hae_daily_summary_guard_event(
+    level,
+    *,
+    request_context,
+    analysis_date,
+    reason,
+):
+    """Log sanitized, bounded session-guard diagnostics without health data."""
+    metadata = request_context.get("metadata") or {}
+    session_fingerprint = _hae_metadata_fingerprint(metadata.get("hae_session_id"))
+    automation_fingerprint = _hae_metadata_fingerprint(
+        metadata.get("hae_automation_id")
+    )
+    message = (
+        "HAE_DAILY_SUMMARY_SESSION_GUARD "
+        "automation_id_fp=%s session_fp=%s analysis_date=%s reason=%s"
+    )
+    getattr(logger, level)(
+        message,
+        automation_fingerprint,
+        session_fingerprint,
+        _safe_hae_metadata_value(analysis_date, 128) or "?",
+        _safe_hae_metadata_value(reason, 64) or "?",
+    )
 
 
 def _hae_request_context(headers):
@@ -512,16 +745,35 @@ def _handle_hae_daily_summary(data_list, request_context):
 
     The storage identity is additive (``#hae_daily_summary``), which prevents
     historical raw HAE sample-ledger aggregates from being added to the new
-    daily totals. A DynamoDB put on the same metric/date intentionally makes
-    an identical replay idempotent and a later correction replace the prior
-    summary instead of accumulating it.
+    daily totals. A same-table automation/date session guard rejects a delayed
+    replay that was already superseded by a later accepted correction. The
+    guard's version fences metric writes so older in-flight requests cannot
+    overwrite a newer accepted correction.
     """
     table = get_table("HEALTH_METRICS_TABLE")
-    items_written = 0
-    affected_dates = set()
     _log_hae_stream_classification(request_context, len(data_list))
     _log_hae_summary(data_list, request_context=request_context)
 
+    session_identity, identity_error = _hae_daily_summary_session_identity(
+        request_context,
+    )
+    if identity_error:
+        _log_hae_daily_summary_guard_event(
+            "warning",
+            request_context=request_context,
+            analysis_date=None,
+            reason=identity_error,
+        )
+        return _resp(
+            422,
+            {
+                "error": "missing required HAE daily-summary session identity",
+                "reason": identity_error,
+                "hae_semantics": "completed_daily_summary",
+            },
+        )
+
+    items_by_date = {}
     for entry in data_list:
         raw_metric_name = str(entry.get("name") or "").strip()
         spec = daily_activity_spec_for_raw_name(raw_metric_name)
@@ -574,16 +826,109 @@ def _handle_hae_daily_summary(data_list, request_context):
             item["hae_source"] = source
         item.update(request_context.get("metadata") or {})
         item.update(temporal)
-        put_item(table, item)
-        items_written += 1
-        affected_dates.add(date_str)
+        items_by_date.setdefault(date_str, []).append(item)
 
-    for date_str in sorted(affected_dates):
+    # Resolve the full automation/date request before changing any canonical
+    # metric row. The contracted Yesterday automation has one date and all
+    # seven metric rows therefore share one accept/skip decision. Grouping by
+    # date keeps the same guard semantics for any existing multi-date traffic
+    # without changing its historical routing contract.
+    guard_decisions = {}
+    for date_str in sorted(items_by_date):
+        decision = _acquire_hae_daily_summary_session_guard(
+            table,
+            date_str,
+            request_context,
+            session_identity,
+        )
+        if decision["state"] == "conflict":
+            _log_hae_daily_summary_guard_event(
+                "error",
+                request_context=request_context,
+                analysis_date=date_str,
+                reason=decision.get("reason") or "conditional_write_conflict",
+            )
+            return _resp(
+                409,
+                {
+                    "error": "HAE daily-summary session guard conflict",
+                    "hae_semantics": "completed_daily_summary",
+                },
+            )
+        guard_decisions[date_str] = decision
+
+    stale_dates = [
+        date_str
+        for date_str, decision in guard_decisions.items()
+        if decision["state"] == "stale"
+    ]
+    accepted_dates = [
+        date_str
+        for date_str, decision in guard_decisions.items()
+        if decision["state"] in {"new", "current"}
+    ]
+    if stale_dates:
+        # The normal Activity Daily contract has one date. Keep even an
+        # unexpected multi-date diagnostic bounded to the approved seven
+        # activity rows and never include session identifiers directly.
+        _log_hae_daily_summary_guard_event(
+            "info",
+            request_context=request_context,
+            analysis_date=",".join(stale_dates[:7]),
+            reason="superseded_session_replay_ignored",
+        )
+
+    items_written = 0
+    completed_dates = []
+    for date_str in accepted_dates:
+        decision = guard_decisions[date_str]
+        write_conflict = False
+        for item in items_by_date[date_str]:
+            if not _put_hae_daily_summary_metric(
+                table,
+                item,
+                decision["version"],
+            ):
+                write_conflict = True
+                break
+            items_written += 1
+        if write_conflict:
+            # A concurrently accepted newer session has fenced this writer
+            # out. Do not compute on a potentially partial older result; a
+            # retry will re-evaluate the guard and become a no-op if stale.
+            _log_hae_daily_summary_guard_event(
+                "warning",
+                request_context=request_context,
+                analysis_date=date_str,
+                reason="metric_write_fenced_by_newer_guard",
+            )
+            return _resp(
+                409,
+                {
+                    "error": "HAE daily-summary metric write conflict",
+                    "hae_semantics": "completed_daily_summary",
+                },
+            )
+        completed_dates.append(date_str)
+
+    for date_str in completed_dates:
         _trigger_compute(date_str)
+
+    if not completed_dates and stale_dates:
+        return _resp(
+            200,
+            {
+                "date": max(stale_dates),
+                "items_written": 0,
+                "status": "stale_daily_summary_replay_ignored",
+                "hae_semantics": "completed_daily_summary",
+            },
+        )
+
     return _resp(
         200,
         {
-            "date": max(affected_dates) if affected_dates else None,
+            "date": max(completed_dates) if completed_dates else None,
             "items_written": items_written,
             "hae_semantics": "completed_daily_summary",
         },

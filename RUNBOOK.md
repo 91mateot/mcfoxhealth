@@ -335,6 +335,35 @@ it is never added to the old total. The date/metric row preserves the source
 timestamp, analysis-date temporal metadata, raw metric name/units, HAE source
 string, and safe automation metadata.
 
+**Replay/correction guard.** For each `(analysis_date, automation-id)`, McFox
+stores a same-table control row with the current HAE `session-id`, a bounded
+history of the 16 newest superseded session IDs, and an optimistic guard
+version. This is not a health-metric observation. It has these outcomes before
+any canonical daily metric row is written:
+
+- The current session is safe to replay and can repair a partial prior write.
+- A known superseded session returns HTTP 200 with
+  `stale_daily_summary_replay_ignored`; it changes no metric row, source
+  metadata, `ingested_at`, or downstream computation.
+- A previously unseen session becomes current and moves the prior current
+  session into the bounded history. Its source-provided daily totals replace,
+  rather than add to, the prior values.
+
+Guard updates use conditional writes, and summary rows carry the accepted guard
+version as a fence so an in-flight older request cannot overwrite a later
+accepted correction. If a conditional guard update cannot be resolved after
+the bounded retry loop, McFox returns an observable retryable conflict before
+canonical writes.
+
+The documented REST headers give an identity (`session-id`) but no monotonic
+source-generation or correction-revision value. McFox therefore does **not**
+sort session UUIDs, use request arrival time as source order, or infer order
+from a daily row's midnight timestamp. It can reject a replay of a session
+already known to be superseded, but cannot determine the source order of two
+previously unseen session IDs; their safely serialized accepted arrival order
+remains authoritative. Classified Activity Daily requests unexpectedly missing
+`session-id` or `automation-id` fail closed with HTTP 422 before writes.
+
 #### B. PRISM Vitals & Mobility — raw/disaggregated evidence
 
 Configure a separate HAE REST automation with:

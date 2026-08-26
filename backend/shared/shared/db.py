@@ -50,6 +50,14 @@ def put_item(table, item: dict) -> None:
     table.put_item(Item=_to_decimal(item))
 
 
+def put_item_conditionally(table, item: dict, *, condition_expression) -> None:
+    """Write an item only when DynamoDB accepts the supplied condition."""
+    table.put_item(
+        Item=_to_decimal(item),
+        ConditionExpression=condition_expression,
+    )
+
+
 def get_item(table, key: dict) -> Optional[dict]:
     resp = table.get_item(Key=key)
     item = resp.get("Item")

@@ -6,6 +6,8 @@ import logging
 import os
 import sys
 
+from botocore.exceptions import ClientError
+
 from .test_ingest_parser import _event, _fresh_module, _patch_auth
 
 
@@ -27,6 +29,12 @@ def _hae_event(payload, headers):
     event = _event(payload)
     event["headers"].update(headers)
     return event
+
+
+def _daily_headers(session_id):
+    headers = dict(DAILY_HEADERS)
+    headers["session-id"] = session_id
+    return headers
 
 
 DAILY_HEADERS = {
@@ -52,6 +60,41 @@ def _latest(table, metric_source):
     return [item for item in table.items if item["metric_source"] == metric_source][-1]
 
 
+def _daily_summary_sources(table):
+    return {
+        item["metric_source"]
+        for item in table.items
+        if not item["metric_source"].startswith("hae_daily_summary_guard#")
+    }
+
+
+def _daily_guard(table):
+    return [
+        item
+        for item in table.items
+        if item["metric_source"].startswith("hae_daily_summary_guard#")
+    ][-1]
+
+
+def _corrected_daily_payload(payload, *, metric_name, qty, source=None):
+    corrected = copy.deepcopy(payload)
+    for metric in corrected["data"]["metrics"]:
+        if metric["name"] != metric_name:
+            continue
+        metric["data"][0]["qty"] = qty
+        if source is not None:
+            metric["data"][0]["source"] = source
+        return corrected
+    raise AssertionError(f"missing fabricated metric {metric_name}")
+
+
+def _conditional_check_failed():
+    return ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException", "Message": "test"}},
+        "PutItem",
+    )
+
+
 def test_activity_daily_writes_separate_completed_summary_rows_with_metadata():
     handler, table = _fresh_module()
     _patch_auth(handler)
@@ -63,7 +106,7 @@ def test_activity_daily_writes_separate_completed_summary_rows_with_metadata():
     assert body["items_written"] == 7
     assert body["hae_semantics"] == "completed_daily_summary"
 
-    sources = {item["metric_source"] for item in table.items}
+    sources = _daily_summary_sources(table)
     assert sources == {
         "active_cal#hae_daily_summary",
         "exercise_min#hae_daily_summary",
@@ -74,6 +117,11 @@ def test_activity_daily_writes_separate_completed_summary_rows_with_metadata():
         "flights#hae_daily_summary",
     }
     assert not any(source.endswith("_samples") for source in sources)
+
+    guard = _daily_guard(table)
+    assert guard["hae_current_session_id"] == "sanitized-session-daily"
+    assert guard["hae_superseded_session_ids"] == []
+    assert guard["hae_session_guard_version"] == 1
 
     steps = _latest(table, "steps#hae_daily_summary")
     assert steps["value"] == 303
@@ -93,26 +141,267 @@ def test_activity_daily_writes_separate_completed_summary_rows_with_metadata():
     assert _latest(table, "exercise_min#hae_daily_summary")["value"] == 0
 
 
-def test_daily_summary_replay_is_idempotent_and_correction_replaces():
+def test_daily_summary_current_session_replay_is_idempotent_and_repairs_missing_rows():
     handler, table = _fresh_module()
     _patch_auth(handler)
     payload = _fixture("hae_v2_activity_daily_sanitized.json")
 
-    handler.lambda_handler(_hae_event(payload, DAILY_HEADERS), None)
-    handler.lambda_handler(_hae_event(payload, DAILY_HEADERS), None)
+    headers_a = _daily_headers("sanitized-session-a")
+    handler.lambda_handler(_hae_event(payload, headers_a), None)
+    table.items[:] = [
+        item
+        for item in table.items
+        if item["metric_source"] != "flights#hae_daily_summary"
+    ]
+    replay = handler.lambda_handler(_hae_event(payload, headers_a), None)
+    assert replay["statusCode"] == 200
+    assert json.loads(replay["body"])["items_written"] == 7
     assert _latest(table, "steps#hae_daily_summary")["value"] == 303
-
-    corrected = copy.deepcopy(payload)
-    for metric in corrected["data"]["metrics"]:
-        if metric["name"] == "step_count":
-            metric["data"][0]["qty"] = 404
-    handler.lambda_handler(_hae_event(corrected, DAILY_HEADERS), None)
-
-    assert _latest(table, "steps#hae_daily_summary")["value"] == 404
+    assert _latest(table, "flights#hae_daily_summary")["value"] == 2
+    assert _daily_guard(table)["hae_current_session_id"] == "sanitized-session-a"
+    assert _daily_guard(table)["hae_session_guard_version"] == 1
     assert not any(
         item["metric_source"] == "steps#hae_daily_summary_samples"
         for item in table.items
     )
+
+
+def test_daily_summary_new_session_correction_replaces_prior_total():
+    handler, table = _fresh_module()
+    _patch_auth(handler)
+    payload = _fixture("hae_v2_activity_daily_sanitized.json")
+    corrected = _corrected_daily_payload(
+        payload,
+        metric_name="step_count",
+        qty=404,
+        source="Sanitized Correction Source",
+    )
+
+    handler.lambda_handler(_hae_event(payload, _daily_headers("sanitized-session-a")), None)
+    handler.lambda_handler(
+        _hae_event(corrected, _daily_headers("sanitized-session-b")),
+        None,
+    )
+    assert _latest(table, "steps#hae_daily_summary")["value"] == 404
+    assert _latest(table, "steps#hae_daily_summary")["hae_session_id"] == (
+        "sanitized-session-b"
+    )
+    assert _daily_guard(table)["hae_current_session_id"] == "sanitized-session-b"
+    assert _daily_guard(table)["hae_superseded_session_ids"] == [
+        "sanitized-session-a"
+    ]
+    assert not any(
+        item["metric_source"] == "steps#hae_daily_summary_samples"
+        for item in table.items
+    )
+
+
+def test_daily_summary_stale_session_replay_is_a_successful_noop(caplog):
+    handler, table = _fresh_module()
+    _patch_auth(handler)
+    payload = _fixture("hae_v2_activity_daily_sanitized.json")
+    corrected = _corrected_daily_payload(
+        payload,
+        metric_name="step_count",
+        qty=404,
+        source="Sanitized Correction Source",
+    )
+    computed_dates = []
+    handler._trigger_compute = computed_dates.append
+
+    headers_a = _daily_headers("sanitized-session-a")
+    headers_b = _daily_headers("sanitized-session-b")
+    handler.lambda_handler(_hae_event(payload, headers_a), None)
+    handler.lambda_handler(_hae_event(corrected, headers_b), None)
+
+    before_steps = copy.deepcopy(_latest(table, "steps#hae_daily_summary"))
+    before_guard = copy.deepcopy(_daily_guard(table))
+    before_item_count = len(table.items)
+    before_compute_count = len(computed_dates)
+    with caplog.at_level(logging.INFO, logger="ingest"):
+        stale = handler.lambda_handler(_hae_event(payload, headers_a), None)
+
+    assert stale["statusCode"] == 200
+    assert json.loads(stale["body"]) == {
+        "date": "2030-04-05",
+        "items_written": 0,
+        "status": "stale_daily_summary_replay_ignored",
+        "hae_semantics": "completed_daily_summary",
+    }
+    assert len(table.items) == before_item_count
+    assert len(computed_dates) == before_compute_count
+    assert _latest(table, "steps#hae_daily_summary") == before_steps
+    assert _daily_guard(table) == before_guard
+    assert all(
+        _latest(table, source)["hae_session_id"] == "sanitized-session-b"
+        for source in _daily_summary_sources(table)
+    )
+    assert "HAE_DAILY_SUMMARY_SESSION_GUARD" in caplog.text
+    assert "sanitized-session-a" not in caplog.text
+    assert "404" not in caplog.text
+
+
+def test_daily_summary_current_corrected_session_replay_remains_safe():
+    handler, table = _fresh_module()
+    _patch_auth(handler)
+    payload = _fixture("hae_v2_activity_daily_sanitized.json")
+    corrected = _corrected_daily_payload(
+        payload,
+        metric_name="step_count",
+        qty=404,
+    )
+
+    handler.lambda_handler(_hae_event(payload, _daily_headers("sanitized-session-a")), None)
+    handler.lambda_handler(
+        _hae_event(corrected, _daily_headers("sanitized-session-b")),
+        None,
+    )
+    replay = handler.lambda_handler(
+        _hae_event(corrected, _daily_headers("sanitized-session-b")),
+        None,
+    )
+
+    assert replay["statusCode"] == 200
+    assert _latest(table, "steps#hae_daily_summary")["value"] == 404
+    assert _daily_guard(table)["hae_current_session_id"] == "sanitized-session-b"
+    assert _daily_guard(table)["hae_session_guard_version"] == 2
+
+
+def test_daily_summary_correction_can_replace_nonzero_with_genuine_zero():
+    handler, table = _fresh_module()
+    _patch_auth(handler)
+    payload = _fixture("hae_v2_activity_daily_sanitized.json")
+    corrected_zero = _corrected_daily_payload(
+        payload,
+        metric_name="step_count",
+        qty=0,
+    )
+
+    handler.lambda_handler(_hae_event(payload, _daily_headers("sanitized-session-a")), None)
+    handler.lambda_handler(
+        _hae_event(corrected_zero, _daily_headers("sanitized-session-b")),
+        None,
+    )
+    handler.lambda_handler(
+        _hae_event(payload, _daily_headers("sanitized-session-a")),
+        None,
+    )
+
+    steps = _latest(table, "steps#hae_daily_summary")
+    assert steps["value"] == 0
+    assert steps["hae_session_id"] == "sanitized-session-b"
+
+
+def test_daily_summary_guard_history_is_bounded_and_never_evicts_current():
+    handler, table = _fresh_module()
+    _patch_auth(handler)
+    payload = _fixture("hae_v2_activity_daily_sanitized.json")
+
+    for index in range(18):
+        response = handler.lambda_handler(
+            _hae_event(payload, _daily_headers(f"sanitized-session-{index:02d}")),
+            None,
+        )
+        assert response["statusCode"] == 200
+
+    guard = _daily_guard(table)
+    assert guard["hae_current_session_id"] == "sanitized-session-17"
+    assert len(guard["hae_superseded_session_ids"]) == 16
+    assert guard["hae_superseded_session_ids"][0] == "sanitized-session-16"
+    assert guard["hae_superseded_session_ids"][-1] == "sanitized-session-01"
+    assert guard["hae_current_session_id"] not in guard["hae_superseded_session_ids"]
+
+    current_replay = handler.lambda_handler(
+        _hae_event(payload, _daily_headers("sanitized-session-17")),
+        None,
+    )
+    assert current_replay["statusCode"] == 200
+    assert _daily_guard(table)["hae_current_session_id"] == "sanitized-session-17"
+
+
+def test_daily_summary_missing_session_identity_fails_closed_before_writes():
+    handler, table = _fresh_module()
+    _patch_auth(handler)
+    payload = _fixture("hae_v2_activity_daily_sanitized.json")
+    missing_session = dict(DAILY_HEADERS)
+    missing_session.pop("session-id")
+
+    response = handler.lambda_handler(_hae_event(payload, missing_session), None)
+    assert response["statusCode"] == 422
+    assert json.loads(response["body"]) == {
+        "error": "missing required HAE daily-summary session identity",
+        "reason": "missing_session_id",
+        "hae_semantics": "completed_daily_summary",
+    }
+    assert table.items == []
+
+
+def test_daily_summary_guard_conditional_conflict_retries_and_reevaluates():
+    handler, table = _fresh_module()
+    _patch_auth(handler)
+    payload = _fixture("hae_v2_activity_daily_sanitized.json")
+    original_conditional_put = handler.put_item_conditionally
+    guard_calls = 0
+
+    def conflict_once(table_arg, item, *, condition_expression):
+        nonlocal guard_calls
+        if item["metric_source"].startswith("hae_daily_summary_guard#"):
+            guard_calls += 1
+            if guard_calls == 1:
+                concurrent = dict(item)
+                concurrent["hae_current_session_id"] = "sanitized-session-b"
+                concurrent["hae_session_id"] = "sanitized-session-b"
+                concurrent["hae_session_guard_version"] = 1
+                table_arg.put_item(Item=concurrent)
+                raise _conditional_check_failed()
+        return original_conditional_put(
+            table_arg,
+            item,
+            condition_expression=condition_expression,
+        )
+
+    handler.put_item_conditionally = conflict_once
+    response = handler.lambda_handler(
+        _hae_event(payload, _daily_headers("sanitized-session-a")),
+        None,
+    )
+
+    assert response["statusCode"] == 200
+    assert guard_calls == 2
+    guard = _daily_guard(table)
+    assert guard["hae_current_session_id"] == "sanitized-session-a"
+    assert guard["hae_superseded_session_ids"] == ["sanitized-session-b"]
+    assert guard["hae_session_guard_version"] == 2
+    assert _latest(table, "steps#hae_daily_summary")["hae_session_guard_version"] == 2
+
+
+def test_daily_summary_unresolved_guard_conflict_fails_before_canonical_writes():
+    handler, table = _fresh_module()
+    _patch_auth(handler)
+    payload = _fixture("hae_v2_activity_daily_sanitized.json")
+    original_conditional_put = handler.put_item_conditionally
+    guard_calls = 0
+
+    def always_conflict(table_arg, item, *, condition_expression):
+        nonlocal guard_calls
+        if item["metric_source"].startswith("hae_daily_summary_guard#"):
+            guard_calls += 1
+            raise _conditional_check_failed()
+        return original_conditional_put(
+            table_arg,
+            item,
+            condition_expression=condition_expression,
+        )
+
+    handler.put_item_conditionally = always_conflict
+    response = handler.lambda_handler(
+        _hae_event(payload, _daily_headers("sanitized-session-a")),
+        None,
+    )
+
+    assert response["statusCode"] == 409
+    assert guard_calls == 3
+    assert table.items == []
 
 
 def test_summary_resolver_prefers_completed_daily_over_legacy_raw_without_double_counting():
