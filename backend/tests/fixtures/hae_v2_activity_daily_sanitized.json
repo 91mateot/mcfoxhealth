@@ -1,0 +1,13 @@
+{
+  "data": {
+    "metrics": [
+      {"name": "active_energy", "units": "kcal", "data": [{"date": "2030-04-05 00:00:00 -0700", "qty": 101, "source": "Sanitized Watch + Sanitized Phone"}]},
+      {"name": "apple_exercise_time", "units": "min", "data": [{"date": "2030-04-05 00:00:00 -0700", "qty": 0, "source": "Sanitized Watch + Sanitized Phone"}]},
+      {"name": "step_count", "units": "count", "data": [{"date": "2030-04-05 00:00:00 -0700", "qty": 303, "source": "Sanitized Watch + Sanitized Phone"}]},
+      {"name": "walking_running_distance", "units": "mi", "data": [{"date": "2030-04-05 00:00:00 -0700", "qty": 4.5, "source": "Sanitized Watch + Sanitized Phone"}]},
+      {"name": "apple_stand_time", "units": "min", "data": [{"date": "2030-04-05 00:00:00 -0700", "qty": 41, "source": "Sanitized Watch + Sanitized Phone"}]},
+      {"name": "apple_stand_hour", "units": "count", "data": [{"date": "2030-04-05 00:00:00 -0700", "qty": 5, "source": "Sanitized Watch + Sanitized Phone"}]},
+      {"name": "flights_climbed", "units": "count", "data": [{"date": "2030-04-05 00:00:00 -0700", "qty": 2, "source": "Sanitized Watch + Sanitized Phone"}]}
+    ]
+  }
+}

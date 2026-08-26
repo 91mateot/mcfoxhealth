@@ -14,6 +14,7 @@ import statistics
 from datetime import datetime, timedelta, timezone
 
 from shared.db import get_table, put_item, get_item, query_items
+from shared.hae_daily import HAE_DAILY_ACTIVITY_METRICS, resolve_hae_daily_activity
 from shared.samples_ledger import merge_samples_from_map
 from shared.insight_templates import PAIRS as NUMERIC_PAIRS, confidence_tier, render_insight
 from shared.pearson import linreg, pearson_r
@@ -155,6 +156,26 @@ def _backfill_caffeine_totals(days: int):
         put_item(scores_table, existing)
         updated += 1
     return {"status": "caffeine_backfilled", "days_updated": updated}
+
+
+def _resolve_activity_for_compute(metric_map, metric_key, manual_source=None):
+    """Resolve Activity Daily before using the historic raw HAE aggregate.
+
+    The shared resolver is HAE-only so its source contract remains exactly
+    summary / legacy / unavailable. Manual data is a separate compatibility
+    fallback and is never mixed into a HAE total.
+    """
+    resolved = resolve_hae_daily_activity(metric_map, metric_key)
+    if resolved["source"] != "unavailable" or not manual_source:
+        return resolved
+    manual_item = metric_map.get(manual_source)
+    if isinstance(manual_item, dict) and manual_item.get("value") is not None:
+        return {
+            "value": manual_item["value"],
+            "source": "manual",
+            "metric_source": manual_source,
+        }
+    return resolved
 
 
 def _compute_day(date_str):
@@ -343,8 +364,16 @@ def _compute_day(date_str):
             hr_dip_idx=hr_dip_idx_val,
         )
 
-    steps_item = metric_map.get("steps#hae") or metric_map.get("steps#manual")
-    active_cal_item = metric_map.get("active_cal#hae") or metric_map.get("active_cal#manual")
+    activity_resolutions = {
+        metric_key: _resolve_activity_for_compute(
+            metric_map,
+            metric_key,
+            f"{metric_key}#manual" if metric_key in ("steps", "active_cal") else None,
+        )
+        for metric_key in HAE_DAILY_ACTIVITY_METRICS
+    }
+    steps_resolution = activity_resolutions["steps"]
+    active_cal_resolution = activity_resolutions["active_cal"]
 
     nutrition_items = query_items(nutrition_table, "date", date_str)
     protein_total = sum(m.get("p", 0) for m in nutrition_items if m.get("meal_id", "").startswith("meal_"))
@@ -382,8 +411,12 @@ def _compute_day(date_str):
     score_item["resp"] = resp
     score_item["spo2"] = spo2
     score_item["wrist_temp"] = wrist_temp
-    score_item["steps"] = steps_item["value"] if steps_item else None
-    score_item["active_cal"] = active_cal_item["value"] if active_cal_item else None
+    score_item["steps"] = steps_resolution["value"]
+    score_item["active_cal"] = active_cal_resolution["value"]
+    score_item["activity_sources"] = {
+        metric_key: resolved["source"]
+        for metric_key, resolved in activity_resolutions.items()
+    }
     score_item["protein_total"] = protein_total
     score_item["cal_total"] = cal_total
     score_item["water_oz"] = water_total
@@ -476,6 +509,14 @@ def _compute_baselines():
     for i in range(window_days):
         d = (today - timedelta(days=i + 1)).strftime("%Y-%m-%d")
         metrics = query_items(metrics_table, "date", d)
+        metric_map = {m["metric_source"]: m for m in metrics if m.get("metric_source")}
+        steps_resolution = _resolve_activity_for_compute(
+            metric_map,
+            "steps",
+            "steps#manual",
+        )
+        if steps_resolution["value"] is not None:
+            steps_vals.append(steps_resolution["value"])
         for m in metrics:
             src = m["metric_source"]
             v = m.get("value")
@@ -493,7 +534,10 @@ def _compute_baselines():
             elif src.startswith("resp#"):
                 resp_vals.append(v)
             elif src.startswith("steps#"):
-                steps_vals.append(v)
+                # Activity Daily is resolved once above. Do not add both the
+                # completed summary and historic raw HAE aggregate to a
+                # baseline (or count a manual fallback twice).
+                continue
             elif src.startswith("spo2#"):
                 spo2_vals.append(v)
             elif src.startswith("wrist_temp#"):

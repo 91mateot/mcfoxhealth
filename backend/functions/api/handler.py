@@ -154,6 +154,23 @@ def _metric_semantics(kind=None, availability="available", **details):
     return semantics
 
 
+def _activity_metric_semantics(scores, metric_key, value):
+    """Expose the completed-day resolver result without changing the value."""
+    if value is None:
+        return _metric_semantics(availability="unavailable", source="unavailable")
+    activity_sources = scores.get("activity_sources")
+    source = activity_sources.get(metric_key) if isinstance(activity_sources, dict) else None
+    # Daily-score rows predating the Activity Daily contract do not retain an
+    # explicit source label. Their HAE path was the legacy aggregate.
+    if source not in {
+        "hae_daily_summary",
+        "legacy_hae_aggregate",
+        "manual",
+    }:
+        source = "legacy_hae_aggregate"
+    return _metric_semantics("observed", source=source)
+
+
 def _history_availability(samples, expected):
     if samples == 0:
         return "unavailable"
@@ -475,9 +492,9 @@ def _get_today():
             "resp": _metric_semantics("observed") if _present(scores, "resp") is not None else _metric_semantics(availability="unavailable"),
             "spo2": _metric_semantics("observed") if _present(scores, "spo2") is not None else _metric_semantics(availability="unavailable"),
             "wristTemp": _metric_semantics("observed") if _present(scores, "wrist_temp") is not None else _metric_semantics(availability="unavailable"),
-            "steps": _metric_semantics("observed") if steps is not None else _metric_semantics(availability="unavailable"),
+            "steps": _activity_metric_semantics(scores, "steps", steps),
             "stepsGoal": _metric_semantics("configured_target"),
-            "activeCalories": _metric_semantics("observed") if active_cal is not None else _metric_semantics(availability="unavailable"),
+            "activeCalories": _activity_metric_semantics(scores, "active_cal", active_cal),
             "restingCalories": _metric_semantics(availability="unavailable"),
             "water": _metric_semantics("observed") if water_has_data else _metric_semantics(availability="unavailable"),
             "waterGoal": _metric_semantics("configured_target" if "nutrition_targets" in config else "fallback"),
