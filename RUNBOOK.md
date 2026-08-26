@@ -286,6 +286,149 @@ Health Metrics automation, then prove a clean live run before any backfill.
 Keep Workouts/GPX as a separately verified automation; do not assume it shares
 the Health Metrics route.
 
+**F2 closure (2026-08-25):** the natural post-PR16 413 at approximately
+14:59 PDT recorded `dataProcessed=89`. That is not useful rejected-request byte
+volume, so do not infer a payload size from it or add infrastructure based on
+that field. Continue using status, client user-agent, timing, and successful
+neighboring requests for passive 413 diagnosis.
+
+### 2.15 HAE PRISM source-evidence contract — two Health Metrics streams
+
+The production contract intentionally separates **completed-day activity
+totals** from **raw physiological/mobility observations**. It does **not**
+create a minute-summary activity stream, ingest HAE Workouts, or establish a
+general provenance framework.
+
+#### A. PRISM Activity Daily — canonical completed-day totals
+
+Configure one HAE REST automation with:
+
+| Setting | Required value |
+|---|---|
+| Format | JSON, Export Version v2 |
+| Summarize Data | **On** |
+| Time Grouping | **Days** |
+| Date Range | **Yesterday** |
+| Batch Requests | **On** |
+| Timing | One daily run after the prior day is complete |
+
+Enable exactly these approved activity metrics:
+
+| HAE raw metric | Canonical daily source row | Unit |
+|---|---|---|
+| `active_energy` | `active_cal#hae_daily_summary` | kcal |
+| `apple_exercise_time` | `exercise_min#hae_daily_summary` | min |
+| `step_count` | `steps#hae_daily_summary` | count |
+| `walking_running_distance` | `walk_distance#hae_daily_summary` | mi |
+| `apple_stand_time` | `stand_min#hae_daily_summary` | min |
+| `apple_stand_hour` | `stand_hours#hae_daily_summary` | count |
+| `flights_climbed` | `flights#hae_daily_summary` | count |
+
+Each accepted summary metric must carry exactly one HAE v2 daily row. The
+stored value is HAE's completed-day total; McFox must **not** reconstruct it by
+summing minute or raw rows.
+
+These rows have a separate `#hae_daily_summary` identity, never a samples
+ledger. A repeat of an identical delivery overwrites the same date/metric
+idempotently. A corrected delivery overwrites/supersedes the prior daily value;
+it is never added to the old total. The date/metric row preserves the source
+timestamp, analysis-date temporal metadata, raw metric name/units, HAE source
+string, and safe automation metadata.
+
+#### B. PRISM Vitals & Mobility — raw/disaggregated evidence
+
+Configure a separate HAE REST automation with:
+
+| Setting | Required value |
+|---|---|
+| Format | JSON, Export Version v2 |
+| Summarize Data | **Off** |
+| Date Range | **Since Last Sync** |
+| Batch Requests | **On** |
+
+Enable these metrics:
+
+`heart_rate_variability`, `resting_heart_rate`, `blood_oxygen_saturation`,
+`respiratory_rate`, `apple_sleeping_wrist_temperature`, `body_temperature`,
+`vo2_max`, `cardio_recovery`, `walking_heart_rate_average`,
+`walking_asymmetry_percentage`, `walking_speed`, `walking_step_length`,
+`walking_double_support_percentage`, `stair_speed_up`, `stair_speed_down`,
+`six_minute_walking_test_distance`, and `physical_effort`.
+
+Raw values remain source observations:
+
+- `walking_speed`, `walking_step_length`, double-support percentage, stair
+  speeds, and `physical_effort` are observation series and use their daily mean
+  only as the current compact representation; they are **not** summed.
+- `cardio_recovery` and six-minute walking distance retain the latest
+  observation for the date.
+- Raw distance/energy/duration/count values use the established sample-ledger
+  aggregation path, but must never merge with Activity Daily summary rows.
+- `walking_asymmetry_percentage` is empirically confirmed to be **percentage
+  points**, not a 0–1 fraction (F1 closed).
+- Existing dedicated Heart Rate and Sleep HAE paths remain separate. Withings
+  remains the primary direct weight/body-composition source. HAE Workouts and
+  GPX routes are out of scope here.
+
+#### Routing headers, compatibility, and diagnostics
+
+HAE REST automations automatically attach lower-case request headers:
+`automation-name`, `automation-id`, `automation-aggregation`,
+`automation-period`, and `session-id`. The ingest handler normalizes header
+case, preserves those five values only as bounded `hae_*` source-specific
+metadata, and never records authentication headers or request bodies.
+
+- Recognized `Days` + `Yesterday` routing is `completed_daily_summary`.
+- Recognized no-grouping/raw routing is `raw_observation`.
+- Requests with neither aggregation nor period retain compatibility as
+  `legacy_unclassified` and follow the pre-contract raw path.
+- Partial or unrecognized aggregation/period metadata returns HTTP 422 rather
+  than silently treating a new summary form as raw evidence.
+
+CloudWatch emits bounded `HAE_STREAM_CLASSIFIED` and
+`HAE_UNMAPPED_METRIC` records with metric name/count and non-secret automation
+identity. It never logs health values, payload bodies, API keys, or
+authorization headers.
+
+#### Canonical daily resolution and consumer behavior
+
+For each approved Activity Daily metric, resolve exactly once per date:
+
+1. `hae_daily_summary` — preferred when a completed-day row exists.
+2. `legacy_hae_aggregate` — current historic raw HAE aggregate when no summary
+   exists.
+3. `unavailable` — no source value; preserve missingness.
+
+Stored `0` remains a genuine observation, not missing. Current compute/API
+consumers use this resolver for steps and active calories without changing any
+scoring formulas; the daily score records the chosen source. Baseline
+calculation also resolves steps once, so raw + summary cannot double count.
+Historical rows are neither re-keyed nor migrated by this contract.
+
+#### Phone-side final configuration and live validation
+
+Mateo-only changes (do not alter these from AWS or an agent):
+
+1. Edit/create **PRISM Activity Daily** exactly as section A; keep Workouts and
+   GPX out of this Health Metrics automation.
+2. Edit/create **PRISM Vitals & Mobility** exactly as section B; keep raw
+   evidence unsummarized and incremental.
+3. Leave dedicated Heart Rate and Sleep automations unchanged. Do not create a
+   production minute-summary activity stream.
+4. After deploy, run one normal Activity Daily export after a day completes,
+   then one Vitals & Mobility export. Verify API Gateway access logs show 200
+   (not 413), Ingest logs show the expected stream classification, accepted
+   rows preserve the expected metadata, all seven daily metrics are present,
+   raw metric families/sample counts are plausible, and a repeat is
+   idempotent.
+5. Confirm the daily score/API reports `hae_daily_summary` for completed-day
+   steps and active calories, and does not combine the legacy raw total.
+
+Do **not** backfill in this validation. Targeted Health Metrics replay remains
+a separate approval after routine exports are proven healthy; use Health
+Metrics only, no Workouts, and split manual exports into bounded batches if the
+phone's request-size behavior requires it.
+
 ---
 
 ## 3. Deploy
@@ -403,9 +546,9 @@ Every `source: hevy` date in `fitness-workouts` must have matching rows in `fitn
 | Withings | ✅ Live |
 | Strava (incl. HR streams → Edwards TRIMP zones) | ✅ Live |
 | Lift engine (e1RM, PR, stall detection, weekly volume) | ✅ Live |
-| **Apple Health / HAE** | 🔴 **Active transport incident.** API Gateway is rejecting oversized HAE requests with 413 before Lambda. Server-side 413 cannot be raised; Mateo must batch/bound the Health Metrics automation and complete a clean live validation before backfill. |
+| **Apple Health / HAE** | ⚠️ PR16 server-side transport remediation is deployed. The two-stream source-evidence contract in §2.15 remains pending review/deploy, and HAE remains unvalidated until Mateo applies the bounded Activity Daily + raw Vitals & Mobility configuration and completes a clean live run. |
 | Historical HAE backfill (6/29 → present) | ⏸️ Blocked on a manual export from the HAE iPhone app |
-| HAE metric coverage | ⚠️ Observed `walking_asymmetry_percentage` and `vo2_max` now map to source observations (`walking_asymmetry#hae`, `%`; `vo2_max#hae`, `ml/kg/min`) with raw sample ledgers. Other unknown HAE names remain unpersisted but emit sanitized `HAE_UNMAPPED_METRIC` name/count logs; map only after a real received payload confirms semantics. |
+| HAE metric coverage | ⚠️ PR16 deployed `walking_asymmetry_percentage` and `vo2_max` source observations. This contract PR adds the approved Activity Daily identities plus Tier 1/2 raw physiology/mobility mappings; unknown names remain unpersisted and emit sanitized `HAE_UNMAPPED_METRIC` diagnostics. |
 | Nutrition | ⚪ Frozen 2026-05-09, no automated feed |
 | Per-session lifting calories | ⏸️ Design exists: join Apple-Health workout active energy to the Hevy session by `start_time`/`end_time`, mirroring the `hr#hae_samples` sleep-window intersection. Not built. |
 | Non-weighted load metric | ⏸️ `duration_seconds`/`distance_meters` are now persisted per set, so a real load metric for timed/distance work is available to build. Not built. |

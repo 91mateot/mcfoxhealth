@@ -36,6 +36,7 @@ from shared.hevy_client import (
     LAST_SYNC_KEY,
     TEMPLATE_CACHE_KEY,
 )
+from shared.hae_daily import daily_activity_spec_for_raw_name, normalize_hae_metric_name
 from shared.lift_compute import recompute_prs_for_canonicals, recompute_weekly_volume
 from shared.oauth_service import OAuthCredentialCheckError, OAuthRefreshError, OAuthService
 from shared.scoring import compute_trimp, compute_strain, classify_hr_zone, estimate_strain_simple, HR_ZONES, MAX_HR
@@ -89,8 +90,10 @@ HAE_NAME_MAP = {
     "applesleepingwristtemperature":    ("wrist_temp#hae", "degC", "avg"),
     "wrist temperature":                ("wrist_temp#hae", "degC", "avg"),
     "wristtemperature":                 ("wrist_temp#hae", "degC", "avg"),
-    "body temperature":                 ("wrist_temp#hae", "degC", "avg"),
-    "bodytemperature":                  ("wrist_temp#hae", "degC", "avg"),
+    # Do not conflate direct body temperature with the dedicated sleeping
+    # wrist-temperature observation used by current recovery logic.
+    "body temperature":                 ("body_temp#hae", "degC", "avg"),
+    "bodytemperature":                  ("body_temp#hae", "degC", "avg"),
 
     # ── Daily heart-rate (triple expansion) ──
     "heart rate":             ("hr#hae", "bpm", "triple"),
@@ -103,6 +106,7 @@ HAE_NAME_MAP = {
     "active energy":          ("active_cal#hae", "kcal", "sum_int"),
     "active energy burned":   ("active_cal#hae", "kcal", "sum_int"),
     "activeenergyburned":     ("active_cal#hae", "kcal", "sum_int"),
+    "activeenergy":           ("active_cal#hae", "kcal", "sum_int"),
     "basal energy burned":    ("basal_cal#hae", "kcal", "sum_int"),
     "basalenergyburned":      ("basal_cal#hae", "kcal", "sum_int"),
     "basal energy":           ("basal_cal#hae", "kcal", "sum_int"),
@@ -110,6 +114,10 @@ HAE_NAME_MAP = {
     "appleexercisetime":      ("exercise_min#hae", "min", "sum_int"),
     "exercise time":          ("exercise_min#hae", "min", "sum_int"),
     "exercise minutes":       ("exercise_min#hae", "min", "sum_int"),
+    # Apple Move Time is a duration, not active energy. It is supported but
+    # currently sparse, so preserve it as its own raw aggregate.
+    "apple move time":        ("move_min#hae", "min", "sum_int"),
+    "applemovetime":          ("move_min#hae", "min", "sum_int"),
     "apple stand hour":       ("stand_hours#hae", "count", "sum_int"),
     "applestandhour":         ("stand_hours#hae", "count", "sum_int"),
     "apple stand time":       ("stand_min#hae", "min", "sum_int"),
@@ -117,6 +125,8 @@ HAE_NAME_MAP = {
     "stand hours":            ("stand_hours#hae", "count", "sum_int"),
     "flights climbed":        ("flights#hae", "count", "sum_int"),
     "flightsclimbed":         ("flights#hae", "count", "sum_int"),
+    "walking running distance": ("walk_distance#hae", "mi", "sum"),
+    "walkingrunningdistance":   ("walk_distance#hae", "mi", "sum"),
     "walking heart rate average": ("walk_hr#hae", "bpm", "avg"),
     "walkingheartrateaverage":    ("walk_hr#hae", "bpm", "avg"),
     # Direct Apple Health mobility / capacity observations. Keep these as
@@ -128,6 +138,27 @@ HAE_NAME_MAP = {
     "heart rate recovery one minute": ("hr_recovery#hae", "bpm/min", "avg"),
     "heartraterecoveryone minute":    ("hr_recovery#hae", "bpm/min", "avg"),
     "heart rate recovery":            ("hr_recovery#hae", "bpm/min", "avg"),
+    # Cardio recovery is a source observation, distinct from the existing
+    # one-minute heart-rate-recovery mapping above. Its HAE-declared unit is
+    # preserved because it may vary by HealthKit export/version.
+    "cardio recovery":                ("cardio_recovery#hae", None, "last"),
+    "cardiorecovery":                 ("cardio_recovery#hae", None, "last"),
+    # Mobility evidence is an observation series; none of these are
+    # cumulative totals even though their values are numeric.
+    "physical effort":                ("physical_effort#hae", "kcal/hr·kg", "avg"),
+    "physicaleffort":                 ("physical_effort#hae", "kcal/hr·kg", "avg"),
+    "walking speed":                  ("walking_speed#hae", "mi/hr", "avg"),
+    "walkingspeed":                   ("walking_speed#hae", "mi/hr", "avg"),
+    "walking step length":            ("walking_step_length#hae", "in", "avg"),
+    "walkingsteplength":              ("walking_step_length#hae", "in", "avg"),
+    "walking double support percentage": ("walking_double_support#hae", "%", "avg"),
+    "walkingdoublesupportpercentage":   ("walking_double_support#hae", "%", "avg"),
+    "stair speed up":                 ("stair_speed_up#hae", "ft/s", "avg"),
+    "stairspeedup":                   ("stair_speed_up#hae", "ft/s", "avg"),
+    "stair speed down":               ("stair_speed_down#hae", "ft/s", "avg"),
+    "stairspeeddown":                 ("stair_speed_down#hae", "ft/s", "avg"),
+    "six minute walking test distance": ("six_min_walk_distance#hae", None, "last"),
+    "sixminutewalkingtestdistance":     ("six_min_walk_distance#hae", None, "last"),
 
     # ── Body composition (Apple Health, may overlap with Withings) ──
     "weight body mass":       ("weight_apple#hae", "lbs", "last"),
@@ -181,7 +212,8 @@ def lambda_handler(event, context):
 
 def _handle_health(event):
     """Process HealthAutoExport JSON payload."""
-    api_key = event.get("headers", {}).get("x-api-key", "")
+    headers = _normalized_request_headers(event)
+    api_key = headers.get("x-api-key", "")
     if not _verify_api_key(api_key):
         return _resp(401, {"error": "unauthorized"})
 
@@ -200,7 +232,19 @@ def _handle_health(event):
         if isinstance(inner, list):
             data_list = inner
     if data_list and isinstance(data_list[0], dict) and "name" in data_list[0]:
-        return _handle_hae_metrics_array(data_list)
+        request_context = _hae_request_context(headers)
+        if request_context["semantics"] == "unsupported_or_ambiguous":
+            _log_hae_stream_classification(request_context, len(data_list))
+            return _resp(
+                422,
+                {
+                    "error": "unsupported or ambiguous HAE aggregation",
+                    "hae_semantics": request_context["semantics"],
+                },
+            )
+        if request_context["semantics"] == "completed_daily_summary":
+            return _handle_hae_daily_summary(data_list, request_context)
+        return _handle_hae_metrics_array(data_list, request_context=request_context)
 
     # Fallback: legacy dict shape (top-level keys per metric)
     table = get_table("HEALTH_METRICS_TABLE")
@@ -293,7 +337,260 @@ def _handle_health(event):
     return _resp(200, {"date": date_str, "items_written": items_written})
 
 
-def _handle_hae_metrics_array(data_list):
+_HAE_METADATA_HEADERS = {
+    "automation-name": "hae_automation_name",
+    "automation-id": "hae_automation_id",
+    "automation-aggregation": "hae_automation_aggregation",
+    "automation-period": "hae_automation_period",
+    "session-id": "hae_session_id",
+}
+
+_HAE_DAILY_AGGREGATION_TOKENS = {
+    "day",
+    "days",
+    "daily",
+    "dailysummary",
+}
+_HAE_DAILY_PERIOD_TOKENS = {
+    "yesterday",
+    "previousday",
+}
+_HAE_RAW_AGGREGATION_TOKENS = {
+    "none",
+    "off",
+    "raw",
+    "unaggregated",
+    "disaggregated",
+    "nogrouping",
+}
+
+
+def _normalized_request_headers(event):
+    """Return request headers case-insensitively without retaining secrets."""
+    headers = event.get("headers") or {}
+    if not isinstance(headers, dict):
+        return {}
+    return {
+        str(key).strip().lower(): value
+        for key, value in headers.items()
+        if isinstance(key, str)
+    }
+
+
+def _safe_hae_metadata_value(value, limit=256):
+    """Bound a source label/header without ever including a request body."""
+    if not isinstance(value, str):
+        return None
+    value = re.sub(r"[\x00-\x1f\x7f]+", " ", value).strip()
+    return value[:limit] or None
+
+
+def _hae_header_token(value):
+    safe = _safe_hae_metadata_value(value, limit=128)
+    return re.sub(r"[^a-z0-9]+", "", safe.lower()) if safe else ""
+
+
+def _hae_request_context(headers):
+    """Classify HAE export semantics from HAE's automation metadata.
+
+    HAE supplies automation headers automatically. We use an explicit daily
+    aggregate only when both aggregation and period identify a completed
+    Yesterday run. A request with neither field keeps the deployed legacy
+    behavior but is labelled ``legacy_unclassified``. Partial/unknown header
+    combinations are rejected rather than silently becoming raw evidence.
+    """
+    metadata = {}
+    for header_name, metadata_name in _HAE_METADATA_HEADERS.items():
+        value = _safe_hae_metadata_value(headers.get(header_name))
+        if value is not None:
+            metadata[metadata_name] = value
+
+    aggregation = _hae_header_token(headers.get("automation-aggregation"))
+    period = _hae_header_token(headers.get("automation-period"))
+    if not aggregation and not period:
+        semantics = "legacy_unclassified"
+    elif (
+        aggregation in _HAE_DAILY_AGGREGATION_TOKENS
+        and period in _HAE_DAILY_PERIOD_TOKENS
+    ):
+        semantics = "completed_daily_summary"
+    elif aggregation in _HAE_RAW_AGGREGATION_TOKENS:
+        semantics = "raw_observation"
+    else:
+        semantics = "unsupported_or_ambiguous"
+
+    return {
+        "semantics": semantics,
+        "metadata": metadata,
+    }
+
+
+def _log_hae_stream_classification(request_context, metric_count):
+    """Emit only bounded routing metadata; never health values or API keys."""
+    metadata = request_context.get("metadata") or {}
+    logger.info(
+        "HAE_STREAM_CLASSIFIED semantics=%s metric_count=%d automation_name=%s "
+        "automation_id=%s aggregation=%s period=%s",
+        request_context.get("semantics") or "?",
+        int(metric_count),
+        metadata.get("hae_automation_name") or "?",
+        metadata.get("hae_automation_id") or "?",
+        metadata.get("hae_automation_aggregation") or "?",
+        metadata.get("hae_automation_period") or "?",
+    )
+
+
+def _hae_raw_evidence_metadata(request_context, raw_metric_name, raw_units, sources):
+    """Build additive, source-specific evidence fields for a raw HAE write."""
+    metadata = {
+        "hae_semantics": request_context.get("semantics") or "legacy_unclassified",
+        "hae_raw_metric_names": [_safe_hae_metadata_value(raw_metric_name, 128) or "?"],
+    }
+    unit = _safe_hae_metadata_value(raw_units, 64)
+    if unit:
+        metadata["hae_raw_units"] = [unit]
+    safe_sources = sorted(
+        {
+            safe
+            for safe in (
+                _safe_hae_metadata_value(source, 256) for source in (sources or [])
+            )
+            if safe
+        }
+    )
+    if safe_sources:
+        # A combined HAE source string is deliberately preserved as one string.
+        metadata["hae_sources"] = safe_sources[:16]
+    metadata.update(request_context.get("metadata") or {})
+    return metadata
+
+
+def _merge_hae_evidence_metadata(*items):
+    """Merge bounded source-specific evidence metadata across raw replays."""
+    metadata = [item for item in items if isinstance(item, dict) and item]
+    if not metadata:
+        return {}
+    merged = {}
+    for field in (
+        "hae_raw_metric_names",
+        "hae_raw_units",
+        "hae_sources",
+    ):
+        values = sorted(
+            {
+                safe
+                for item in metadata
+                for safe in (item.get(field) or [])
+                if isinstance(safe, str) and safe
+            }
+        )
+        if values:
+            merged[field] = values[:16]
+
+    for field in (
+        "hae_semantics",
+        "hae_automation_name",
+        "hae_automation_id",
+        "hae_automation_aggregation",
+        "hae_automation_period",
+        "hae_session_id",
+    ):
+        values = {
+            item.get(field)
+            for item in metadata
+            if isinstance(item.get(field), str) and item.get(field)
+        }
+        if len(values) == 1:
+            merged[field] = values.pop()
+        elif field == "hae_semantics" and values:
+            merged[field] = "mixed_hae_semantics"
+    return merged
+
+
+def _handle_hae_daily_summary(data_list, request_context):
+    """Write source-provided completed-day HAE totals without using raw ledgers.
+
+    The storage identity is additive (``#hae_daily_summary``), which prevents
+    historical raw HAE sample-ledger aggregates from being added to the new
+    daily totals. A DynamoDB put on the same metric/date intentionally makes
+    an identical replay idempotent and a later correction replace the prior
+    summary instead of accumulating it.
+    """
+    table = get_table("HEALTH_METRICS_TABLE")
+    items_written = 0
+    affected_dates = set()
+    _log_hae_stream_classification(request_context, len(data_list))
+    _log_hae_summary(data_list, request_context=request_context)
+
+    for entry in data_list:
+        raw_metric_name = str(entry.get("name") or "").strip()
+        spec = daily_activity_spec_for_raw_name(raw_metric_name)
+        points = entry.get("data") or []
+        if not spec:
+            _log_hae_unsupported_daily_metric(raw_metric_name, len(points))
+            continue
+        if not isinstance(points, list) or len(points) != 1:
+            _log_hae_invalid_daily_metric(raw_metric_name, len(points))
+            continue
+        point = points[0]
+        if not isinstance(point, dict):
+            _log_hae_invalid_daily_metric(raw_metric_name, len(points))
+            continue
+        source_ts = point.get("date") or point.get("startDate") or point.get("endDate") or ""
+        temporal = _hae_temporal_metadata(source_ts)
+        date_str = temporal.get("analysis_date")
+        raw_value = point.get("qty") if point.get("qty") is not None else point.get("value")
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            _log_hae_invalid_daily_metric(raw_metric_name, len(points))
+            continue
+        # Counts are integral by contract. Preserve source precision for
+        # energy, duration, and distance rather than manufacturing a rounded
+        # total before any consumer sees it.
+        if spec["unit"] == "count":
+            value = int(round(value))
+        else:
+            value = round(value, 3)
+        if not date_str:
+            _log_hae_invalid_daily_metric(raw_metric_name, len(points))
+            continue
+
+        item = {
+            "date": date_str,
+            "metric_source": spec["summary_source"],
+            "value": value,
+            "unit": spec["unit"],
+            "source_ts": _safe_hae_metadata_value(source_ts, 128),
+            "hae_semantics": "completed_daily_summary",
+            "hae_raw_metric_name": _safe_hae_metadata_value(raw_metric_name, 128) or "?",
+            "ingested_at": _now_iso(),
+        }
+        raw_units = _safe_hae_metadata_value(entry.get("units"), 64)
+        if raw_units:
+            item["hae_raw_units"] = raw_units
+        source = _safe_hae_metadata_value(point.get("source"), 256)
+        if source:
+            item["hae_source"] = source
+        item.update(request_context.get("metadata") or {})
+        item.update(temporal)
+        put_item(table, item)
+        items_written += 1
+        affected_dates.add(date_str)
+
+    for date_str in sorted(affected_dates):
+        _trigger_compute(date_str)
+    return _resp(
+        200,
+        {
+            "date": max(affected_dates) if affected_dates else None,
+            "items_written": items_written,
+            "hae_semantics": "completed_daily_summary",
+        },
+    )
+
+
+def _handle_hae_metrics_array(data_list, *, request_context=None):
     """Process HAE's real payload shape: top-level {data: [{name, units, data: [{qty|value, date|startDate, ...}]}]}.
 
     Groups each metric's points by date and writes one health-metrics row per (date, metric).
@@ -302,10 +599,15 @@ def _handle_hae_metrics_array(data_list):
     table = get_table("HEALTH_METRICS_TABLE")
     items_written = 0
     latest_date = None
+    request_context = request_context or {
+        "semantics": "legacy_unclassified",
+        "metadata": {},
+    }
 
     # Diagnostic: log a compact summary so we can tell empty pushes from
     # real ones without dumping full payloads (PII/token cost).
-    _log_hae_summary(data_list)
+    _log_hae_stream_classification(request_context, len(data_list))
+    _log_hae_summary(data_list, request_context=request_context)
 
     for entry in data_list:
         raw_metric_name = str(entry.get("name") or "").strip()
@@ -313,7 +615,7 @@ def _handle_hae_metrics_array(data_list):
         # HAE v2 uses snake_case (heart_rate_variability); v1 docs showed title case.
         # Map by both forms — with and without separators.
         name = raw_name
-        name_no_sep = raw_name.replace("_", "").replace(" ", "").replace("-", "")
+        name_no_sep = normalize_hae_metric_name(raw_name)
         points = entry.get("data") or []
 
         # Sleep Analysis — two HAE shapes:
@@ -322,7 +624,19 @@ def _handle_hae_metrics_array(data_list):
         # IMPORTANT: use exact match, NOT substring. "apple sleeping wrist temperature" contains "sleep"
         # but is not sleep analysis — it's wrist temperature.
         if raw_name in ("sleep_analysis", "sleep analysis", "sleepanalysis"):
+            sleep_evidence = _hae_raw_evidence_metadata(
+                request_context,
+                raw_metric_name,
+                entry.get("units"),
+                [
+                    point.get("source")
+                    for point in points
+                    if isinstance(point, dict)
+                ],
+            )
             for p in points:
+                if not isinstance(p, dict):
+                    continue
                 # Aggregated form has totalSleep / inBed / asleep fields
                 if any(k in p for k in ("totalSleep", "asleep", "inBed")):
                     raw_date = p.get("date") or p.get("sleepStart") or ""
@@ -334,6 +648,7 @@ def _handle_hae_metrics_array(data_list):
                     item = _normalize_sleep_aggregated(p, d)
                     if item:
                         item.update(sleep_temporal)
+                        item.update(sleep_evidence)
                         put_item(table, item)
                         items_written += 1
                         latest_date = max(latest_date or d, d)
@@ -347,6 +662,8 @@ def _handle_hae_metrics_array(data_list):
             # wake-ups inside a night don't split the session.
             segs_raw = []
             for p in points:
+                if not isinstance(p, dict):
+                    continue
                 if any(k in p for k in ("totalSleep", "asleep", "inBed")):
                     continue  # already handled above
                 start_ts = p.get("startDate") or p.get("sleepStart") or p.get("date")
@@ -436,6 +753,7 @@ def _handle_hae_metrics_array(data_list):
                             merged[k] = item[k]
                     merged["ingested_at"] = _now_iso()
                     item = merged
+                item.update(_merge_hae_evidence_metadata(item, sleep_evidence))
                 put_item(table, item)
                 items_written += 1
                 latest_date = max(latest_date or d, d)
@@ -443,9 +761,17 @@ def _handle_hae_metrics_array(data_list):
 
         mapping = HAE_NAME_MAP.get(name) or HAE_NAME_MAP.get(name_no_sep) or HAE_NAME_MAP.get(raw_name.replace("_", " "))
         if not mapping:
-            _log_hae_unmapped_metric(raw_metric_name, len(points))
+            _log_hae_unmapped_metric(
+                raw_metric_name,
+                len(points),
+                request_context=request_context,
+            )
             continue
         metric_source, unit, kind = mapping
+        unit = unit or _safe_hae_metadata_value(entry.get("units"), 64)
+        if not unit:
+            _log_hae_invalid_metric(raw_metric_name, len(points), reason="missing_units")
+            continue
 
         # Triple expansion: HAE exports heart_rate entries with Min/Avg/Max per day.
         # Emit three rows: hr_min#hae, hr_avg#hae, hr_max#hae (metric_source "hr#hae" becomes the prefix).
@@ -456,8 +782,11 @@ def _handle_hae_metrics_array(data_list):
             src_suffix = metric_source.split("#", 1)[1]  # "hae"
             by_date_triple = {}
             by_date_temporal = {}
+            by_date_evidence = {}
             by_date_samples = {}  # date → [{ts, bpm}] — only populated if HAE sends per-sample HR
             for p in points:
+                if not isinstance(p, dict):
+                    continue
                 source_ts = p.get("date") or p.get("startDate") or p.get("endDate") or ""
                 point_temporal = _hae_temporal_metadata(source_ts)
                 d = point_temporal.get("analysis_date")
@@ -465,6 +794,15 @@ def _handle_hae_metrics_array(data_list):
                     continue
                 by_date_temporal[d] = _merge_hae_temporal_metadata(
                     by_date_temporal.get(d), point_temporal
+                )
+                by_date_evidence[d] = _merge_hae_evidence_metadata(
+                    by_date_evidence.get(d),
+                    _hae_raw_evidence_metadata(
+                        request_context,
+                        raw_metric_name,
+                        entry.get("units"),
+                        [p.get("source")],
+                    ),
                 )
                 slot = by_date_triple.setdefault(d, {"min": [], "avg": [], "max": []})
                 has_stats = False
@@ -529,6 +867,7 @@ def _handle_hae_metrics_array(data_list):
                         "ingested_at": _now_iso(),
                     }
                     item.update(by_date_temporal.get(d) or {})
+                    item.update(by_date_evidence.get(d) or {})
                     put_item(table, item)
                     items_written += 1
                     latest_date = max(latest_date or d, d)
@@ -547,6 +886,7 @@ def _handle_hae_metrics_array(data_list):
                     "ingested_at": _now_iso(),
                 }
                 item.update(by_date_temporal.get(d) or {})
+                item.update(by_date_evidence.get(d) or {})
                 put_item(table, item)
                 items_written += 1
                 latest_date = max(latest_date or d, d)
@@ -571,7 +911,10 @@ def _handle_hae_metrics_array(data_list):
         # incremental delta.
         by_date = {}
         by_date_temporal = {}
+        by_date_evidence = {}
         for p in points:
+            if not isinstance(p, dict):
+                continue
             source_ts = p.get("date") or p.get("startDate") or p.get("endDate") or ""
             point_temporal = _hae_temporal_metadata(source_ts)
             d = point_temporal.get("analysis_date")
@@ -588,6 +931,15 @@ def _handle_hae_metrics_array(data_list):
                 by_date.setdefault(d, []).append((ts, float(raw)))
             except (ValueError, TypeError):
                 continue
+            by_date_evidence[d] = _merge_hae_evidence_metadata(
+                by_date_evidence.get(d),
+                _hae_raw_evidence_metadata(
+                    request_context,
+                    raw_metric_name,
+                    entry.get("units"),
+                    [p.get("source")],
+                ),
+            )
 
         for d, pairs in by_date.items():
             if not pairs:
@@ -606,6 +958,7 @@ def _handle_hae_metrics_array(data_list):
                     ts,
                     round(val, 2),
                     temporal=by_date_temporal.get(d),
+                    evidence=by_date_evidence.get(d),
                 )
             else:
                 _merge_samples_and_aggregate(
@@ -616,6 +969,7 @@ def _handle_hae_metrics_array(data_list):
                     kind,
                     pairs,
                     temporal=by_date_temporal.get(d),
+                    evidence=by_date_evidence.get(d),
                 )
             items_written += 1
             latest_date = max(latest_date or d, d)
@@ -623,7 +977,14 @@ def _handle_hae_metrics_array(data_list):
     if latest_date:
         _trigger_compute(latest_date)
 
-    return _resp(200, {"date": latest_date, "items_written": items_written})
+    return _resp(
+        200,
+        {
+            "date": latest_date,
+            "items_written": items_written,
+            "hae_semantics": request_context["semantics"],
+        },
+    )
 
 
 def _merge_samples_and_aggregate(
@@ -635,6 +996,7 @@ def _merge_samples_and_aggregate(
     new_pairs,
     *,
     temporal=None,
+    evidence=None,
 ):
     """Merge-guard for cumulative/averaged HAE metrics (avg / sum_int / sum).
 
@@ -667,6 +1029,7 @@ def _merge_samples_and_aggregate(
         get_item, table, date_str, samples_key
     )
     stored_temporal = _merge_hae_temporal_metadata(shard0_item, temporal)
+    stored_evidence = _merge_hae_evidence_metadata(shard0_item, evidence)
     for ts, val in new_pairs:
         if ts:
             existing_samples[ts] = val
@@ -683,7 +1046,7 @@ def _merge_samples_and_aggregate(
         date_str,
         samples_key,
         existing_samples,
-        extra=stored_temporal,
+        extra={**stored_temporal, **stored_evidence},
         ingested_at=_now_iso(),
     )
 
@@ -703,6 +1066,7 @@ def _merge_samples_and_aggregate(
         "ingested_at": _now_iso(),
     }
     aggregate_item.update(stored_temporal)
+    aggregate_item.update(stored_evidence)
     put_item(table, aggregate_item)
 
 
@@ -715,6 +1079,7 @@ def _write_last_with_ordering_guard(
     incoming_val,
     *,
     temporal=None,
+    evidence=None,
 ):
     """Merge-guard for "last"-kind metrics (weight, BMI).
 
@@ -738,15 +1103,17 @@ def _write_last_with_ordering_guard(
         "ingested_at": _now_iso(),
     }
     item.update(temporal or {})
+    item.update(_merge_hae_evidence_metadata(existing, evidence))
     put_item(table, item)
 
 
-def _log_hae_summary(data_list):
+def _log_hae_summary(data_list, *, request_context=None):
     """Print a compact one-line summary of an incoming HAE payload for CloudWatch.
     Shows metric names + point counts + a sample date so empty or malformed
     pushes are distinguishable from real data without dumping full bodies."""
+    semantics = (request_context or {}).get("semantics") or "legacy_unclassified"
     if not data_list:
-        print("HAE_SUMMARY metrics=0 payload_empty=true")
+        print(f"HAE_SUMMARY semantics={semantics} metrics=0 payload_empty=true")
         return
     summary_parts = []
     for entry in data_list:
@@ -763,10 +1130,13 @@ def _log_hae_summary(data_list):
             )
             sample_date = _coerce_date(raw) or source_date_str(raw) or ""
         summary_parts.append(f"{name}:{count}@{sample_date}")
-    print(f"HAE_SUMMARY metrics={len(data_list)} " + " ".join(summary_parts[:20]))
+    print(
+        f"HAE_SUMMARY semantics={semantics} metrics={len(data_list)} "
+        + " ".join(summary_parts[:20])
+    )
 
 
-def _log_hae_unmapped_metric(raw_metric_name, point_count):
+def _log_hae_unmapped_metric(raw_metric_name, point_count, *, request_context=None):
     """Warn about a dropped HAE metric without logging observation values.
 
     Unknown metric names are useful configuration/coverage evidence. Keep the
@@ -774,9 +1144,39 @@ def _log_hae_unmapped_metric(raw_metric_name, point_count):
     an unexpected sender cannot forge log lines or create unbounded log data.
     """
     metric_name = re.sub(r"[\x00-\x1f\x7f]+", " ", str(raw_metric_name)).strip()[:128]
+    metadata = (request_context or {}).get("metadata") or {}
     logger.warning(
-        "HAE_UNMAPPED_METRIC metric_name=%s point_count=%d",
+        "HAE_UNMAPPED_METRIC metric_name=%s point_count=%d semantics=%s "
+        "automation_name=%s automation_id=%s",
         metric_name or "?",
+        int(point_count),
+        (request_context or {}).get("semantics") or "legacy_unclassified",
+        metadata.get("hae_automation_name") or "?",
+        metadata.get("hae_automation_id") or "?",
+    )
+
+
+def _log_hae_invalid_metric(raw_metric_name, point_count, *, reason):
+    logger.warning(
+        "HAE_INVALID_METRIC metric_name=%s point_count=%d reason=%s",
+        _safe_hae_metadata_value(raw_metric_name, 128) or "?",
+        int(point_count),
+        _safe_hae_metadata_value(reason, 64) or "?",
+    )
+
+
+def _log_hae_unsupported_daily_metric(raw_metric_name, point_count):
+    logger.warning(
+        "HAE_UNSUPPORTED_DAILY_SUMMARY_METRIC metric_name=%s point_count=%d",
+        _safe_hae_metadata_value(raw_metric_name, 128) or "?",
+        int(point_count),
+    )
+
+
+def _log_hae_invalid_daily_metric(raw_metric_name, point_count):
+    logger.warning(
+        "HAE_INVALID_DAILY_SUMMARY_METRIC metric_name=%s point_count=%d",
+        _safe_hae_metadata_value(raw_metric_name, 128) or "?",
         int(point_count),
     )
 

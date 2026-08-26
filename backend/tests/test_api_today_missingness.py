@@ -119,7 +119,11 @@ def test_stored_zeroes_remain_available_zeroes(monkeypatch):
     assert payload["water"] == 0
     assert payload["caffeineMg"] == 0
     assert payload["proteinWeek"][-1]["p"] == 0
-    assert payload["metricSemantics"]["steps"] == {"availability": "available", "kind": "observed"}
+    assert payload["metricSemantics"]["steps"] == {
+        "availability": "available",
+        "kind": "observed",
+        "source": "legacy_hae_aggregate",
+    }
     assert payload["metricSemantics"]["protein"] == {"availability": "available", "kind": "derived"}
 
 
