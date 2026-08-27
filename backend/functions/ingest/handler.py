@@ -398,6 +398,14 @@ def _safe_hae_metadata_value(value, limit=256):
     return value[:limit] or None
 
 
+def _safe_hevy_fetch_reason(value, limit=192):
+    """Bound a client-generated fetch diagnostic without logging provider data."""
+    if not isinstance(value, str):
+        return "unspecified"
+    value = re.sub(r"[\x00-\x1f\x7f]+", " ", value).strip()
+    return value[:limit] or "unspecified"
+
+
 def _hae_header_token(value):
     safe = _safe_hae_metadata_value(value, limit=128)
     return re.sub(r"[^a-z0-9]+", "", safe.lower()) if safe else ""
@@ -2235,8 +2243,12 @@ def _handle_hevy_sync(event):
     fetch_pages_read = fetch_result.pages_read
     if not fetch_result.complete:
         logger.error(
-            "hevy %s fetch incomplete: status=%s pages_read=%s truncated=%s",
-            mode, fetch_result.status, fetch_result.pages_read, fetch_result.truncated,
+            "hevy %s fetch incomplete: status=%s pages_read=%s truncated=%s reason=%s",
+            mode,
+            fetch_result.status,
+            fetch_result.pages_read,
+            fetch_result.truncated,
+            _safe_hevy_fetch_reason(fetch_result.error),
         )
         raise HevySyncError(f"hevy workout fetch incomplete: {fetch_result.status}")
 

@@ -355,6 +355,65 @@ def test_fetch_workout_events_reports_error_as_incomplete():
     assert result.status == "vendor_error"
 
 
+def test_fetch_workout_events_accepts_verified_empty_workouts_alias(caplog):
+    """Hevy currently emits ``workouts: []`` for an empty events page."""
+    body = {"page": 1, "page_count": 1, "workouts": []}
+
+    with caplog.at_level("INFO"):
+        result = hc.fetch_workout_events(
+            "k",
+            since="2026-06-01T00:00:00Z",
+            http_get=_fake_http([(body, 200)]),
+        )
+
+    assert result.complete is True
+    assert result.status == "empty"
+    assert result.pages_read == 1
+    assert result.updated == []
+    assert result.deleted == []
+    assert "accepted verified empty compatibility envelope" in caplog.text
+    assert "expected=events actual=workouts" in caplog.text
+
+
+def test_fetch_workout_events_rejects_unverified_zero_page_workouts_alias():
+    body = {"page": 1, "page_count": 0, "workouts": []}
+
+    result = hc.fetch_workout_events(
+        "k",
+        since="2026-06-01T00:00:00Z",
+        http_get=_fake_http([(body, 200)]),
+    )
+
+    assert result.complete is False
+    assert result.status == "malformed"
+    assert result.pages_read == 0
+    assert result.error == "response missing events list"
+
+
+def test_fetch_workout_events_rejects_nonempty_workouts_alias(caplog):
+    """Only the verified empty alias is compatible with the event feed."""
+    body = {
+        "page": 1,
+        "page_count": 1,
+        "workouts": [_workout("unexpected-workout")],
+    }
+
+    with caplog.at_level("WARNING"):
+        result = hc.fetch_workout_events(
+            "k",
+            since="2026-06-01T00:00:00Z",
+            http_get=_fake_http([(body, 200)]),
+        )
+
+    assert result.complete is False
+    assert result.status == "malformed"
+    assert result.pages_read == 0
+    assert result.updated == []
+    assert result.deleted == []
+    assert result.error == "response missing events list"
+    assert "rejected compatibility envelope" in caplog.text
+
+
 def test_fetch_workout_events_isolates_unmappable_updated_workout():
     bad = _workout("bad-workout")
     bad["start_time"] = "not-a-timestamp"
