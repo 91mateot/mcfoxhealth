@@ -835,9 +835,59 @@ def fetch_workout_events(
     """
     if not api_key:
         raise ValueError("hevy api key is empty")
+
+    def _events_http_get(url, key):
+        """Accept only Hevy's verified empty events-envelope compatibility case."""
+        response = http_get(url, key)
+        if not isinstance(response, tuple) or len(response) not in (2, 3):
+            return response
+        body, status = response[:2]
+        if (
+            status != 200
+            or not isinstance(body, dict)
+            or "events" in body
+            or "workouts" not in body
+        ):
+            return response
+
+        workouts = body.get("workouts")
+        page = body.get("page")
+        page_count = body.get("page_count")
+        requested_page = urllib.parse.parse_qs(
+            urllib.parse.urlparse(url).query
+        ).get("page", [None])[0]
+        if (
+            workouts == []
+            and type(page) is int
+            and page == 1
+            and type(page_count) is int
+            and page_count == 1
+            and requested_page == "1"
+        ):
+            logger.info(
+                "hevy workouts/events accepted verified empty compatibility "
+                "envelope: expected=events actual=workouts page=1 page_count=1"
+            )
+            normalized = dict(body)
+            normalized["events"] = []
+            return (normalized, *response[1:])
+
+        collection_type = type(workouts).__name__
+        is_empty_list = isinstance(workouts, list) and not workouts
+        logger.warning(
+            "hevy workouts/events rejected compatibility envelope: "
+            "actual=workouts collection_type=%s empty_list=%s page_type=%s "
+            "page_count_type=%s pages_read=0",
+            collection_type,
+            is_empty_list,
+            type(page).__name__,
+            type(page_count).__name__,
+        )
+        return response
+
     result = _fetch_paginated(
         "workouts/events", api_key, "events",
-        http_get, page_size=page_size, max_pages=max_pages,
+        _events_http_get, page_size=page_size, max_pages=max_pages,
         extra_query={"since": since},
     )
     updated = []

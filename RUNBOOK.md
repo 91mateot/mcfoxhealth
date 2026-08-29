@@ -189,6 +189,13 @@ An empty first page is complete when Hevy reports either `page_count: 0` or
 `page_count: 1`. The zero-page envelope is valid only for an empty page;
 non-empty records with invalid page metadata still fail closed.
 
+Hevy's current empty `/v1/workouts/events` response is also a verified
+compatibility case: it may use `{page, page_count, workouts: []}` rather than
+the normal `events` collection. McFox accepts that alternate collection only
+when it is empty on page 1 with its verified `page_count: 1`. A nonempty `workouts`
+collection on the events endpoint remains malformed and leaves the watermark
+unchanged, because it could have different update/deletion semantics.
+
 The handler captures `sync_started_at` before the first vendor request and
 stores that pre-fetch boundary only after workout events, writes, deletions,
 derived recomputation, and body-measurement ingestion complete. Incremental
