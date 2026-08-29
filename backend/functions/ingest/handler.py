@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -240,8 +241,13 @@ def _handle_health(event):
         inner = data_field.get("metrics")
         if isinstance(inner, list):
             data_list = inner
+    request_context = _hae_request_context(headers)
+    if (
+        isinstance(data_list, list)
+        and request_context["semantics"] == "completed_daily_summary"
+    ):
+        return _handle_hae_daily_summary(data_list, request_context)
     if data_list and isinstance(data_list[0], dict) and "name" in data_list[0]:
-        request_context = _hae_request_context(headers)
         if request_context["semantics"] == "unsupported_or_ambiguous":
             _log_hae_stream_classification(request_context, len(data_list))
             return _resp(
@@ -251,8 +257,6 @@ def _handle_health(event):
                     "hae_semantics": request_context["semantics"],
                 },
             )
-        if request_context["semantics"] == "completed_daily_summary":
-            return _handle_hae_daily_summary(data_list, request_context)
         return _handle_hae_metrics_array(data_list, request_context=request_context)
 
     # Fallback: legacy dict shape (top-level keys per metric)
@@ -632,6 +636,229 @@ def _log_hae_daily_summary_guard_event(
     )
 
 
+def _log_hae_daily_summary_validation_error(
+    *,
+    raw_metric_name,
+    analysis_date,
+    reason,
+    point_count,
+):
+    """Log a bounded structural error without observation values."""
+    logger.warning(
+        "HAE_DAILY_SUMMARY_REJECTED metric_name=%s analysis_date=%s "
+        "point_count=%d reason=%s",
+        _safe_hae_metadata_value(raw_metric_name, 128) or "?",
+        _safe_hae_metadata_value(analysis_date, 128) or "?",
+        int(point_count),
+        _safe_hae_metadata_value(reason, 64) or "?",
+    )
+
+
+def _hae_daily_summary_unit_matches(expected_unit, raw_unit):
+    """Accept the documented unit spelling, while allowing an omitted label."""
+    if raw_unit is None:
+        return True
+    if not isinstance(raw_unit, str):
+        return False
+    normalized = re.sub(r"[\s_-]+", "", raw_unit.strip().lower())
+    expected = re.sub(r"[\s_-]+", "", str(expected_unit).strip().lower())
+    return bool(normalized) and normalized == expected
+
+
+def _validate_hae_daily_summary_payload(data_list, request_context):
+    """Validate and normalize the entire daily-summary payload before writes."""
+    items_by_date = {}
+    seen_metric_dates = set()
+
+    for entry in data_list:
+        if not isinstance(entry, dict):
+            _log_hae_daily_summary_validation_error(
+                raw_metric_name=None,
+                analysis_date=None,
+                reason="invalid_metric_shape",
+                point_count=0,
+            )
+            return None, "invalid_metric_shape"
+
+        raw_metric_name = entry.get("name")
+        if not isinstance(raw_metric_name, str) or not raw_metric_name.strip():
+            _log_hae_daily_summary_validation_error(
+                raw_metric_name=raw_metric_name,
+                analysis_date=None,
+                reason="invalid_metric_shape",
+                point_count=0,
+            )
+            return None, "invalid_metric_shape"
+        raw_metric_name = raw_metric_name.strip()
+
+        points = entry.get("data") if "data" in entry else None
+        point_count = len(points) if isinstance(points, list) else 0
+        spec = daily_activity_spec_for_raw_name(raw_metric_name)
+        if not spec:
+            _log_hae_unsupported_daily_metric(raw_metric_name, point_count)
+            return None, "unsupported_daily_metric"
+        if not _hae_daily_summary_unit_matches(spec["unit"], entry.get("units")):
+            _log_hae_daily_summary_validation_error(
+                raw_metric_name=raw_metric_name,
+                analysis_date=None,
+                reason="contradictory_units",
+                point_count=point_count,
+            )
+            return None, "contradictory_units"
+        if not isinstance(points, list):
+            _log_hae_daily_summary_validation_error(
+                raw_metric_name=raw_metric_name,
+                analysis_date=None,
+                reason="invalid_metric_shape",
+                point_count=point_count,
+            )
+            return None, "invalid_metric_shape"
+
+        for point in points:
+            if not isinstance(point, dict):
+                _log_hae_daily_summary_validation_error(
+                    raw_metric_name=raw_metric_name,
+                    analysis_date=None,
+                    reason="invalid_row_shape",
+                    point_count=point_count,
+                )
+                return None, "invalid_row_shape"
+
+            source_ts = (
+                point.get("date")
+                or point.get("startDate")
+                or point.get("endDate")
+                or ""
+            )
+            temporal = _hae_temporal_metadata(source_ts)
+            date_str = temporal.get("analysis_date")
+            if not date_str:
+                _log_hae_daily_summary_validation_error(
+                    raw_metric_name=raw_metric_name,
+                    analysis_date=None,
+                    reason="unparseable_date",
+                    point_count=point_count,
+                )
+                return None, "unparseable_date"
+
+            raw_value = (
+                point.get("qty")
+                if point.get("qty") is not None
+                else point.get("value")
+            )
+            if isinstance(raw_value, bool):
+                value = None
+            else:
+                try:
+                    value = float(raw_value)
+                except (TypeError, ValueError):
+                    value = None
+            if value is None or not math.isfinite(value):
+                _log_hae_daily_summary_validation_error(
+                    raw_metric_name=raw_metric_name,
+                    analysis_date=date_str,
+                    reason="invalid_row_shape",
+                    point_count=point_count,
+                )
+                return None, "invalid_row_shape"
+
+            metric_date = (date_str, spec["summary_source"])
+            if metric_date in seen_metric_dates:
+                _log_hae_daily_summary_validation_error(
+                    raw_metric_name=raw_metric_name,
+                    analysis_date=date_str,
+                    reason="duplicate_metric_date",
+                    point_count=point_count,
+                )
+                return None, "duplicate_metric_date"
+            seen_metric_dates.add(metric_date)
+
+            # Counts are integral by contract. Preserve source precision for
+            # energy, duration, and distance rather than manufacturing a
+            # rounded total before any consumer sees it.
+            if spec["unit"] == "count":
+                value = int(round(value))
+            else:
+                value = round(value, 3)
+
+            item = {
+                "date": date_str,
+                "metric_source": spec["summary_source"],
+                "value": value,
+                "unit": spec["unit"],
+                "source_ts": _safe_hae_metadata_value(source_ts, 128),
+                "hae_semantics": "completed_daily_summary",
+                "hae_raw_metric_name": (
+                    _safe_hae_metadata_value(raw_metric_name, 128) or "?"
+                ),
+                "ingested_at": _now_iso(),
+            }
+            raw_units = _safe_hae_metadata_value(entry.get("units"), 64)
+            if raw_units:
+                item["hae_raw_units"] = raw_units
+            source = _safe_hae_metadata_value(point.get("source"), 256)
+            if source:
+                item["hae_source"] = source
+            item.update(request_context.get("metadata") or {})
+            item.update(temporal)
+            items_by_date.setdefault(date_str, []).append(item)
+
+    if not items_by_date:
+        _log_hae_daily_summary_validation_error(
+            raw_metric_name=None,
+            analysis_date=None,
+            reason="no_daily_summary_observations",
+            point_count=0,
+        )
+        return None, "no_daily_summary_observations"
+
+    for date_items in items_by_date.values():
+        date_items.sort(key=lambda item: item["metric_source"])
+    return items_by_date, None
+
+
+def _hae_daily_summary_failure_response(
+    *,
+    code,
+    error,
+    reason,
+    all_dates,
+    completed_dates,
+    stale_dates,
+    items_written,
+    failed_date,
+):
+    """Return a bounded, value-free per-request failure summary."""
+    logger.error(
+        "HAE_DAILY_SUMMARY_RESULT status=%s date_count=%d dates_completed=%d "
+        "dates_stale_ignored=%d items_written=%d affected_date_start=%s "
+        "affected_date_end=%s failed_date=%s reason=%s",
+        "partial_failure" if completed_dates or stale_dates else "failed",
+        len(all_dates),
+        len(completed_dates),
+        len(stale_dates),
+        items_written,
+        all_dates[0],
+        all_dates[-1],
+        failed_date,
+        reason,
+    )
+    body = {
+        "error": error,
+        "status": "partial_failure" if completed_dates or stale_dates else "failed",
+        "date_count": len(all_dates),
+        "dates_completed": len(completed_dates),
+        "dates_stale_ignored": len(stale_dates),
+        "items_written": items_written,
+        "affected_date_start": all_dates[0],
+        "affected_date_end": all_dates[-1],
+        "failed_date": failed_date,
+        "reason": reason,
+        "hae_semantics": "completed_daily_summary",
+    }
+    return _resp(code, body)
+
+
 def _hae_request_context(headers):
     """Classify HAE export semantics from HAE's automation metadata.
 
@@ -757,11 +984,11 @@ def _handle_hae_daily_summary(data_list, request_context):
     daily totals. A same-table automation/date session guard rejects a delayed
     replay that was already superseded by a later accepted correction. The
     guard's version fences metric writes so older in-flight requests cannot
-    overwrite a newer accepted correction.
+    overwrite a newer accepted correction. Multi-date requests are validated
+    in full, then processed in ascending source-local analysis-date order so a
+    retry can safely resume after an observable infrastructure failure.
     """
-    table = get_table("HEALTH_METRICS_TABLE")
     _log_hae_stream_classification(request_context, len(data_list))
-    _log_hae_summary(data_list, request_context=request_context)
 
     session_identity, identity_error = _hae_daily_summary_session_identity(
         request_context,
@@ -782,154 +1009,185 @@ def _handle_hae_daily_summary(data_list, request_context):
             },
         )
 
-    items_by_date = {}
-    for entry in data_list:
-        raw_metric_name = str(entry.get("name") or "").strip()
-        spec = daily_activity_spec_for_raw_name(raw_metric_name)
-        points = entry.get("data") or []
-        if not spec:
-            _log_hae_unsupported_daily_metric(raw_metric_name, len(points))
-            continue
-        if not isinstance(points, list) or len(points) != 1:
-            _log_hae_invalid_daily_metric(raw_metric_name, len(points))
-            continue
-        point = points[0]
-        if not isinstance(point, dict):
-            _log_hae_invalid_daily_metric(raw_metric_name, len(points))
-            continue
-        source_ts = point.get("date") or point.get("startDate") or point.get("endDate") or ""
-        temporal = _hae_temporal_metadata(source_ts)
-        date_str = temporal.get("analysis_date")
-        raw_value = point.get("qty") if point.get("qty") is not None else point.get("value")
-        try:
-            value = float(raw_value)
-        except (TypeError, ValueError):
-            _log_hae_invalid_daily_metric(raw_metric_name, len(points))
-            continue
-        # Counts are integral by contract. Preserve source precision for
-        # energy, duration, and distance rather than manufacturing a rounded
-        # total before any consumer sees it.
-        if spec["unit"] == "count":
-            value = int(round(value))
-        else:
-            value = round(value, 3)
-        if not date_str:
-            _log_hae_invalid_daily_metric(raw_metric_name, len(points))
-            continue
-
-        item = {
-            "date": date_str,
-            "metric_source": spec["summary_source"],
-            "value": value,
-            "unit": spec["unit"],
-            "source_ts": _safe_hae_metadata_value(source_ts, 128),
-            "hae_semantics": "completed_daily_summary",
-            "hae_raw_metric_name": _safe_hae_metadata_value(raw_metric_name, 128) or "?",
-            "ingested_at": _now_iso(),
-        }
-        raw_units = _safe_hae_metadata_value(entry.get("units"), 64)
-        if raw_units:
-            item["hae_raw_units"] = raw_units
-        source = _safe_hae_metadata_value(point.get("source"), 256)
-        if source:
-            item["hae_source"] = source
-        item.update(request_context.get("metadata") or {})
-        item.update(temporal)
-        items_by_date.setdefault(date_str, []).append(item)
-
-    # Resolve the full automation/date request before changing any canonical
-    # metric row. The contracted Yesterday automation has one date and all
-    # seven metric rows therefore share one accept/skip decision. Grouping by
-    # date keeps the same guard semantics for any existing multi-date traffic
-    # without changing its historical routing contract.
-    guard_decisions = {}
-    for date_str in sorted(items_by_date):
-        decision = _acquire_hae_daily_summary_session_guard(
-            table,
-            date_str,
-            request_context,
-            session_identity,
+    items_by_date, validation_error = _validate_hae_daily_summary_payload(
+        data_list,
+        request_context,
+    )
+    if validation_error:
+        return _resp(
+            422,
+            {
+                "error": "invalid HAE daily-summary payload",
+                "reason": validation_error,
+                "hae_semantics": "completed_daily_summary",
+            },
         )
-        if decision["state"] == "conflict":
+
+    _log_hae_summary(data_list, request_context=request_context)
+    table = get_table("HEALTH_METRICS_TABLE")
+    all_dates = sorted(items_by_date)
+    items_written = 0
+    completed_dates = []
+    stale_dates = []
+
+    for date_str in all_dates:
+        try:
+            decision = _acquire_hae_daily_summary_session_guard(
+                table,
+                date_str,
+                request_context,
+                session_identity,
+            )
+        except Exception:  # noqa: BLE001 - return a bounded retryable failure
             _log_hae_daily_summary_guard_event(
                 "error",
                 request_context=request_context,
                 analysis_date=date_str,
-                reason=decision.get("reason") or "conditional_write_conflict",
+                reason="session_guard_write_failed",
             )
-            return _resp(
-                409,
-                {
-                    "error": "HAE daily-summary session guard conflict",
-                    "hae_semantics": "completed_daily_summary",
-                },
+            return _hae_daily_summary_failure_response(
+                code=503,
+                error="HAE daily-summary session guard unavailable",
+                reason="session_guard_write_failed",
+                all_dates=all_dates,
+                completed_dates=completed_dates,
+                stale_dates=stale_dates,
+                items_written=items_written,
+                failed_date=date_str,
             )
-        guard_decisions[date_str] = decision
 
-    stale_dates = [
-        date_str
-        for date_str, decision in guard_decisions.items()
-        if decision["state"] == "stale"
-    ]
-    accepted_dates = [
-        date_str
-        for date_str, decision in guard_decisions.items()
-        if decision["state"] in {"new", "current"}
-    ]
-    if stale_dates:
-        # The normal Activity Daily contract has one date. Keep even an
-        # unexpected multi-date diagnostic bounded to the approved seven
-        # activity rows and never include session identifiers directly.
-        _log_hae_daily_summary_guard_event(
-            "info",
-            request_context=request_context,
-            analysis_date=",".join(stale_dates[:7]),
-            reason="superseded_session_replay_ignored",
-        )
-
-    items_written = 0
-    completed_dates = []
-    for date_str in accepted_dates:
-        decision = guard_decisions[date_str]
-        write_conflict = False
-        for item in items_by_date[date_str]:
-            if not _put_hae_daily_summary_metric(
-                table,
-                item,
-                decision["version"],
-            ):
-                write_conflict = True
-                break
-            items_written += 1
-        if write_conflict:
-            # A concurrently accepted newer session has fenced this writer
-            # out. Do not compute on a potentially partial older result; a
-            # retry will re-evaluate the guard and become a no-op if stale.
+        if decision["state"] == "conflict":
+            reason = decision.get("reason") or "conditional_write_conflict"
             _log_hae_daily_summary_guard_event(
-                "warning",
+                "error",
                 request_context=request_context,
                 analysis_date=date_str,
-                reason="metric_write_fenced_by_newer_guard",
+                reason=reason,
             )
-            return _resp(
-                409,
-                {
-                    "error": "HAE daily-summary metric write conflict",
-                    "hae_semantics": "completed_daily_summary",
-                },
+            return _hae_daily_summary_failure_response(
+                code=409,
+                error="HAE daily-summary session guard conflict",
+                reason=reason,
+                all_dates=all_dates,
+                completed_dates=completed_dates,
+                stale_dates=stale_dates,
+                items_written=items_written,
+                failed_date=date_str,
+            )
+
+        if decision["state"] == "stale":
+            stale_dates.append(date_str)
+            _log_hae_daily_summary_guard_event(
+                "info",
+                request_context=request_context,
+                analysis_date=date_str,
+                reason="superseded_session_replay_ignored",
+            )
+            continue
+
+        for item in items_by_date[date_str]:
+            try:
+                written = _put_hae_daily_summary_metric(
+                    table,
+                    item,
+                    decision["version"],
+                )
+            except Exception:  # noqa: BLE001 - return a bounded retryable failure
+                _log_hae_daily_summary_guard_event(
+                    "error",
+                    request_context=request_context,
+                    analysis_date=date_str,
+                    reason="metric_write_failed",
+                )
+                return _hae_daily_summary_failure_response(
+                    code=503,
+                    error="HAE daily-summary metric write unavailable",
+                    reason="metric_write_failed",
+                    all_dates=all_dates,
+                    completed_dates=completed_dates,
+                    stale_dates=stale_dates,
+                    items_written=items_written,
+                    failed_date=date_str,
+                )
+            if not written:
+                # A concurrently accepted newer session has fenced this writer
+                # out. Do not compute on a potentially partial older result; a
+                # retry re-evaluates the guard and becomes a no-op if stale.
+                _log_hae_daily_summary_guard_event(
+                    "warning",
+                    request_context=request_context,
+                    analysis_date=date_str,
+                    reason="metric_write_fenced_by_newer_guard",
+                )
+                return _hae_daily_summary_failure_response(
+                    code=409,
+                    error="HAE daily-summary metric write conflict",
+                    reason="metric_write_fenced_by_newer_guard",
+                    all_dates=all_dates,
+                    completed_dates=completed_dates,
+                    stale_dates=stale_dates,
+                    items_written=items_written,
+                    failed_date=date_str,
+                )
+            items_written += 1
+
+        try:
+            _trigger_compute(date_str)
+        except Exception:  # noqa: BLE001 - tests can expose a failed trigger
+            _log_hae_daily_summary_guard_event(
+                "error",
+                request_context=request_context,
+                analysis_date=date_str,
+                reason="recompute_trigger_failed",
+            )
+            return _hae_daily_summary_failure_response(
+                code=503,
+                error="HAE daily-summary recompute trigger unavailable",
+                reason="recompute_trigger_failed",
+                all_dates=all_dates,
+                completed_dates=completed_dates,
+                stale_dates=stale_dates,
+                items_written=items_written,
+                failed_date=date_str,
             )
         completed_dates.append(date_str)
 
-    for date_str in completed_dates:
-        _trigger_compute(date_str)
+    if completed_dates and stale_dates:
+        result_status = "completed_with_stale_ignored"
+    elif completed_dates:
+        result_status = "completed"
+    else:
+        result_status = "stale_daily_summary_replay_ignored"
+    logger.info(
+        "HAE_DAILY_SUMMARY_RESULT status=%s date_count=%d dates_completed=%d "
+        "dates_stale_ignored=%d items_written=%d affected_date_start=%s "
+        "affected_date_end=%s",
+        result_status,
+        len(all_dates),
+        len(completed_dates),
+        len(stale_dates),
+        items_written,
+        all_dates[0],
+        all_dates[-1],
+    )
 
-    if not completed_dates and stale_dates:
+    if len(all_dates) == 1 and stale_dates:
         return _resp(
             200,
             {
-                "date": max(stale_dates),
+                "date": stale_dates[0],
                 "items_written": 0,
                 "status": "stale_daily_summary_replay_ignored",
+                "hae_semantics": "completed_daily_summary",
+            },
+        )
+
+    if len(all_dates) == 1:
+        return _resp(
+            200,
+            {
+                "date": completed_dates[0],
+                "items_written": items_written,
                 "hae_semantics": "completed_daily_summary",
             },
         )
@@ -937,8 +1195,13 @@ def _handle_hae_daily_summary(data_list, request_context):
     return _resp(
         200,
         {
-            "date": max(completed_dates) if completed_dates else None,
+            "status": result_status,
+            "date_count": len(all_dates),
+            "dates_completed": len(completed_dates),
+            "dates_stale_ignored": len(stale_dates),
             "items_written": items_written,
+            "affected_date_start": all_dates[0],
+            "affected_date_end": all_dates[-1],
             "hae_semantics": "completed_daily_summary",
         },
     )
