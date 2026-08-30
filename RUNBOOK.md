@@ -4,8 +4,8 @@
 >
 > **Audience:** primarily AI coding tools; secondarily Mateo on periodic review.
 > **Scope:** the AWS backend + data pipeline. Frontend/product docs live in `HANDOFF.md`, architecture in `ARCHITECTURE.md` / `architecture.json`, stack conventions in `CLAUDE.md`.
-> **Last verified against live AWS:** 2026-07-27. HAE/API Gateway incident
-> evidence was refreshed 2026-08-25; all unrelated entries retain their
+> **Last verified against live AWS:** 2026-07-27. HAE/API Gateway and Manual
+> Export evidence was refreshed 2026-08-30; all unrelated entries retain their
 > stated verification dates.
 
 ---
@@ -422,6 +422,36 @@ metadata, and never records authentication headers or request bodies.
 - Partial or unrecognized aggregation/period metadata returns HTTP 422 rather
   than silently treating a new summary form as raw evidence.
 
+#### Controlled Activity Manual Export probe — 2026-08-29 PDT
+
+A read-only production correlation proved how the automation-level Manual
+Export picker behaves without changing the saved **PRISM Activity Daily**
+configuration. The saved range remained **Yesterday**. In the Manual Export
+picker only, `2026-08-25` through `2026-08-26` was selected once.
+
+HAE sent two date-sharded `POST /ingest/health` requests:
+
+| API request time (UTC) | Source/analysis date | Headers and classification | Result |
+|---|---|---|---|
+| `2026-08-30 01:54:00` | `2026-08-25` | 7 metrics; `Days`; `Yesterday`; `completed_daily_summary` | HTTP/integration 200; single-date response; 7 items |
+| `2026-08-30 01:54:02` | `2026-08-26` | 7 metrics; `Days`; `Yesterday`; `completed_daily_summary` | HTTP/integration 200; single-date response; 7 items |
+
+Both requests carried the same sanitized automation fingerprint
+`30a0e4676c5acb51` and distinct present session fingerprints
+`a1099324cc5322da` / `b576fa07a491a686`. Each request contained exactly one
+point for each approved metric on its selected source-local date. The
+corresponding per-date guards and seven canonical summary rows were updated,
+and two Compute invocations followed. The `2026-08-28` guard, rows, and score
+were not changed in the probe window.
+
+Therefore, the Activity repair must leave the saved range at **Yesterday**,
+must not save/update the automation, and must use only the automation-level
+Manual Export picker. The HAE Activity Log's visible
+`Yesterday · 2026-08-28` label was not the transmitted source-date evidence.
+Receiving-side `Days` + `Yesterday` headers and
+`completed_daily_summary` classification are mandatory stop-gate evidence.
+Do not widen the accepted daily period tokens for this workflow.
+
 CloudWatch emits bounded `HAE_STREAM_CLASSIFIED` and
 `HAE_UNMAPPED_METRIC` records with metric name/count and non-secret automation
 identity. It never logs health values, payload bodies, API keys, or
@@ -469,6 +499,439 @@ Do **not** backfill in this validation. Targeted Health Metrics replay remains
 a separate approval after routine exports are proven healthy; use Health
 Metrics only, no Workouts, and split manual exports into bounded batches if the
 phone's request-size behavior requires it.
+
+#### Multi-date Activity Daily contract and repair failure semantics
+
+Before multi-date support, `_handle_hae_daily_summary` required every approved
+metric array to contain exactly one point. A legitimate historical JSON v2
+export contains one point per source-local day, so each multi-date metric was
+dropped and the handler returned HTTP 200 with `items_written: 0`, `date:
+null`, no session guards, no canonical rows, and no recomputation.
+
+The supported `completed_daily_summary` contract now validates the full request
+before any guard or canonical metric write:
+
+- only the seven approved Activity Daily metric names are accepted;
+- a missing, null, empty, or whitespace-only unit is treated as omitted;
+  a nonempty unit must match the documented canonical unit;
+- every observation must be an object with a parseable source timestamp and a
+  finite numeric `qty` or `value`;
+- each normalized `(analysis_date, canonical metric)` pair may appear at most
+  once;
+- an approved metric may be absent for a date; missing stays missing and is
+  never replaced with zero;
+- a stored numeric zero is retained as a genuine observation.
+
+Adding an unsupported metric to **PRISM Activity Daily**, or receiving a
+contradictory nonempty unit label, intentionally rejects the whole daily
+request with HTTP 422 before any session guard or canonical metric write. This
+fail-closed behavior prevents a partially accepted request from corrupting the
+daily semantic contract.
+
+After validation, source-local analysis dates are processed in ascending order.
+Each date independently acquires the existing `(analysis_date, automation-id)`
+session guard before that date's canonical metrics are written. Current-session
+replays can repair missing rows, known superseded sessions are successful
+no-ops for only their affected dates, and unseen sessions replace rather than
+add. Metric rows retain the accepted guard version as their conditional-write
+fence. No Activity Daily value enters a raw aggregate or samples ledger.
+
+Each fully written/corrected date triggers one `compute_day` invocation. If a
+guard, conditional write, infrastructure write, or recompute trigger fails,
+processing stops at that date and returns non-2xx with only bounded metadata:
+completed/stale counts, items written, affected range, failed date, and reason
+code. Earlier dates remain committed. Replaying the request is safe: a
+same-session replay repairs the failed/partial date, while already written rows
+are overwritten idempotently rather than added or duplicated.
+
+Single-date success and known-stale response bodies remain compatible with the
+deployed Activity Daily contract. Multi-date success adds bounded counts and
+the affected date range; it never returns health values or an unbounded date
+list.
+
+#### Activity Daily historical-repair manifest — not executed
+
+Repair exactly one interval:
+
+| Chunk | Inclusive source-local range | Source-date count | Expected canonical rows |
+|---|---|---:|---:|
+| A1 | `2026-07-12` → `2026-08-24` | 44 | 7 per date / 308 total |
+
+Use one automation-level Manual Export operation selecting all 44 days. The
+controlled two-day probe produced one date-sharded request per selected source
+date, so the operational expectation is 44 one-date requests while still
+requiring only one phone operation. The receiver also safely supports a
+multi-date request if HAE batches differently. The measured one-day artifact
+was approximately 1.9 KB, so the linear estimate is approximately 84 KB before
+small envelope overhead—comfortably below the API Gateway 10 MB request
+ceiling. Per-date guards and bounded failure responses retain date-level
+resumability in either transport shape.
+
+Required HAE settings:
+
+- existing automation: **PRISM Activity Daily**;
+- leave its saved **Date Range Yesterday** unchanged;
+- do not save or update the automation configuration;
+- use only the automation-level **Manual Export** date picker and select the
+  inclusive range `2026-07-12` through `2026-08-24`;
+- format: **JSON**, Export Version **v2**;
+- **Summarize Data On**;
+- **Time Grouping Days**;
+- **Batch Requests On**;
+- exactly `active_energy`, `apple_exercise_time`, `step_count`,
+  `walking_running_distance`, `apple_stand_time`, `apple_stand_hour`, and
+  `flights_climbed`;
+- Health Metrics only: no Workouts and no GPX.
+
+Expected server behavior:
+
+- every request retains `automation-aggregation: Days` and
+  `automation-period: Yesterday` and classifies as
+  `completed_daily_summary`; stop immediately if any classification differs;
+- expected probe-grounded transport is 44 one-date requests, each preserving
+  the compatible single-date response with its date and 7 items written;
+  another batching shape is acceptable only when receiving-side evidence
+  covers exactly the 44 selected dates with no date outside the interval;
+- each date has one automation-scoped guard and up to seven canonical
+  `#hae_daily_summary` rows; the expected complete result is seven rows/date;
+- absent source metrics remain absent and require review; they are never
+  synthesized as zero;
+- genuine zero values remain zero;
+- a first unseen repair session normally creates guard version 1; a
+  current-session replay repairs/overwrites safely; a known superseded session
+  is ignored; a later unseen correction session advances the guard and replaces
+  the prior values;
+- `compute_day` is triggered once for each successfully completed date;
+- no `#hae` raw aggregate and no `_samples` row is created by this request.
+
+Validate chunk A1 before considering the repair complete:
+
+1. API Gateway access logs show the expected 44 HTTP 200 date-sharded requests,
+   never 413/422/5xx. If HAE uses another batching shape, correlate every
+   request and prove exact receiving-side coverage of all 44 dates.
+2. Ingest logs show `Days`, `Yesterday`, and `completed_daily_summary` for
+   every request. Across all bounded result records, require 44 completed
+   dates, zero failed dates, zero unexpected stale dates, and no
+   structural-rejection or guard-conflict record.
+3. For every date, query `fitness-health-metrics` by partition key and verify
+   exactly the seven expected summary identities plus one automation-scoped
+   guard, matching positive guard versions, no duplicate identities, and no
+   Activity `_samples` identity.
+4. Query `fitness-daily-scores` for every date and verify `computed_at` moved
+   after the repair request and `activity_sources.steps` /
+   `activity_sources.active_cal` resolve to `hae_daily_summary`.
+5. Requery the explicitly excluded boundary date `2026-08-25` and confirm the
+   repair did not alter it.
+
+Stop immediately on 413, 422, any 5xx, `partial_failure`, an unexpected metric
+or unit, duplicate metric/date rejection, a guard/write conflict that does not
+clear on retry, any write outside the inclusive range, or any raw/sample-ledger
+Activity row. Do not advance or declare success from a partial response.
+
+Resume rule: retain the response's `failed_date` and completed/stale counts,
+then retry the same A1 interval after the server fault is understood. A
+same-session transport retry repairs the failed/partial date; a new-session
+manual rerun replaces existing daily rows rather than adding. Revalidate the
+entire 44-date interval after a successful retry. If an actual 413 occurs,
+stop and prepare a separately reviewed smaller-chunk manifest rather than
+silently changing the approved operation.
+
+If HAE receives HTTP 504 or otherwise has no bounded multi-date response body,
+do not blindly repeat the repair. First inspect `HAE_DAILY_SUMMARY_RESULT`
+logs, then inspect each date's session guard and canonical summary identities
+to reconstruct the last completed or failed date. Only after that state is
+known should an operator repeat the same full Manual Export request or resume
+the operation. A verified full retry is safe because same-session guards and
+metric-row write fences repair or idempotently replace prior work. Do not
+change API Gateway or Lambda timeout settings for this recovery path.
+
+Explicit exclusions: `2026-08-25` and every later date; every date before
+`2026-07-12`; Sleep; raw Heart Rate; Workouts; GPX.
+
+#### Vitals & Mobility historical-repair manifest — not executed
+
+Keep the validated raw-observation contract:
+
+- existing automation: **PRISM Vitals & Mobility**;
+- format: **JSON**, Export Version **v2**;
+- **Summarize Data Off**;
+- **Time Grouping Default**;
+- **Batch Requests On**;
+- no Workouts and no GPX;
+- exactly these 17 metrics:
+  `heart_rate_variability`, `resting_heart_rate`,
+  `blood_oxygen_saturation`, `respiratory_rate`,
+  `apple_sleeping_wrist_temperature`, `body_temperature`, `vo2_max`,
+  `cardio_recovery`, `walking_heart_rate_average`,
+  `walking_asymmetry_percentage`, `walking_speed`,
+  `walking_step_length`, `walking_double_support_percentage`,
+  `stair_speed_up`, `stair_speed_down`,
+  `six_minute_walking_test_distance`, and `physical_effort`.
+
+Use these seven approved chunks:
+
+| Chunk | Inclusive source-local range | Expected source dates |
+|---|---|---:|
+| V1 | `2026-07-12` → `2026-07-18` | 7 |
+| V2 | `2026-07-19` → `2026-07-25` | 7 |
+| V3 | `2026-07-26` → `2026-08-01` | 7 |
+| V4 | `2026-08-02` → `2026-08-08` | 7 |
+| V5 | `2026-08-09` → `2026-08-15` | 7 |
+| V6 | `2026-08-16` → `2026-08-22` | 7 |
+| V7 | `2026-08-23` → `2026-08-24` | 2 |
+
+For each chunk, Batch Requests may produce one or more date-sharded requests
+per source date. Every shard must return HTTP 200 and classify as
+`raw_observation`; request count may exceed the source-date count. Replaying a
+chunk is idempotent because raw ledgers merge by timestamp across every shard.
+The aggregate is recomputed from the merged unique timestamp set rather than
+adding a replayed batch.
+
+Validate each chunk before starting the next:
+
+1. API Gateway has only 200 responses for all date-sharded requests; Ingest
+   logs show `raw_observation`, never `completed_daily_summary`.
+2. The expected 7 source dates (2 for V7) are represented in the transport
+   evidence. A metric or even a date can be sparse because HealthKit supplied
+   no samples; sparse source absence alone is not an ingestion failure.
+3. Query each represented date and verify only approved Vitals raw identities
+   are attributed to this automation; Activity Daily identities remain
+   separate.
+4. Merge every `_samples`, `_samples#001`, `_samples#002`, … chain by base
+   metric and verify sample timestamp count equals unique timestamp count.
+5. Verify shard suffixes are contiguous from shard 0, every shard contains at
+   most 2,000 samples, and no `ValidationException` / item-size error appears.
+6. Replay validation, when needed, must leave unique timestamp counts and
+   aggregate row counts unchanged.
+
+Stop on any 413, 422, 5xx, unexpected classification, unapproved metric,
+duplicate timestamp after merge, non-contiguous shard chain, shard over 2,000
+samples, item-size/`ValidationException`, or a row outside the chunk. Do not
+call sparse source absence a transport or ingestion failure by itself.
+
+Resume rule: stop before the next chunk, correct the observed fault, and rerun
+only the failed chunk. Date-sharded/raw timestamp deduplication makes replaying
+the whole failed chunk safe. After a successful retry, repeat all checks for
+that chunk before advancing.
+
+Explicit exclusions: `2026-08-25` and every later date; every date before
+`2026-07-12`; dedicated Sleep and raw Heart Rate streams; Workouts; GPX.
+
+#### Separately authorized post-deploy Computer Use sequence
+
+Do not perform these steps during code review or deployment. After the deployed
+Ingest artifact and routine one-day traffic are verified, use iPhone Mirroring
+only under separate repair authorization:
+
+1. Open Health Auto Export → Automations. If a credential-bearing REST screen
+   appears unexpectedly, stop without reading, copying, or changing it.
+2. Open the existing **PRISM Activity Daily** automation. Record only its
+   non-secret settings. Confirm the seven metrics, JSON v2, Summarize On, Days,
+   Batch Requests On, saved Date Range **Yesterday**, and no Workouts/GPX. Do
+   not save or update the automation.
+3. From that automation, open **Manual Export**. In its picker only, select
+   start `2026-07-12` and end `2026-08-24`, then run once. Do not change any
+   saved automation setting or endpoint/authentication field.
+4. Observe the HAE result. On any non-200 or uncertain result, stop. On 200,
+   leave the saved **Yesterday** range untouched and complete AWS validation
+   for A1. Stop immediately if receiving-side aggregation, period, or
+   classification differs from `Days`, `Yesterday`,
+   `completed_daily_summary`.
+5. Open the existing **PRISM Vitals & Mobility** automation. Confirm the exact
+   17 metrics, JSON v2, Summarize Off, Default, Batch Requests On, Since Last
+   Sync as the normal range, and no Workouts/GPX.
+6. For V1 through V7 in order, change only the date range to that chunk, run
+   once, and wait for AWS validation before advancing. On any stop condition,
+   restore `Since Last Sync`, save/update, and do not start the next chunk.
+7. After V7 validates, restore `Since Last Sync`, save/update, and confirm both
+   production automations retain their normal enabled cadence and settings.
+8. Do not open, edit, or run the dedicated Sleep, raw Heart Rate, or Workouts
+   automations.
+
+#### AWS-side repair validation without Hermes
+
+Use a locally authenticated AWS CLI; do not fetch secrets or payload bodies.
+First resolve the live function/log target and inspect the repair time window:
+
+```bash
+REGION=us-west-2
+STACK=fitness-dashboard
+REPAIR_START_EPOCH_MS='REPLACE_WITH_START_EPOCH_MS'
+REPAIR_END_EPOCH_MS='REPLACE_WITH_END_EPOCH_MS'
+INGEST_FN="$(aws cloudformation describe-stack-resource \
+  --stack-name "$STACK" --logical-resource-id IngestFunction \
+  --region "$REGION" --query 'StackResourceDetail.PhysicalResourceId' \
+  --output text)"
+INGEST_LOG_GROUP="$(aws lambda get-function-configuration \
+  --function-name "$INGEST_FN" --region "$REGION" \
+  --query 'LoggingConfig.LogGroup' --output text)"
+
+aws logs filter-log-events \
+  --log-group-name /aws/apigateway/fitness-dashboard \
+  --region "$REGION" --start-time "$REPAIR_START_EPOCH_MS" \
+  --end-time "$REPAIR_END_EPOCH_MS" \
+  --filter-pattern '{ $.path = "/ingest/health" }'
+
+aws logs filter-log-events \
+  --log-group-name "$INGEST_LOG_GROUP" \
+  --region "$REGION" --start-time "$REPAIR_START_EPOCH_MS" \
+  --end-time "$REPAIR_END_EPOCH_MS" \
+  --filter-pattern '"HAE_STREAM_CLASSIFIED"'
+
+aws logs filter-log-events \
+  --log-group-name "$INGEST_LOG_GROUP" \
+  --region "$REGION" --start-time "$REPAIR_START_EPOCH_MS" \
+  --end-time "$REPAIR_END_EPOCH_MS" \
+  --filter-pattern '"HAE_DAILY_SUMMARY_RESULT"'
+```
+
+For Activity A1, require every classification record to contain metric count
+7, aggregation `Days`, period `Yesterday`, and semantics
+`completed_daily_summary`. Correlate the result records to exactly
+`2026-07-12` through `2026-08-24`; stop on an omitted or out-of-range date, a
+different classification, or an unbounded/missing response until guard and
+canonical-row state are reconstructed.
+
+Activity metadata-only validation for every repair date:
+
+```bash
+python3 -c 'from datetime import date,timedelta; s=date(2026,7,12); [print((s+timedelta(days=i)).isoformat()) for i in range(44)]' |
+while read -r day; do
+  aws dynamodb query \
+    --table-name fitness-health-metrics \
+    --region us-west-2 \
+    --key-condition-expression '#d = :d' \
+    --expression-attribute-names '{"#d":"date"}' \
+    --expression-attribute-values "{\":d\":{\"S\":\"$day\"}}" \
+    --projection-expression 'metric_source,hae_semantics,hae_session_guard_version' \
+    --output json |
+  jq -e --arg day "$day" '
+    ([.Items[]
+      | select(.hae_semantics.S? == "completed_daily_summary")
+     ]) as $summaries |
+    ([.Items[]
+      | select(.hae_semantics.S? ==
+          "completed_daily_summary_session_guard")
+     ]) as $guards |
+    ($guards[0].hae_session_guard_version.N | tonumber) as $guard_version |
+    ([$summaries[] | .metric_source.S] | sort) ==
+    (["active_cal#hae_daily_summary",
+      "exercise_min#hae_daily_summary",
+      "flights#hae_daily_summary",
+      "stand_hours#hae_daily_summary",
+      "stand_min#hae_daily_summary",
+      "steps#hae_daily_summary",
+      "walk_distance#hae_daily_summary"] | sort)
+    and
+    ($guards | length == 1)
+    and
+    ($guard_version > 0)
+    and
+    ($summaries
+      | all((.hae_session_guard_version.N | tonumber) == $guard_version))
+  ' >/dev/null || { echo "activity validation failed: $day"; exit 1; }
+
+  aws dynamodb get-item \
+    --table-name fitness-daily-scores \
+    --region us-west-2 \
+    --key "{\"date\":{\"S\":\"$day\"}}" \
+    --projection-expression 'computed_at,activity_sources' \
+    --output json |
+  jq -e '
+    .Item.computed_at.S and
+    .Item.activity_sources.M.steps.S == "hae_daily_summary" and
+    .Item.activity_sources.M.active_cal.S == "hae_daily_summary"
+  ' >/dev/null || { echo "score validation failed: $day"; exit 1; }
+done
+```
+
+For each Vitals chunk, run the metadata-only validator below before advancing.
+The DynamoDB response is reduced inside the pipe and never printed:
+
+```bash
+set -o pipefail
+
+validate_vitals_chunk() {
+  chunk_start="$1"
+  chunk_days="$2"
+  python3 -c '
+from datetime import date, timedelta
+import sys
+start = date.fromisoformat(sys.argv[1])
+for offset in range(int(sys.argv[2])):
+    print((start + timedelta(days=offset)).isoformat())
+' "$chunk_start" "$chunk_days" |
+  while read -r day; do
+    aws dynamodb query \
+      --table-name fitness-health-metrics \
+      --region us-west-2 \
+      --key-condition-expression '#d = :d' \
+      --expression-attribute-names '{"#d":"date"}' \
+      --expression-attribute-values "{\":d\":{\"S\":\"$day\"}}" \
+      --projection-expression \
+        'metric_source,hae_semantics,hae_automation_name,samples' \
+      --output json |
+    jq -e '
+      def approved:
+        ["hrv#hae", "rhr#hae", "spo2#hae", "resp#hae",
+         "wrist_temp#hae", "body_temp#hae", "vo2_max#hae",
+         "cardio_recovery#hae", "walk_hr#hae",
+         "walking_asymmetry#hae", "walking_speed#hae",
+         "walking_step_length#hae", "walking_double_support#hae",
+         "stair_speed_up#hae", "stair_speed_down#hae",
+         "six_min_walk_distance#hae", "physical_effort#hae"];
+      [.Items[]
+       | select(.hae_automation_name.S? == "PRISM Vitals & Mobility")
+       | .metric_source.S as $source
+       | ($source | sub("_samples(#[0-9]{3})?$"; "")) as $base
+       | {source: $source,
+          base: $base,
+          semantics: .hae_semantics.S?,
+          samples: (.samples.L? // [])}
+      ] as $rows |
+      ($rows | all(.semantics == "raw_observation")) and
+      ($rows | all(.base as $base | (approved | index($base)) != null)) and
+      ([$rows[]
+        | select(.source | test("_samples(#[0-9]{3})?$"))
+        | . + {
+            shard_index:
+              (if (.source | endswith("_samples")) then 0
+               else (.source | capture("#(?<n>[0-9]{3})$").n | tonumber)
+               end),
+            timestamps:
+              [.samples[]?.M.ts.S? | select(. != null)]
+          }
+       ]
+       | group_by(.base)
+       | all(
+           ((sort_by(.shard_index) | map(.shard_index)) as $indices |
+             $indices == [range(0; ($indices | length))]) and
+           (all((.samples | length) <= 2000)) and
+           (([.[].timestamps[]] | length) ==
+             ([.[].timestamps[]] | unique | length))
+         ))
+    ' >/dev/null || { echo "vitals validation failed: $day"; exit 1; }
+  done
+}
+
+validate_vitals_chunk 2026-07-12 7
+validate_vitals_chunk 2026-07-19 7
+validate_vitals_chunk 2026-07-26 7
+validate_vitals_chunk 2026-08-02 7
+validate_vitals_chunk 2026-08-09 7
+validate_vitals_chunk 2026-08-16 7
+validate_vitals_chunk 2026-08-23 2
+```
+
+Also require that no API/Lambda log in the chunk window contains 413, 422, 5xx,
+`ValidationException`, or `Item size has exceeded the maximum allowed size`.
+The date may have zero selected rows when HealthKit supplied no samples; that
+sparse source absence is not, by itself, an ingestion failure.
+
+Finally query `2026-08-25` metadata before and after the separately authorized
+repair and require no repair-session change. These checks validate the intended
+live rows; a successful deploy, HTTP response, or HAE UI completion alone is
+not repair proof.
 
 ---
 
