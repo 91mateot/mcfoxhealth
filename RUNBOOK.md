@@ -4,8 +4,8 @@
 >
 > **Audience:** primarily AI coding tools; secondarily Mateo on periodic review.
 > **Scope:** the AWS backend + data pipeline. Frontend/product docs live in `HANDOFF.md`, architecture in `ARCHITECTURE.md` / `architecture.json`, stack conventions in `CLAUDE.md`.
-> **Last verified against live AWS:** 2026-07-27. HAE/API Gateway incident
-> evidence was refreshed 2026-08-25; all unrelated entries retain their
+> **Last verified against live AWS:** 2026-07-27. HAE/API Gateway and Manual
+> Export evidence was refreshed 2026-08-30; all unrelated entries retain their
 > stated verification dates.
 
 ---
@@ -422,6 +422,36 @@ metadata, and never records authentication headers or request bodies.
 - Partial or unrecognized aggregation/period metadata returns HTTP 422 rather
   than silently treating a new summary form as raw evidence.
 
+#### Controlled Activity Manual Export probe — 2026-08-29 PDT
+
+A read-only production correlation proved how the automation-level Manual
+Export picker behaves without changing the saved **PRISM Activity Daily**
+configuration. The saved range remained **Yesterday**. In the Manual Export
+picker only, `2026-08-25` through `2026-08-26` was selected once.
+
+HAE sent two date-sharded `POST /ingest/health` requests:
+
+| API request time (UTC) | Source/analysis date | Headers and classification | Result |
+|---|---|---|---|
+| `2026-08-30 01:54:00` | `2026-08-25` | 7 metrics; `Days`; `Yesterday`; `completed_daily_summary` | HTTP/integration 200; single-date response; 7 items |
+| `2026-08-30 01:54:02` | `2026-08-26` | 7 metrics; `Days`; `Yesterday`; `completed_daily_summary` | HTTP/integration 200; single-date response; 7 items |
+
+Both requests carried the same sanitized automation fingerprint
+`30a0e4676c5acb51` and distinct present session fingerprints
+`a1099324cc5322da` / `b576fa07a491a686`. Each request contained exactly one
+point for each approved metric on its selected source-local date. The
+corresponding per-date guards and seven canonical summary rows were updated,
+and two Compute invocations followed. The `2026-08-28` guard, rows, and score
+were not changed in the probe window.
+
+Therefore, the Activity repair must leave the saved range at **Yesterday**,
+must not save/update the automation, and must use only the automation-level
+Manual Export picker. The HAE Activity Log's visible
+`Yesterday · 2026-08-28` label was not the transmitted source-date evidence.
+Receiving-side `Days` + `Yesterday` headers and
+`completed_daily_summary` classification are mandatory stop-gate evidence.
+Do not widen the accepted daily period tokens for this workflow.
+
 CloudWatch emits bounded `HAE_STREAM_CLASSIFIED` and
 `HAE_UNMAPPED_METRIC` records with metric name/count and non-secret automation
 identity. It never logs health values, payload bodies, API keys, or
@@ -482,7 +512,8 @@ The supported `completed_daily_summary` contract now validates the full request
 before any guard or canonical metric write:
 
 - only the seven approved Activity Daily metric names are accepted;
-- provided units must match the documented canonical unit;
+- a missing, null, empty, or whitespace-only unit is treated as omitted;
+  a nonempty unit must match the documented canonical unit;
 - every observation must be an object with a parseable source timestamp and a
   finite numeric `qty` or `value`;
 - each normalized `(analysis_date, canonical metric)` pair may appear at most
@@ -490,6 +521,12 @@ before any guard or canonical metric write:
 - an approved metric may be absent for a date; missing stays missing and is
   never replaced with zero;
 - a stored numeric zero is retained as a genuine observation.
+
+Adding an unsupported metric to **PRISM Activity Daily**, or receiving a
+contradictory nonempty unit label, intentionally rejects the whole daily
+request with HTTP 422 before any session guard or canonical metric write. This
+fail-closed behavior prevents a partially accepted request from corrupting the
+daily semantic contract.
 
 After validation, source-local analysis dates are processed in ascending order.
 Each date independently acquires the existing `(analysis_date, automation-id)`
@@ -520,19 +557,26 @@ Repair exactly one interval:
 |---|---|---:|---:|
 | A1 | `2026-07-12` → `2026-08-24` | 44 | 7 per date / 308 total |
 
-Use one 44-day export. The measured one-day seven-metric artifact was
-approximately 1.9 KB, so the linear estimate is approximately 84 KB before
+Use one automation-level Manual Export operation selecting all 44 days. The
+controlled two-day probe produced one date-sharded request per selected source
+date, so the operational expectation is 44 one-date requests while still
+requiring only one phone operation. The receiver also safely supports a
+multi-date request if HAE batches differently. The measured one-day artifact
+was approximately 1.9 KB, so the linear estimate is approximately 84 KB before
 small envelope overhead—comfortably below the API Gateway 10 MB request
-ceiling. One phone operation is therefore safer than 44 manual exports, while
-per-date guards and bounded failure responses retain date-level resumability.
+ceiling. Per-date guards and bounded failure responses retain date-level
+resumability in either transport shape.
 
 Required HAE settings:
 
 - existing automation: **PRISM Activity Daily**;
+- leave its saved **Date Range Yesterday** unchanged;
+- do not save or update the automation configuration;
+- use only the automation-level **Manual Export** date picker and select the
+  inclusive range `2026-07-12` through `2026-08-24`;
 - format: **JSON**, Export Version **v2**;
 - **Summarize Data On**;
 - **Time Grouping Days**;
-- custom inclusive date range `2026-07-12` through `2026-08-24`;
 - **Batch Requests On**;
 - exactly `active_energy`, `apple_exercise_time`, `step_count`,
   `walking_running_distance`, `apple_stand_time`, `apple_stand_hour`, and
@@ -541,7 +585,13 @@ Required HAE settings:
 
 Expected server behavior:
 
-- every request classifies as `completed_daily_summary`;
+- every request retains `automation-aggregation: Days` and
+  `automation-period: Yesterday` and classifies as
+  `completed_daily_summary`; stop immediately if any classification differs;
+- expected probe-grounded transport is 44 one-date requests, each preserving
+  the compatible single-date response with its date and 7 items written;
+  another batching shape is acceptable only when receiving-side evidence
+  covers exactly the 44 selected dates with no date outside the interval;
 - each date has one automation-scoped guard and up to seven canonical
   `#hae_daily_summary` rows; the expected complete result is seven rows/date;
 - absent source metrics remain absent and require review; they are never
@@ -556,9 +606,13 @@ Expected server behavior:
 
 Validate chunk A1 before considering the repair complete:
 
-1. API Gateway access logs show HTTP 200, never 413/422/5xx.
-2. Ingest logs show `completed_daily_summary`, 44 completed dates, zero failed
-   dates, and no structural-rejection or guard-conflict record.
+1. API Gateway access logs show the expected 44 HTTP 200 date-sharded requests,
+   never 413/422/5xx. If HAE uses another batching shape, correlate every
+   request and prove exact receiving-side coverage of all 44 dates.
+2. Ingest logs show `Days`, `Yesterday`, and `completed_daily_summary` for
+   every request. Across all bounded result records, require 44 completed
+   dates, zero failed dates, zero unexpected stale dates, and no
+   structural-rejection or guard-conflict record.
 3. For every date, query `fitness-health-metrics` by partition key and verify
    exactly the seven expected summary identities plus one automation-scoped
    guard, matching positive guard versions, no duplicate identities, and no
@@ -581,6 +635,15 @@ manual rerun replaces existing daily rows rather than adding. Revalidate the
 entire 44-date interval after a successful retry. If an actual 413 occurs,
 stop and prepare a separately reviewed smaller-chunk manifest rather than
 silently changing the approved operation.
+
+If HAE receives HTTP 504 or otherwise has no bounded multi-date response body,
+do not blindly repeat the repair. First inspect `HAE_DAILY_SUMMARY_RESULT`
+logs, then inspect each date's session guard and canonical summary identities
+to reconstruct the last completed or failed date. Only after that state is
+known should an operator repeat the same full Manual Export request or resume
+the operation. A verified full retry is safe because same-session guards and
+metric-row write fences repair or idempotently replace prior work. Do not
+change API Gateway or Lambda timeout settings for this recovery path.
 
 Explicit exclusions: `2026-08-25` and every later date; every date before
 `2026-07-12`; Sleep; raw Heart Rate; Workouts; GPX.
@@ -664,12 +727,16 @@ only under separate repair authorization:
    appears unexpectedly, stop without reading, copying, or changing it.
 2. Open the existing **PRISM Activity Daily** automation. Record only its
    non-secret settings. Confirm the seven metrics, JSON v2, Summarize On, Days,
-   Batch Requests On, and no Workouts/GPX.
-3. Change only the date range to custom `2026-07-12` through `2026-08-24`,
-   save/update, and run once. Do not touch endpoint/authentication fields.
-4. Observe the HAE result. On any non-200 or uncertain result, stop; restore
-   the normal `Yesterday` range before diagnosis. On 200, restore `Yesterday`
-   immediately, save/update, then complete AWS validation for A1.
+   Batch Requests On, saved Date Range **Yesterday**, and no Workouts/GPX. Do
+   not save or update the automation.
+3. From that automation, open **Manual Export**. In its picker only, select
+   start `2026-07-12` and end `2026-08-24`, then run once. Do not change any
+   saved automation setting or endpoint/authentication field.
+4. Observe the HAE result. On any non-200 or uncertain result, stop. On 200,
+   leave the saved **Yesterday** range untouched and complete AWS validation
+   for A1. Stop immediately if receiving-side aggregation, period, or
+   classification differs from `Days`, `Yesterday`,
+   `completed_daily_summary`.
 5. Open the existing **PRISM Vitals & Mobility** automation. Confirm the exact
    17 metrics, JSON v2, Summarize Off, Default, Batch Requests On, Since Last
    Sync as the normal range, and no Workouts/GPX.
@@ -709,8 +776,21 @@ aws logs filter-log-events \
   --log-group-name "$INGEST_LOG_GROUP" \
   --region "$REGION" --start-time "$REPAIR_START_EPOCH_MS" \
   --end-time "$REPAIR_END_EPOCH_MS" \
+  --filter-pattern '"HAE_STREAM_CLASSIFIED"'
+
+aws logs filter-log-events \
+  --log-group-name "$INGEST_LOG_GROUP" \
+  --region "$REGION" --start-time "$REPAIR_START_EPOCH_MS" \
+  --end-time "$REPAIR_END_EPOCH_MS" \
   --filter-pattern '"HAE_DAILY_SUMMARY_RESULT"'
 ```
+
+For Activity A1, require every classification record to contain metric count
+7, aggregation `Days`, period `Yesterday`, and semantics
+`completed_daily_summary`. Correlate the result records to exactly
+`2026-07-12` through `2026-08-24`; stop on an omitted or out-of-range date, a
+different classification, or an unbounded/missing response until guard and
+canonical-row state are reconstructed.
 
 Activity metadata-only validation for every repair date:
 

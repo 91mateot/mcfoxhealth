@@ -655,14 +655,14 @@ def _log_hae_daily_summary_validation_error(
 
 
 def _hae_daily_summary_unit_matches(expected_unit, raw_unit):
-    """Accept the documented unit spelling, while allowing an omitted label."""
+    """Accept the documented unit spelling, while allowing an empty label."""
     if raw_unit is None:
         return True
     if not isinstance(raw_unit, str):
         return False
     normalized = re.sub(r"[\s_-]+", "", raw_unit.strip().lower())
     expected = re.sub(r"[\s_-]+", "", str(expected_unit).strip().lower())
-    return bool(normalized) and normalized == expected
+    return not normalized or normalized == expected
 
 
 def _validate_hae_daily_summary_payload(data_list, request_context):

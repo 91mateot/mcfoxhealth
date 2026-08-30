@@ -385,6 +385,48 @@ def test_duplicate_metric_date_rejects_whole_payload_before_any_write():
     assert table.items == []
 
 
+def test_activity_manual_export_contract_requires_days_and_yesterday():
+    handler, _table = _fresh_module()
+
+    accepted = handler._hae_request_context(
+        {
+            "automation-aggregation": "Days",
+            "automation-period": "Yesterday",
+        }
+    )
+    assert accepted["semantics"] == "completed_daily_summary"
+
+    for period in ("Today", "Since Last Sync", "Custom Range"):
+        rejected = handler._hae_request_context(
+            {
+                "automation-aggregation": "Days",
+                "automation-period": period,
+            }
+        )
+        assert rejected["semantics"] == "unsupported_or_ambiguous"
+
+
+@pytest.mark.parametrize("unit_state", ["omitted", None, "", " \t "])
+def test_missing_or_blank_daily_unit_is_accepted_as_omitted(unit_state):
+    handler, table = _fresh_condition_module()
+    _patch_auth(handler)
+    payload = _activity_payload(["2031-04-15"])
+    step_metric = payload["data"]["metrics"][2]
+    if unit_state == "omitted":
+        step_metric.pop("units")
+    else:
+        step_metric["units"] = unit_state
+
+    response = _request(handler, payload, "sanitized-session-a")
+
+    assert response["statusCode"] == 200
+    assert _body(response)["items_written"] == 7
+    steps = _metric_rows(table, "steps#hae_daily_summary")
+    assert len(steps) == 1
+    assert steps[0]["unit"] == "count"
+    assert "hae_raw_units" not in steps[0]
+
+
 @pytest.mark.parametrize(
     ("mutate", "expected_reason"),
     [
