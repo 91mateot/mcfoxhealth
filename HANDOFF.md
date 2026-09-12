@@ -90,7 +90,11 @@ Tested in `backend/tests/test_scoring.py` (Whoop-proxy calibration + sanity).
 | `/api/conversation/latest` | GET    | Most recent coach thread (6h TTL)         |
 
 The freshness control on Today revalidates `/api/today`, `/api/workouts`,
-`/api/progress`, and the current day's nutrition in parallel. The next Coach
+`/api/progress`, and the current day's nutrition in parallel. Before a manual
+check, its label shows backend source age. After every refresh read and cache
+update succeeds, it shows both check age and source age; checking does not
+change `updatedAt`. Rejected refreshes show `refresh failed · retry`.
+The next Coach
 request receives the refreshed Today snapshot; its remaining context and tools
 read the backend tables during that request.
 
