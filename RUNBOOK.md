@@ -962,6 +962,43 @@ rollback target.
 
 ---
 
+### 2.17 A successful Today refresh does not imply morning sources arrived
+
+Verified 2026-09-12: all four authenticated refresh reads can succeed while
+the current-day health-metrics partition contains Withings rows and raw
+Heart Rate only. `hr#hae_samples` / `hr_avg#hae` do not substitute for
+`sleep#hae`, `hrv#hae`, or `rhr#hae`. In this state, missing recovery and sleep
+are source-availability evidence; do not manufacture scores or change scoring.
+
+Today initially shows the age of the backend `updatedAt`. After all four
+manual refresh reads and cache updates succeed, it separately shows the
+client check age and source age, for example `checked just now · data 13m
+ago`. Both clocks advance while the screen is mounted. Failure of any refresh
+retains `refresh failed · retry`; a successful check never rewrites backend
+`updatedAt`. The source timestamp can advance because another feed arrived,
+so it is not proof of Sleep or recovery-input completeness.
+
+For a morning incident, query only the current date's source identities,
+ingest timestamps, and score null/presence state. Raw Sleep Analysis is
+assigned to its wake-up morning by the existing ingest path; recovery needs
+HRV or Resting Heart Rate. Under explicit, bounded phone-operation
+authorization, inspect the live dedicated Sleep/HR automations and
+**PRISM Vitals & Mobility** before changing them. Verify enabled state,
+raw JSON v2, batching, date range, cadence, and selected metrics without
+opening endpoint/authentication screens. A historical screenshot or upload
+completion alone is insufficient evidence.
+
+After an authorized current-day foreground export, correlate API upload
+status, raw stream classification, the expected current-day source rows,
+Compute invocation/computed timestamp, and `/api/today` null/presence state.
+Record phone settings before and after for rollback. If Mirroring cannot
+connect, a physical unlock is required; do not infer current settings from
+older screenshots. If no source rows arrive, distinguish unavailable phone
+access from verified absence in HealthKit. This workflow does not authorize
+historical Activity repair, Workouts/GPX, or other automation changes.
+
+---
+
 ## 3. Deploy
 
 **Non-obvious prerequisite:** Lambdas are python3.13; the box default is 3.12 and there's no Docker. `sam build` fails without the PATH export.

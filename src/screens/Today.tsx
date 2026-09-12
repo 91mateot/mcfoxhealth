@@ -20,6 +20,7 @@ import { PlannedWorkoutCard } from "../components/PlannedWorkoutCard";
 import { NoteComposer, type NoteDraft } from "../components/NoteComposer";
 import { HydrationDetail } from "../modals/HydrationDetail";
 import { refreshAppData, submitJournal, todayISO } from "../api";
+import { formatFreshness } from "../freshness";
 
 interface TodayScreenProps {
   C: Palette;
@@ -346,22 +347,9 @@ export function TodayScreen({ C, data, nutrition, onRingTap, onOpenChat, onLogMe
   );
 }
 
-function formatAge(updatedAt: string | null | undefined, now: number): string {
-  if (!updatedAt) return "no data yet";
-  const then = new Date(updatedAt).getTime();
-  if (Number.isNaN(then)) return "no data yet";
-  const seconds = Math.max(0, Math.floor((now - then) / 1000));
-  if (seconds < 60) return "just now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const d = new Date(updatedAt);
-  return `at ${d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }).toLowerCase()}`;
-}
-
 function FreshnessIndicator({ C, updatedAt }: { C: Palette; updatedAt: string | null | undefined }) {
   const [now, setNow] = useState(() => Date.now());
+  const [checkedAt, setCheckedAt] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshFailed, setRefreshFailed] = useState(false);
 
@@ -377,7 +365,9 @@ function FreshnessIndicator({ C, updatedAt }: { C: Palette; updatedAt: string | 
     setRefreshFailed(false);
     try {
       await refreshAppData();
-      setNow(Date.now());
+      const completedAt = Date.now();
+      setCheckedAt(completedAt);
+      setNow(completedAt);
     } catch {
       setRefreshFailed(true);
     } finally {
@@ -385,17 +375,14 @@ function FreshnessIndicator({ C, updatedAt }: { C: Palette; updatedAt: string | 
     }
   };
 
-  const label = refreshing
-    ? "refreshing app data…"
-    : refreshFailed
-    ? "refresh failed · retry"
-    : `updated ${formatAge(updatedAt, now)}`;
+  const label = formatFreshness({ updatedAt, checkedAt, now, refreshing, refreshFailed });
 
   return (
     <button
       onClick={handleRefresh}
-      aria-label="Refresh data"
+      aria-label={`Refresh data: ${label}`}
       aria-live="polite"
+      aria-busy={refreshing}
       disabled={refreshing}
       style={{
         background: C.s2,
