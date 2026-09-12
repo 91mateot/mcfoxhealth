@@ -7,7 +7,8 @@ Personal health data warehouse (Mateo's). AWS SAM backend in **us-west-2** (stac
 1. **[`RUNBOOK.md`](RUNBOOK.md)** — 🚨 **mandatory before touching the ingest pipeline.** Operational traps that have already caused real bugs, the deploy recipe, health checks, and which feeds only Mateo can fix.
 2. [`CLAUDE.md`](CLAUDE.md) — stack, repo layout, the 5 Lambdas, auth, shared-layer conventions.
 3. [`ARCHITECTURE.md`](ARCHITECTURE.md) / [`architecture.json`](architecture.json) — data flows.
-4. [`HANDOFF.md`](HANDOFF.md) — product overview + frontend/backend API contract.
+4. [`PRISM_PRODUCT_ARCHITECTURE.md`](PRISM_PRODUCT_ARCHITECTURE.md) — approved product north star, capability ownership, evidence layers, roadmap gates, and product references.
+5. [`HANDOFF.md`](HANDOFF.md) — current product overview + frontend/backend API contract.
 
 ## Non-negotiable rules
 
@@ -20,6 +21,8 @@ Personal health data warehouse (Mateo's). AWS SAM backend in **us-west-2** (stac
 7. **PR-only by default.** Merging and deploying require Mateo's explicit approval. When a PR changes `template.yaml` IAM grants, merge and deploy together or production hits `AccessDenied`.
 8. **Clone fresh** for deploys and agent work — don't reuse a stale local checkout.
 9. **Update `RUNBOOK.md` in the same PR** that changes deploy steps, adds a Lambda action, or uncovers a new trap. Same discipline as `ARCHITECTURE.md`.
+10. **Do not start PR5 before foundation closeout.** Read `PRISM_FOUNDATION_STATUS.md` and the gates in `PRISM_PRODUCT_ARCHITECTURE.md`; reverify their dated evidence. Active HR/Sleep outages block PR5. A real HAE workout payload gates PR7 workout ingestion only.
+11. **Chat is the current PRISM Coach interface; McFox is the long-term integrated product.** Do not infer the Canonical Specification from a handoff pointer or runtime UI.
 
 ## Testing
 
@@ -27,7 +30,11 @@ Personal health data warehouse (Mateo's). AWS SAM backend in **us-west-2** (stac
 cd backend && .venv/bin/python -m pytest tests \
   --deselect tests/test_api_contract.py --deselect tests/test_coach_auth.py -q
 ```
-Baseline **224 passing** (2026-07-27). The two deselected files have pre-existing failures (live-network calls; missing `fastapi` dep) unrelated to any change you make.
+The **224 passing** count is historical (2026-07-27), not a current baseline.
+`test_api_contract.py` includes live-network checks. Install the Coach test
+dependencies before including `test_coach_auth.py`; a missing `fastapi` package
+is an environment gap, not proof of a product failure. State actual exclusions
+and results for each validation run.
 
 ## Conventions
 

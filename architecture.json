@@ -6,7 +6,7 @@
     "language": "python",
     "runtime": "python3.13",
     "iac": "AWS SAM (backend/template.yaml)",
-    "compute": "AWS Lambda behind HTTP API",
+    "compute": "AWS Lambda behind HTTP API; Coach uses a streaming Function URL",
     "storage": "DynamoDB (fitness-* tables)"
   },
   "lambdas": [
@@ -20,6 +20,7 @@
         "POST /ingest/strava",
         "GET /ingest/strava",
         "Schedule hevy_poll (daily cron 30 8 * * ? * UTC)",
+        "Schedule oauth_credential_check (daily cron 0 8 * * ? * UTC)",
         "async action=hevy_backfill (or hevy_poll with force_full/reset_watermark)"
       ],
       "writes_tables": ["fitness-health-metrics", "fitness-workouts", "fitness-exercises", "fitness-user-config", "fitness-daily-scores"],
@@ -40,13 +41,13 @@
     {
       "name": "NutritionFunction",
       "code_uri": "backend/functions/nutrition/",
-      "triggers": ["HTTP API /nutrition/*"]
+      "triggers": ["HTTP API /api/* write routes"]
     },
     {
       "name": "CoachFunction",
       "code_uri": "backend/functions/coach/",
-      "triggers": ["HTTP API /coach/*"],
-      "notes": "Bedrock tool-use coach (FastAPI app)."
+      "triggers": ["Function URL (RESPONSE_STREAM), app-level x-api-key"],
+      "notes": "Deployed Bedrock tool-use coach (FastAPI + Lambda Web Adapter). Chat is the current PRISM Coach interface; McFox is the long-term application."
     }
   ],
   "shared_modules": [
@@ -107,15 +108,24 @@
     {"name": "fitness-feedback", "pk": "user_id", "sk": "target_key"},
     {"name": "fitness-events", "pk": "see template.yaml"}
   ],
+  "product_architecture": "PRISM_PRODUCT_ARCHITECTURE.md",
+  "foundation_status": "PRISM_FOUNDATION_STATUS.md",
+  "hae_contracts": {
+    "activity_daily": {"semantics": "completed_daily_summary", "grouping": "Days", "saved_period": "Yesterday", "summary": true, "batch": true, "metric_count": 7, "storage": "#hae_daily_summary plus per-date session guard; no sample ledger"},
+    "vitals_mobility": {"semantics": "raw_observation", "grouping": "Default", "saved_period": "Since Last Sync", "summary": false, "batch": true, "configured_metric_count": 17, "storage": "source-supported aggregate rows and timestamp-deduplicated sample shards"},
+    "heart_rate": {"automation": "Mateo HR", "semantics": "raw_observation", "grouping": "Default", "saved_period": "Today", "summary": false, "batch": true, "metric_count": 1, "storage": "dedicated HR aggregate rows and sample ledger"},
+    "sleep": {"automation": "Mateo sleep", "semantics": "raw_observation", "grouping": "Default", "saved_period": "Today", "summary": false, "batch": true, "metric_count": 1, "storage": "stage intervals and sleep-window metadata with wake-date attribution"},
+    "workouts": "Not implemented; real payload required before PR7 HAE workout semantics"
+  },
   "data_flows": {
     "hevy_ingestion": {
       "trigger": "IngestFunction hevy_poll daily schedule (or action=hevy_poll); explicit action=hevy_backfill (or hevy_poll with force_full/reset_watermark) for a full re-sync",
       "auth": "api-key header; secret hevy-api-key (Secrets Manager us-west-2, JSON {api_key})",
       "read_only": true,
       "modes": {
-        "incremental": "GET /v1/workouts/events?since=<hevy_last_sync> when a watermark exists (updates + deletions).",
+        "incremental": "GET /v1/workouts/events?since=<hevy_last_sync minus 48 hours> when a watermark exists (updates + deletions).",
         "cold_start": "bounded page-walk of GET /v1/workouts when no watermark.",
-        "backfill": "action=hevy_backfill (or force_full/reset_watermark): IGNORES the watermark, full page-walk (default pageSize 10 x max_pages 20 = up to 200 workouts, both event-overridable), forces both writes regardless of dupe state and forces a template refresh, then advances the watermark. Idempotent, safely re-runnable."
+        "backfill": "action=hevy_backfill (or force_full/reset_watermark): IGNORES the watermark, full page-walk (default pageSize 10 x max_pages 20 = up to 200 workouts, both event-overridable), forces both writes regardless of dupe state and forces a template refresh, then advances the watermark. Writes are idempotent; inspect partial state before an authorized retry."
       },
       "steps": [
         "Refresh exercise-template cache (fitness-user-config key=hevy_exercise_templates) if older than ~7 days (forced on backfill). pageSize clamped to Hevy's max of 10.",
@@ -124,7 +134,7 @@
         "Delete workouts removed in Hevy from fitness-workouts and their source=hevy fitness-exercises rows.",
         "recompute_prs_for_canonicals + recompute_weekly_volume for touched canonicals (including backfilled ones); _trigger_compute for touched dates.",
         "Ingest GET /v1/body_measurements (pageSize clamped to Hevy's max of 10 -- an over-cap value 400s and silently returns empty, the measurements_written:0 root cause) into fitness-health-metrics under #hevy sources (cm->in, kg->lb) via merge/ordering-guard helpers. Summary reports measurements_status ok/empty/error so a zero is never ambiguous.",
-        "Advance hevy_last_sync watermark in fitness-user-config."
+        "After successful workout/event processing and derived updates, advance hevy_last_sync to the pre-fetch boundary. An incomplete body-measurement result raises after advancement; successful whole-poll completion must be verified separately."
       ],
       "summary_fields": ["mode", "fetched", "workouts_written", "backfilled", "exercise_rows_written", "deleted", "measurements_written", "measurements_available", "measurements_status", "canonicals_touched", "dates"],
       "notes": "Hevy public API exposes no calories/HR or trustworthy event-local timezone: strain is estimated, cal is flagged cal_unavailable, and absolute timestamps use the configured home timezone for analysis dates without fabricating travel-local context. Historical date repair is explicitly separate. Never a bare put_item overwrite for metrics (PR #2 regression guard)."

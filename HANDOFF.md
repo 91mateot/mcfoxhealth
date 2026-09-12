@@ -3,7 +3,17 @@
 Personal performance dashboard. iPhone-first PWA, dark theme, real data from
 Apple Health + Withings + Strava + Hevy, AI coach on Bedrock.
 
+> **Future product direction:** [`PRISM_PRODUCT_ARCHITECTURE.md`](PRISM_PRODUCT_ARCHITECTURE.md)
+> defines McFox's evolution into PRISM, including capability ownership,
+> evidence-layer boundaries, the HAE validation gate, future roadmap, and
+> product reference register. This handoff describes the current application.
+
 > ⚙️ **Operating this system?** See [`RUNBOOK.md`](RUNBOOK.md) — deploy recipe, health checks, feed ownership (which breakages only Mateo can fix), and the traps that have already caused real bugs. This file covers *what* the system is; the runbook covers *how to run it without breaking it*.
+
+Chat remains the current PRISM Coach interface. McFox is the long-term PRISM
+application and data/intelligence layer; its existing Bedrock Coach remains
+deployed. See [foundation status](PRISM_FOUNDATION_STATUS.md) before resuming
+repair or PR5. The canonical reasoning specification is a separate source.
 
 ## Live
 
@@ -86,23 +96,22 @@ Tested in `backend/tests/test_scoring.py` (Whoop-proxy calibration + sanity).
 | `/api/meal`                | POST   | Log a meal                                |
 | `/api/water`               | POST   | Log water intake                          |
 | `/api/journal`             | POST   | Morning check-in                          |
-| `/api/coach`               | POST   | Chat (streaming, resumes last thread)     |
+| Coach Function URL `/api/coach`     | POST   | Streaming chat through Lambda Web Adapter; app-level API-key check |
 | `/api/conversation/latest` | GET    | Most recent coach thread (6h TTL)         |
 
 ## Deploy
 
 - **Frontend:** `git push origin main` → Vercel auto-deploys in ~60s.
   Env var: `VITE_API_BASE` in Vercel production.
-- **Backend:** `cd backend && sam build && sam deploy` (manual).
+- **Backend:** explicit approval plus the reviewed change-set and artifact-preservation procedure in `RUNBOOK.md`; preserve untouched Coach dependencies.
 - **Scoring tweaks:** update `fitness-user-config` DynamoDB row with key `scoring`; weights hot-swap.
 
 ## Known gaps
 
-1. **No auth on the API.** CORS is `*`, no API key enforcement on the read
-   endpoints (`/api/today`, `/api/progress`, `/api/workouts`,
-   `/api/nutrition/{date}`). Write endpoints (`/api/meal`, `/api/water`) check
-   `x-api-key` via `_verify_api_key()` in `backend/functions/nutrition/handler.py`.
-   Non-guessable URL is the only moat on reads.
+1. **Authentication uses an application API key.** API read/write handlers
+   require `x-api-key`; the streaming Coach Function URL uses app-level key
+   validation while `/health` is public. This is a shared-key model, not
+   per-user authentication. See `CLAUDE.md` and the handler implementations.
 2. **Prototype folder.** `prototype/` holds the original Babel Standalone
    export (Apr 2026). Archived — do not touch.
 

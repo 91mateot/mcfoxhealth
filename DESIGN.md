@@ -4,6 +4,8 @@ This file is the design contract for frontend/UI work in this repo. It is
 inspired by Google's `design.md` pattern: agents should read it before changing
 screens, components, theme tokens, copy, or interaction states.
 
+Product direction and scope gates live in [PRISM_PRODUCT_ARCHITECTURE.md](PRISM_PRODUCT_ARCHITECTURE.md). Chat is the current PRISM Coach interface; this file governs the deployed McFox UI and does not authorize a frontend redesign during foundation work or PR5.
+
 ## Purpose
 
 - Product: personal health and fitness dashboard for one primary user.
@@ -15,13 +17,13 @@ screens, components, theme tokens, copy, or interaction states.
 
 ## Source Of Truth
 
-- Token source: [src/theme.ts](/Users/mateohome/Desktop/Projects/fitnessdashboard/src/theme.ts).
+- Token source: [src/theme.ts](src/theme.ts).
 - Canonical palette: `zine` / "Newsprint".
 - Alternate palettes: `lime` and `graphite`; keep them functional, but do not
   let them redefine the app's default visual language.
-- Component source: [src/components](/Users/mateohome/Desktop/Projects/fitnessdashboard/src/components).
-- Screen source: [src/screens](/Users/mateohome/Desktop/Projects/fitnessdashboard/src/screens).
-- Product context: [PROJECT-OVERVIEW.md](/Users/mateohome/Desktop/Projects/fitnessdashboard/PROJECT-OVERVIEW.md).
+- Component source: [src/components](src/components).
+- Screen source: [src/screens](src/screens).
+- Product context: [PROJECT-OVERVIEW.md](PROJECT-OVERVIEW.md).
 
 ## Tokens
 

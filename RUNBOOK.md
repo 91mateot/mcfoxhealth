@@ -4,9 +4,10 @@
 >
 > **Audience:** primarily AI coding tools; secondarily Mateo on periodic review.
 > **Scope:** the AWS backend + data pipeline. Frontend/product docs live in `HANDOFF.md`, architecture in `ARCHITECTURE.md` / `architecture.json`, stack conventions in `CLAUDE.md`.
-> **Last verified against live AWS:** 2026-07-27. HAE/API Gateway and Manual
-> Export evidence was refreshed 2026-08-30; all unrelated entries retain their
-> stated verification dates.
+> **Latest bounded reconciliation:** 2026-09-12 UTC. See
+> [`PRISM_FOUNDATION_STATUS.md`](PRISM_FOUNDATION_STATUS.md) for deployed hashes,
+> source coverage, query scope, limitations, and outstanding phone operations.
+> This does not refresh unrelated historical entries or mark repairs complete.
 
 ---
 
@@ -109,11 +110,17 @@ reports availability as `available`, `unavailable`, or
 Fixed goals may remain numeric, but their semantics must identify them as
 targets/fallbacks rather than observations.
 
-### 2.7 `hevy_backfill` exceeds the Lambda timeout — and that's survivable
+### 2.7 Historical backfill timeouts require stored-state verification
 
-IngestFunction is **30s / 256 MB**. A full backfill (~32 workouts × per-exercise writes + PR/volume recompute) reliably hits `Sandbox.Timedout`.
+The July 27 observation used **30s / 256 MB** and timed out during a full
+backfill. Current Ingest is **300s / 512 MB**, verified September 12 against
+Lambda configuration and `backend/template.yaml`; the older timing is not a
+current benchmark.
 
-**Writes are idempotent and land incrementally before the timeout**, so repeated invokes still reach full coverage. But the invoke errors, so **you cannot read the returned summary** — verify completeness by querying date coverage (§5.3), never by trusting the Lambda response.
+Partial writes can survive a failed invocation. Inspect logs, watermark,
+workout/exercise coverage, and stored state before considering a bounded
+retry. Never repeatedly invoke a backfill solely because writes are intended
+to be idempotent; backfill execution remains a separately approved operation.
 
 ### 2.8 A `date + type` collision is a CANDIDATE, not a duplicate
 
@@ -178,12 +185,11 @@ For a narrowly scoped release, preserve the currently deployed Coach artifact
 or stop; dependency pinning/lockfiles require their own reviewed PR. Do not
 silently ship the newly resolved package set with an unrelated change.
 
-### 2.12 Hevy watermark means a completed check, not the latest write time
+### 2.12 Hevy watermark is a replay boundary, not source-health proof
 
-Hevy paginated reads carry explicit completeness metadata. HTTP errors,
-timeouts, malformed pages, and `max_pages` truncation are failed Lambda
-invocations; they must never be interpreted as a successful empty poll or
-advance `hevy_last_sync`.
+Hevy workout/event paginated reads carry explicit completeness metadata. HTTP
+errors, timeouts, malformed pages, and `max_pages` truncation fail before the
+watermark advances; they must never be interpreted as a successful empty poll.
 
 An empty first page is complete when Hevy reports either `page_count: 0` or
 `page_count: 1`. The zero-page envelope is valid only for an empty page;
@@ -197,8 +203,12 @@ collection on the events endpoint remains malformed and leaves the watermark
 unchanged, because it could have different update/deletion semantics.
 
 The handler captures `sync_started_at` before the first vendor request and
-stores that pre-fetch boundary only after workout events, writes, deletions,
-derived recomputation, and body-measurement ingestion complete. Incremental
+stores that pre-fetch boundary after workout events, writes, deletions, and
+derived recomputation succeed. The body-measurement path is attempted before
+advancing the watermark, but an incomplete body-measurement result raises
+**after** advancement in the current handler. Therefore a fresh watermark
+alone cannot establish whole-poll health; also require a successful completion
+log and body-measurement status. Incremental
 polls query from `hevy_last_sync - 48 hours`. This bounded replay covers events
 near the boundary; Hevy-id-keyed workout/exercise overwrites and repeated
 deletion events are idempotent.
@@ -331,9 +341,10 @@ Enable exactly these approved activity metrics:
 | `apple_stand_hour` | `stand_hours#hae_daily_summary` | count |
 | `flights_climbed` | `flights#hae_daily_summary` | count |
 
-Each accepted summary metric must carry exactly one HAE v2 daily row. The
-stored value is HAE's completed-day total; McFox must **not** reconstruct it by
-summing minute or raw rows.
+Each accepted summary metric/date pair must carry one HAE v2 daily row.
+PR #22 accepts multiple distinct dates per metric after whole-request
+validation. The stored value is HAE's completed-day total; McFox must **not**
+reconstruct it by summing minute or raw rows.
 
 These rows have a separate `#hae_daily_summary` identity, never a samples
 ledger. A repeat of an identical delivery overwrites the same date/metric
@@ -740,11 +751,15 @@ only under separate repair authorization:
 5. Open the existing **PRISM Vitals & Mobility** automation. Confirm the exact
    17 metrics, JSON v2, Summarize Off, Default, Batch Requests On, Since Last
    Sync as the normal range, and no Workouts/GPX.
-6. For V1 through V7 in order, change only the date range to that chunk, run
-   once, and wait for AWS validation before advancing. On any stop condition,
-   restore `Since Last Sync`, save/update, and do not start the next chunk.
-7. After V7 validates, restore `Since Last Sync`, save/update, and confirm both
-   production automations retain their normal enabled cadence and settings.
+6. Before V1, verify the existing automation's Manual Export picker can select
+   a historical range while preserving saved `Since Last Sync`. The older
+   procedure required changing/saving the range; do not assume that step is
+   necessary or covered by a picker-only authorization. If the picker cannot
+   preserve the saved contract, stop and return the exact observed limitation.
+   For V1 through V7, run one approved chunk and wait for AWS validation before
+   advancing; do not improvise saved-setting changes or retry an ambiguous run.
+7. After V7 validates, confirm both production automations retain their normal
+   enabled cadence and saved settings.
 8. Do not open, edit, or run the dedicated Sleep, raw Heart Rate, or Workouts
    automations.
 
@@ -1022,7 +1037,26 @@ never to print token values.
 ## 5. Health checks
 
 ### 5.1 Feed freshness (run this first on any "data looks wrong")
-Per-day metric counts from `fitness-health-metrics`, grouped by source suffix (`#hae`, `#withings`, `#hevy`). **Healthy HAE ≈ 13–17 metrics/day.** A day with only 3–4 (HR only, no HRV/steps/sleep) means HAE is degraded phone-side — especially if Withings kept landing the same day.
+
+Query bounded date partitions and evaluate each named stream independently:
+
+- Activity Daily: completed prior-local-day coverage for seven approved summary
+  identities, matching session guard, and canonical source selection. Today's
+  missing completed-day summary is expected until the day closes.
+- Vitals: configured 17 families, but only source-supported observations are
+  expected. Separate source timestamps from receipts, inspect timestamp
+  uniqueness/shards, and keep sparse absence distinct from ingestion failure.
+- HR and Sleep: inspect their dedicated rows and latest accepted requests;
+  healthy Vitals cannot substitute for either stream.
+- Hevy: successful scheduled poll plus advancing check watermark and no
+  completeness failure; the watermark is not a workout timestamp.
+- Withings/Strava: check observation freshness separately from sanitized OAuth
+  check status. A previously healthy credential status is not proof of a
+  currently unexpired access token or a new source observation.
+
+A blanket total row count cannot prove source completeness. API Gateway
+rejections and silent sources must be checked even when Lambda errors are zero.
+Phone state and the cause of missing runs require direct phone evidence.
 
 ### 5.2 Scores computed
 `fitness-daily-scores` should have a row per day with non-null `recovery`, `strain`, `sleep_score`, `hrv`, `rhr`. Null `recovery`/`hrv` almost always traces upstream to an HAE gap, not to the scoring engine.
@@ -1050,9 +1084,9 @@ Every `source: hevy` date in `fitness-workouts` must have matching rows in `fitn
 | Withings | ✅ Live |
 | Strava (incl. HR streams → Edwards TRIMP zones) | ✅ Live |
 | Lift engine (e1RM, PR, stall detection, weekly volume) | ✅ Live |
-| **Apple Health / HAE** | ⚠️ PR16 server-side transport remediation is deployed. The two-stream source-evidence contract in §2.15 remains pending review/deploy, and HAE remains unvalidated until Mateo applies the bounded Activity Daily + raw Vitals & Mobility configuration and completes a clean live run. |
-| Historical HAE backfill (6/29 → present) | ⏸️ Blocked on a manual export from the HAE iPhone app |
-| HAE metric coverage | ⚠️ PR16 deployed `walking_asymmetry_percentage` and `vo2_max` source observations. This contract PR adds the approved Activity Daily identities plus Tier 1/2 raw physiology/mobility mappings; unknown names remain unpersisted and emit sanitized `HAE_UNMAPPED_METRIC` diagnostics. |
+| **Apple Health / HAE** | PR16 and PR19–22 are deployed. Activity/Vitals continue delivering. Dedicated HR/Sleep were enabled September 11 at 23:13–23:14 PDT. HR current-range delivery passed; Sleep delivery and later natural recurrence for both remain open. Foundation remains blocked; see the dated status record. |
+| Historical HAE repair | Original Activity/Vitals interval is Jul 12–Aug 24 (44 dates), still unrepaired. Activity also lacks Aug 31; HR/Sleep have separate gaps. Do not widen a repair interval implicitly. See §2.15 and the dated status record. |
+| HAE metric coverage | PR19–22 deployed completed-day Activity and raw physiology/mobility contracts. Unknown metric names remain unpersisted and emit sanitized diagnostics. Configured families, received families, and complete source coverage are separate facts. |
 | Nutrition | ⚪ Frozen 2026-05-09, no automated feed |
 | Per-session lifting calories | ⏸️ Design exists: join Apple-Health workout active energy to the Hevy session by `start_time`/`end_time`, mirroring the `hr#hae_samples` sleep-window intersection. Not built. |
 | Non-weighted load metric | ⏸️ `duration_seconds`/`distance_meters` are now persisted per set, so a real load metric for timed/distance work is available to build. Not built. |

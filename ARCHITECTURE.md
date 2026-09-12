@@ -25,12 +25,36 @@ Hevy API (poll)  ──Schedule hevy_poll  ──▶                            
                                                             (baselines/scores)   baselines,
                                                                                  correlations
 Browser / app  ──HTTP API /api/* ─────────▶ ApiFunction  (read models)
-Browser / app  ──HTTP API /nutrition/* ───▶ NutritionFunction
-Browser / app  ──HTTP API /coach/* ───────▶ CoachFunction (Bedrock tool-use)
+Browser / app  ──HTTP API /api/* writes ──▶ NutritionFunction
+Browser / app  ──Function URL stream ────▶ CoachFunction (Bedrock tool-use)
 ```
 
 Shared business logic lives in `backend/shared/shared/` and is packaged as a
 Lambda layer (`SharedLayer`) imported by every function.
+
+## Source contracts and operational status
+
+The deployment and coverage snapshot is maintained in
+[PRISM_FOUNDATION_STATUS.md](PRISM_FOUNDATION_STATUS.md). A healthy deployment
+is not evidence of healthy source delivery. Chat is the current PRISM Coach
+interface; the existing Bedrock Coach remains deployed in McFox.
+
+| HAE stream | Transport contract | Persisted evidence |
+|---|---|---|
+| PRISM Activity Daily | JSON v2, Summary On, Days, Yesterday, Batch On | Seven approved completed-day `#hae_daily_summary` identities; per-date session guards; no raw sample ledger; canonical Activity resolver prefers these summaries |
+| PRISM Vitals & Mobility | JSON v2, Summary Off, Default, Since Last Sync, Batch On | Seventeen configured metric families; source-supported raw observations and timestamp-deduplicated sample shards; sparse families may be absent |
+| Mateo HR | JSON v2, Heart Rate only, Summary Off, Default, Today, Batch On, hourly | Dedicated min/average/max rows plus raw HR sample ledger |
+| Mateo sleep | JSON v2, Sleep Analysis only, Summary Off, Default, Today, Batch On, hourly | Sleep-stage intervals, sleep-window metadata, wake-date attribution, fuller-session preservation |
+
+HR/Sleep contracts passed controlled validation historically; current
+recurring delivery is absent at the dated cutoff. Do not collapse all four
+streams into a single healthy HAE flag. HAE Workouts is not enabled by these
+Health Metrics contracts.
+
+`shared/hae_daily.py` resolves completed-day Activity sources;
+`shared/samples_ledger.py` preserves raw series across shards. OAuth rotation
+and sanitized status/leases live in `shared/oauth_service.py`; the daily
+credential check runs at 08:00 UTC, separate from Hevy's 08:30 UTC poll.
 
 ## Temporal semantics
 
@@ -50,6 +74,32 @@ recorded additively so this release does not re-key history. Strava continues
 to use `start_date_local`; HAE trusts explicit source offsets and preserves
 date-only/naive values through an explicit source-date fallback; Withings epoch
 values are converted from their absolute instant to the home timezone.
+
+## PRISM product evolution
+
+This file and `architecture.json` describe the current executable topology.
+[`PRISM_PRODUCT_ARCHITECTURE.md`](PRISM_PRODUCT_ARCHITECTURE.md) is the
+canonical record for future product capability ownership, roadmap gates, and
+reference requirements.
+
+Future longitudinal architecture preserves three logical layers rather than a
+single universal event table: observations/evidence, interventions, and
+derivations/inferences. Measured and user-reported evidence retain provenance;
+interventions record what happened without implying an outcome; derived
+associations and inferences cite their inputs and never convert temporal
+proximity into causality.
+
+The future workout/activity model is source-neutral across Hevy, HAE/Apple
+Health, Strava, and possible native PRISM execution. It preserves source
+observations independently and supports richer semantics than weight and reps,
+including duration/distance, bodyweight and added load, per-side work, timed
+work, carries, supersets, cardio, RPE/RIR, substitutions, planned versus actual
+performance, progression rationale, symptoms, and tolerance. These are design
+requirements, not current runtime fields.
+
+PR5 (Provenance, Metric Semantics & Source Health) remains blocked on the
+manual HAE Source Validation Gate. A representative real HAE workout payload
+is a separate hard gate for HAE workout-ingestion semantics in PR7.
 
 ## Lift-learning engine (the core of the Hevy work)
 
@@ -83,7 +133,7 @@ and `recompute_weekly_volume`.
    ~7 days (or forced on a backfill). Provides real `primary_muscle_group` per
    exercise.
 2. **Workout fetch** — three modes: **incremental** via
-   `GET /v1/workouts/events?since=<watermark>` (`fetch_workout_events`, applies
+   `GET /v1/workouts/events?since=<watermark minus 48 hours>` (`fetch_workout_events`, applies
    updates AND deletions) when a `hevy_last_sync` watermark exists; **cold-start**
    bounded page-walk (`fetch_recent_workouts_full`) when no watermark; **backfill**
    (`action=hevy_backfill`, or a poll carrying `force_full`/`reset_watermark`)
@@ -118,6 +168,12 @@ and `recompute_weekly_volume`.
    bare `put_item` overwrite). The summary distinguishes `measurements_status`
    `ok` / `empty` (genuinely none logged) / `error` (fetch/parse failure) so a
    zero is never ambiguous.
+
+The workout/event fetch must be complete before its replay watermark can
+advance. Body-measurement incompleteness is reported as a failed invocation
+after watermark advancement in the current handler. Require the successful
+completion log and measurement status in addition to a fresh watermark when
+assessing source health.
 
 The response summary reports: `mode`, `fetched`, `workouts_written`,
 `backfilled`, `exercise_rows_written`, `deleted`, `measurements_written`,
@@ -161,11 +217,11 @@ preserves 3+ member groups without loss).
 
 | Function | Routes / triggers | Notes |
 |---|---|---|
-| `ingest/` | `POST /ingest/{health,withings,strava}`, `GET /ingest/strava`, `Schedule hevy_poll`, `action=hevy_backfill` | Writes health-metrics, workouts, exercises, user-config, daily-scores; invokes ComputeFunction. |
+| `ingest/` | `POST /ingest/{health,withings,strava}`, `GET /ingest/strava`, `Schedule hevy_poll`, `Schedule oauth_credential_check`, `action=hevy_backfill` | Writes health-metrics, workouts, exercises, user-config, daily-scores; invokes ComputeFunction. |
 | `compute/` | daily + weekly schedules | Baselines, daily scores, correlations, lift roll-ups. |
 | `api/` | `GET/POST /api/*` | Read models for the dashboard. |
-| `nutrition/` | `/nutrition/*` | Meal logging, favorites, workout annotation route. |
-| `coach/` | `/coach/*` | Bedrock tool-use coach (FastAPI app). |
+| `nutrition/` | HTTP API `/api/*` write routes | Meal logging, favorites, workout annotation route. |
+| `coach/` | Streaming Function URL | FastAPI + Lambda Web Adapter; app-level API-key auth; public `/health` probe. |
 
 ## DynamoDB tables (`fitness-*`)
 
