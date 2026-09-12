@@ -1084,7 +1084,7 @@ Every `source: hevy` date in `fitness-workouts` must have matching rows in `fitn
 | Withings | ✅ Live |
 | Strava (incl. HR streams → Edwards TRIMP zones) | ✅ Live |
 | Lift engine (e1RM, PR, stall detection, weekly volume) | ✅ Live |
-| **Apple Health / HAE** | PR16 and PR19–22 are deployed. Activity/Vitals continue delivering; dedicated HR/Sleep have no accepted request after their Aug 30 local controlled exports. Foundation remains blocked; see the dated status record. |
+| **Apple Health / HAE** | PR16 and PR19–22 are deployed. Activity/Vitals continue delivering. Dedicated HR/Sleep were enabled September 11 at 23:13–23:14 PDT. HR current-range delivery passed; Sleep delivery and later natural recurrence for both remain open. Foundation remains blocked; see the dated status record. |
 | Historical HAE repair | Original Activity/Vitals interval is Jul 12–Aug 24 (44 dates), still unrepaired. Activity also lacks Aug 31; HR/Sleep have separate gaps. Do not widen a repair interval implicitly. See §2.15 and the dated status record. |
 | HAE metric coverage | PR19–22 deployed completed-day Activity and raw physiology/mobility contracts. Unknown metric names remain unpersisted and emit sanitized diagnostics. Configured families, received families, and complete source coverage are separate facts. |
 | Nutrition | ⚪ Frozen 2026-05-09, no automated feed |

@@ -216,9 +216,10 @@ are capability milestones, not GitHub pull-request numbers.
 
 The dated [foundation status](PRISM_FOUNDATION_STATUS.md) is the current
 reconciliation record. As of September 12, 2026 UTC, the backend matches PR #22,
-but foundation closeout is **blocked** by absent recurring HR/Sleep delivery
-and incomplete repair work. Documentation may be refreshed while phone work
-is pending; that does not open the implementation gate.
+but foundation closeout is **blocked** by unproven HR/Sleep recurrence, absent
+post-enable Sleep delivery, and incomplete repair work. Documentation may be
+refreshed while phone work is pending; that does not open the implementation
+gate.
 
 Before PR5, record and verify separately:
 

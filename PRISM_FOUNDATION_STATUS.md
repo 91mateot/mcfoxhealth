@@ -1,10 +1,12 @@
 # PRISM Foundation Status — September 12, 2026 UTC
 
 **Milestone:** current-state reconciliation complete; foundation closeout blocked.
-**Evidence cutoff:** `2026-09-12T05:43:12Z` (September 11, 22:43 PDT).
-Later read-only detail queries corroborated this baseline; they did not trigger
-new source traffic. **PR5 may not begin.** This is a dated evidence record,
-not a live health dashboard. Reverify before operational actions.
+**Evidence cutoff:** `2026-09-12T06:23:15Z` (September 11, 23:23 PDT).
+The initial read-only baseline ended at `05:43:12Z`; the later cutoff includes
+the authorized HR/Sleep enable operation and the bounded unintended sync
+described below, followed by a read-only delayed-delivery check. **PR5 may not
+begin.** This is a dated evidence record, not a live health dashboard. Reverify
+before operational actions.
 
 ## Verified deployment and repository
 
@@ -35,10 +37,10 @@ not a live health dashboard. Reverify before operational actions.
 
 | Source | Current evidence | Historical completeness / limitation |
 |---|---|---|
-| Activity Daily | Delivering. Latest request `2026-09-12T04:45:07.219Z`, seven rows for September 10, Days/Yesterday/completed_daily_summary; all seven canonical sources resolve to hae_daily_summary; score computed `04:45:11.680406Z`. | July 12–August 24: all 44 dates still lack all seven summary rows and guards. Additional August 31 gap: no summaries/guard and all Activity source selectors unavailable. August 25–30 and September 1–10 have all seven summaries. September 11 is an incomplete local day, not a missing completed-day summary. |
-| Vitals & Mobility | Delivering. Latest request `2026-09-12T00:09:24.484Z`, Default/Since Last Sync/raw_observation; latest inspected source timestamp September 11 16:27 PDT. | Original July 12–August 24 repair is not evidenced as executed. Named-stream historical rows exist only August 20–24, with latest receipt August 26; legacy observations are not proof of repaired coverage. Sparse absence remains valid. |
-| Dedicated HR | No accepted request after controlled export `2026-08-31T06:03:22.411Z` (August 30 local); latest stored date August 30. | Missing completed dates August 26–29 and August 31–September 10: 15 dates. September 11 also has no HR row at cutoff. Current recurrence is unresolved. |
-| Dedicated Sleep | No accepted request after controlled export `2026-08-31T06:09:56.643Z` (August 30 local); latest stored date August 30. | Same 15 completed-date gaps as HR; September 11 also lacks a row. Current recurrence is unresolved. Historical gaps earlier than the scoped catch-up require separate assessment. |
+| Activity Daily | Delivering repeatedly before the phone operation. An unintended current-range sync at `2026-09-12T06:16:03.897Z` repeated the saved Yesterday export: seven September 10 rows, Days/Yesterday/completed_daily_summary, HTTP/integration 200. Guard version advanced to 3, all seven canonical sources remain hae_daily_summary, and Compute completed at `06:16:05.689603Z`. | July 12–August 24: all 44 dates still lack all seven summary rows and guards. Additional August 31 gap: no summaries/guard and all Activity source selectors unavailable. August 25–30 and September 1–10 have all seven summaries. September 11 is an incomplete local day, not a missing completed-day summary. |
+| Vitals & Mobility | Delivering. Latest AWS request remains `2026-09-12T00:09:24.484Z`, Default/Since Last Sync/raw_observation; latest inspected source timestamp September 11 16:27 PDT. The phone list timestamp advanced during the stopped sync-all attempt, but no corresponding API request or AWS write was observed by cutoff. | Original July 12–August 24 repair is not evidenced as executed. Named-stream historical rows exist only August 20–24, with latest receipt August 26; legacy observations are not proof of repaired coverage. Sparse absence remains valid. |
+| Dedicated HR | Existing automation enabled in place at 23:14 PDT after its visible contract matched. Enable-triggered and unintended sync-all requests arrived at `06:14:45Z` and `06:16:04Z`, both HTTP/integration 200, Default/Today/raw_observation. The latest row set has min/average/maximum plus one ledger containing 120 unique timestamps and zero duplicates; Compute completed. These are controlled/current-range delivery evidence, not natural recurrence. | Missing completed dates August 26–29 and August 31–September 10 remain 15 dates. September 11 is now present. A later scheduled/natural request is still required to prove recurrence. |
+| Dedicated Sleep | Existing automation enabled in place at 23:13 PDT after its visible contract matched. No corresponding API request or stored Sleep row arrived by cutoff, including during the stopped sync-all attempt. | The 15 previously completed-date gaps remain, and September 11 is still absent at cutoff. Controlled delivery and later natural recurrence are both unresolved. Historical gaps earlier than the scoped catch-up require separate assessment. |
 | Hevy | Twelve successful daily scheduled polls August 31–September 11 UTC. Latest completed `2026-09-11T08:30:28.650Z`; watermark `08:30:17.998060Z`; body-measurement phase successful. Schedule enabled at 08:30 UTC. | July 12–September 11 partition queries found 22 Hevy workout rows, zero duplicate Hevy IDs. Latest stored workout date August 29 is an observation, not an outage claim. Exercise completeness and full history were not re-audited. No accepted-empty-alias log appeared; that passive branch remains non-blocking. |
 | Withings | Stored observation dates through September 10; latest scheduled OAuth check succeeded September 11 08:00 UTC. | Observation absence is not evidence of a missed measurement without source comparison. Previously recorded healthy OAuth state does not prove a token is unexpired now. |
 | Strava | Stored workout date September 11; scheduled OAuth check succeeded September 11 08:00 UTC and a later refresh succeeded September 12 01:56 UTC. | Vendor-wide history/completeness was not re-audited. |
@@ -46,7 +48,7 @@ not a live health dashboard. Reverify before operational actions.
 
 ## Transport and storage evidence
 
-CloudWatch query window: August 31 00:00 UTC through the reconciliation cutoff.
+Initial CloudWatch query window: August 31 00:00 UTC through `05:43:12Z`.
 
 - API Gateway: **25 HAE requests, all HTTP 200 / integration 200**, zero
   413/422/5xx in that window.
@@ -66,6 +68,28 @@ CloudWatch query window: August 31 00:00 UTC through the reconciliation cutoff.
   warning or source outage.
 - Hevy and OAuth rules are enabled with their expected action inputs; daily and
   weekly Compute rules are also enabled. No schedules were changed.
+
+Post-baseline phone action at 23:13–23:16 PDT:
+
+- Global Background App Refresh was observed as Wi-Fi & Cellular Data; the
+  Auto Export app-specific switch was On. Low Power Mode was Off; Adaptive
+  Power was On. No iOS system setting was changed.
+- The existing Sleep and HR automations were each disabled initially. Visible
+  settings matched Health Metrics, one correct selected metric, JSON v2,
+  Today, Summary Off, Batch On, hourly, reminders Off, and no Workouts/GPX.
+  Their last accepted AWS headers independently established Default grouping.
+  Only the recurring Enabled switches were changed and saved successfully.
+- At 23:16 PDT, the top circular-arrow control was mistaken for activity
+  history and initiated **sync all automations**. Interaction stopped
+  immediately. AWS proved that only Activity Daily and HR reached the service:
+  two current-range requests, both HTTP/integration 200. Sleep and Vitals had
+  no corresponding request by cutoff. No date picker or historical range was
+  opened, and no saved automation setting changed.
+- Together with the enable-triggered HR delivery, the post-baseline window had
+  three requests, all HTTP/integration 200. Ingest and Compute error-pattern
+  checks returned no matches. This raises the full window total from 25 to 28
+  successful HAE requests. A final read-only query through `06:23:15Z` found
+  no later API request or stream classification.
 
 No health measurements, raw payloads, credentials, or source sample values are
 included in this record. Sample timestamps were inspected in memory only to
@@ -112,91 +136,38 @@ filters and date/partition boundaries to refresh evidence.
 
 ## Remaining gates and sequence
 
-1. Inspect existing HR/Sleep configuration on the phone; enable the two existing
-   automations in place only if their validated contracts still match. Obtain
-   current background-setting evidence without changing system settings.
-2. Correlate the first subsequent natural HR/Sleep runs in AWS and validate
+1. Wait for and correlate the first **later scheduled/natural** HR and Sleep
+   runs in AWS, separate from the enable operation and stopped sync-all attempt.
+   Do not manually export or invoke sync all for this gate. Validate
    dedicated raw rows, unique timestamps, sleep intervals/window, temporal
    attribution, safe fuller-session preservation, and Compute outcome.
-3. Complete the separately bounded Activity and seven-chunk Vitals historical
+2. Complete the separately bounded Activity and seven-chunk Vitals historical
    repairs with validation between operations. Do not silently fold the new
    August 31 Activity gap into the original July 12–August 24 authorization.
-4. Before HR/Sleep historical catch-up, review one historical-day picker probe
+3. Before HR/Sleep historical catch-up, review one historical-day picker probe
    for each stream; exclude dates already present. Confirm authorization for
    those probes and any iOS system-setting changes separately.
-5. Close or explicitly defer historical gaps with the user; resolve current
+4. Close or explicitly defer historical gaps with the user; resolve current
    outages. Update this matrix from new evidence and complete independent
    documentation review before starting the focused PR5 implementation.
 
-## PHONE ACTION REQUIRED — HR/Sleep restoration
+## PHONE ACTION RESULT — HR/Sleep restoration
 
-Copy this into the phone-capable Computer Use surface. If iPhone Mirroring or
-safe controls are unavailable, stop and report the limitation rather than
-substituting a different device/account.
-
-```text
-Use Computer Use with iPhone Mirroring for the existing Health Auto Export
-(HAE) automations Mateo HR and Mateo sleep only.
-
-Goal: inspect both saved contracts and enable their existing recurring
-switches in place. AWS has no accepted request from either after August 30
-local controlled validation. Do not assume the current switches are Off.
-
-Before changing either automation, verify both safely:
-- Destination/data type: existing REST Health Metrics automation.
-- JSON, export version v2.
-- Summarize Data Off; Time Grouping Default.
-- Saved Date Range Today; Batch Requests On.
-- Every 1 Hours.
-- Mateo HR: Heart Rate only, one selected metric.
-- Mateo sleep: Sleep Analysis only, one selected metric.
-- No Workouts or GPX.
-
-Record each labeled recurring Enabled switch and last visible activity time.
-If either contract differs or grouping cannot be verified without modifying
-settings, stop and report the exact safe mismatch/unknown. Do not normalize,
-recreate, duplicate, delete, or change the saved configuration to fit this
-prompt. Do not navigate through credential-bearing settings to obtain proof.
-
-If both contracts match, change only each recurring Enabled switch from Off
-to On where necessary. If already On, leave it On. Save only if the app
-requires saving this exact enable-state change and the saved contract was
-verified unchanged. Record exact local timestamps and timezone for each
-change and any export that starts automatically. Do not run Manual Export,
-select historical dates, or retry any failed/ambiguous request.
-
-Read current Background App Refresh (global and HAE-specific) and Low Power
-Mode only if safely accessible. Do not change iOS settings. Their earlier
-values are historical, not current proof. Do not change Activity Daily,
-Vitals & Mobility, Apple Health permissions/source priority, credentials,
-other automations, or unrelated settings.
-
-Do not expose or retain credentials, headers, endpoint secrets, health values,
-or screenshots containing them. Return only safe settings, before/after
-switches, exact timestamps/timezone, visible success/error status, and any
-unknowns. Use credential-free screenshots only when helpful.
-
-Return after the bounded operation. No background monitoring task, historical
-export, or retry is authorized by this prompt. AWS verification continues in
-the existing Codex task after I paste your result.
-```
-
-An export triggered immediately by enabling is controlled-delivery evidence
-only. To establish recurrence, correlate phone timestamps with a later
-scheduled/natural request per stream, separate from the enable operation.
-Do not close the foundation gate from the enable-triggered export alone.
-
-AWS ingestion criteria for each observed request:
-HTTP/integration 200, `raw_observation`, Default/Today, and exactly its named
-metric; HR aggregate/ledger integrity; valid or safely preserved Sleep record;
-no summary guards, unexpected source writes, 413/422/5xx, or runtime errors;
-expected Compute outcome. Recurrence additionally requires the later natural
-request described above; an enabled switch alone does not close the gate.
+The bounded enable operation is complete. Both existing automations are On;
+their saved non-secret settings were preserved. Current iOS background
+conditions were inspected read-only and require no change. HR controlled
+delivery passed. Sleep delivery and natural recurrence for both streams remain
+open AWS evidence gates. Do not repeat this enable operation or use sync all as
+a recurrence test.
 
 ## Change and verification record
 
-This reconciliation made no AWS resource, source-system, schedule, credential,
-health-data, or phone changes and invoked no Lambda. Documentation updates
-have no backend deployment effect. JSON parsing, documentation links, diff
-scope, and independent review validate the documentation change; they do not
-substitute for runtime acceptance tests or foundation closeout.
+The initial reconciliation invoked no Lambda and made no change. The subsequent
+phone operation changed only the two existing recurring Enabled switches. HAE
+then invoked existing endpoints; the enable-triggered HR request and stopped
+sync-all attempt caused bounded current-range DynamoDB overwrites and Compute
+invocations described above. No AWS resource, schedule, credential, historical
+repair, or saved export contract changed. Documentation updates have no backend
+deployment effect. JSON parsing, documentation links, diff scope, and
+independent review validate the documentation change; they do not substitute
+for runtime acceptance tests or foundation closeout.
