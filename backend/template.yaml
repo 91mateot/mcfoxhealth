@@ -738,6 +738,8 @@ Resources:
           PORT: '8080'
           AWS_LWA_INVOKE_MODE: response_stream
           NUTRITION_FUNCTION_NAME: !Sub '${AWS::StackName}-NutritionFunction'
+          COACH_MODEL_ID: us.openai.gpt-5.6-sol
+          COACH_REASONING_EFFORT: low
           # Lambda Web Adapter spawns `python -m uvicorn` in a subprocess,
           # which does NOT inherit the runtime's auto-injected /opt/python path.
           # Without this, `from shared.*` fails with ModuleNotFoundError.

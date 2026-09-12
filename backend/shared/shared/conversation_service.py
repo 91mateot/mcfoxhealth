@@ -6,7 +6,6 @@ threads get a summary prepended to future Bedrock context once they pass
 a turn threshold.
 """
 
-import json
 import logging
 import time
 import uuid
@@ -218,13 +217,12 @@ def messages_for_bedrock(thread: dict) -> list[dict]:
         out.append({
             "role": "user",
             "content": [{
-                "type": "text",
                 "text": f"[Summary of earlier conversation — for context only, do not reference verbatim]\n{summary}",
             }],
         })
         out.append({
             "role": "assistant",
-            "content": [{"type": "text", "text": "Understood."}],
+            "content": [{"text": "Understood."}],
         })
 
     for m in tail:
@@ -233,12 +231,17 @@ def messages_for_bedrock(thread: dict) -> list[dict]:
         if not text:
             # Skip image-only historical turns — we have no bytes to send.
             continue
-        out.append({"role": role, "content": [{"type": "text", "text": text}]})
+        out.append({"role": role, "content": [{"text": text}]})
 
     return out
 
 
-def maybe_summarize(thread: dict, bedrock_client, model_id: str) -> None:
+def maybe_summarize(
+    thread: dict,
+    bedrock_client,
+    model_id: str,
+    reasoning_effort: str = "low",
+) -> None:
     """If the thread has grown enough, summarize older turns. Mutates + persists."""
     messages = list(thread.get("messages") or [])
     total = len(messages)
@@ -263,20 +266,20 @@ def maybe_summarize(thread: dict, bedrock_client, model_id: str) -> None:
     user = f"Prior summary:\n{summary_prior or '(none)'}\n\nNew older turns to fold in:\n{transcript}"
 
     try:
-        resp = bedrock_client.invoke_model(
+        resp = bedrock_client.converse(
             modelId=model_id,
-            contentType="application/json",
-            accept="application/json",
-            body=json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 400,
-                "system": system,
-                "messages": [{"role": "user", "content": [{"type": "text", "text": user}]}],
-            }),
+            system=[{"text": system}],
+            messages=[{"role": "user", "content": [{"text": user}]}],
+            inferenceConfig={"maxTokens": 400},
+            additionalModelRequestFields={"reasoning": {"effort": reasoning_effort}},
+            requestMetadata={
+                "application": "prism-coach",
+                "purpose": "conversation-summary",
+                "reasoning_effort": reasoning_effort,
+            },
         )
-        payload = json.loads(resp["body"].read())
-        blocks = payload.get("content") or []
-        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+        blocks = resp.get("output", {}).get("message", {}).get("content", [])
+        text = "".join(b.get("text", "") for b in blocks if "text" in b).strip()
         if text:
             thread["summary"] = text
             thread["summarized_through"] = older_count

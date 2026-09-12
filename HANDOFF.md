@@ -89,6 +89,11 @@ Tested in `backend/tests/test_scoring.py` (Whoop-proxy calibration + sanity).
 | `/api/coach`               | POST   | Chat (streaming, resumes last thread)     |
 | `/api/conversation/latest` | GET    | Most recent coach thread (6h TTL)         |
 
+The freshness control on Today revalidates `/api/today`, `/api/workouts`,
+`/api/progress`, and the current day's nutrition in parallel. The next Coach
+request receives the refreshed Today snapshot; its remaining context and tools
+read the backend tables during that request.
+
 ## Deploy
 
 - **Frontend:** `git push origin main` → Vercel auto-deploys in ~60s.

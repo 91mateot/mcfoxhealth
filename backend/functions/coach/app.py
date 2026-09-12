@@ -1,17 +1,18 @@
 """
-Coach FastAPI app — streams Bedrock Claude responses with tool use.
+Coach FastAPI app — streams Amazon Bedrock Converse responses with tool use.
 
 Runs behind AWS Lambda Web Adapter. The adapter bridges a Function URL
 configured with InvokeMode=RESPONSE_STREAM to this uvicorn server, so
 FastAPI StreamingResponse chunks arrive at the browser as they're produced.
 
 Tool loop:
-  1. invoke_model_with_response_stream with tools defined
+  1. converse_stream with tools defined
   2. stream text deltas straight to the client
   3. on stop_reason=tool_use: execute tool, append tool_result, re-invoke
   4. repeat until stop_reason != tool_use (typically "end_turn")
 """
 
+import base64
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import time
 from typing import Optional
 
 import boto3
+from botocore.config import Config
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
@@ -53,8 +55,16 @@ from shared.timezone import local_today_str
 logger = logging.getLogger("coach")
 logger.setLevel(logging.INFO)
 
-bedrock = boto3.client("bedrock-runtime", region_name="us-west-2")
-MODEL_ID = os.environ.get("COACH_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
+bedrock = boto3.client(
+    "bedrock-runtime",
+    region_name="us-west-2",
+    config=Config(retries={"max_attempts": 5, "mode": "adaptive"}),
+)
+MODEL_ID = os.environ.get("COACH_MODEL_ID", "us.openai.gpt-5.6-sol")
+REASONING_EFFORT = os.environ.get("COACH_REASONING_EFFORT", "low").strip().lower()
+if REASONING_EFFORT not in {"none", "low", "medium", "high", "xhigh", "max"}:
+    logger.warning("invalid COACH_REASONING_EFFORT=%s; using low", REASONING_EFFORT)
+    REASONING_EFFORT = "low"
 MAX_TOOL_ROUNDS = 6
 
 # x-api-key auth on the Function URL. The URL is AuthType=NONE + streaming,
@@ -427,6 +437,19 @@ TOOLS = [
     },
 ]
 
+CONVERSE_TOOL_CONFIG = {
+    "tools": [
+        {
+            "toolSpec": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "inputSchema": {"json": tool["input_schema"]},
+            }
+        }
+        for tool in TOOLS
+    ]
+}
+
 
 def _execute_tool(name: str, args: dict) -> dict:
     try:
@@ -620,18 +643,21 @@ def _to_bedrock_messages(messages: list) -> list:
             if len(data) > _MAX_IMAGE_B64_BYTES:
                 logger.warning("rejected oversized image (%d bytes base64)", len(data))
                 continue
+            try:
+                image_bytes = base64.b64decode(data, validate=True)
+            except Exception:
+                logger.warning("rejected invalid base64 image")
+                continue
             content.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": data,
-                },
+                "image": {
+                    "format": media_type.split("/", 1)[1],
+                    "source": {"bytes": image_bytes},
+                }
             })
             kept += 1
 
         if text:
-            content.append({"type": "text", "text": text})
+            content.append({"text": text})
 
         # Skip entirely if the turn ended up empty (no text, no valid images).
         if not content:
@@ -639,6 +665,110 @@ def _to_bedrock_messages(messages: list) -> list:
         out.append({"role": role, "content": content})
 
     return out
+
+
+def _stream_model_round(history: list, system_prompt: str):
+    """Yield visible text and return the normalized Converse assistant turn."""
+    response = bedrock.converse_stream(
+        modelId=MODEL_ID,
+        messages=history,
+        system=[{"text": system_prompt}],
+        inferenceConfig={"maxTokens": 1024},
+        additionalModelRequestFields={"reasoning": {"effort": REASONING_EFFORT}},
+        toolConfig=CONVERSE_TOOL_CONFIG,
+        requestMetadata={
+            "application": "prism-coach",
+            "reasoning_effort": REASONING_EFFORT,
+        },
+    )
+
+    assistant_content: list[dict] = []
+    stop_reason: Optional[str] = None
+    current_blocks: dict[int, dict] = {}
+
+    for event in response.get("stream", []):
+        if "contentBlockStart" in event:
+            data = event["contentBlockStart"]
+            idx = data.get("contentBlockIndex", 0)
+            start = data.get("start") or {}
+            if "toolUse" in start:
+                tool = start["toolUse"]
+                current_blocks[idx] = {
+                    "kind": "tool_use",
+                    "toolUseId": tool.get("toolUseId"),
+                    "name": tool.get("name"),
+                    "input_buffer": "",
+                }
+            else:
+                current_blocks[idx] = {"kind": "text", "text": ""}
+
+        elif "contentBlockDelta" in event:
+            data = event["contentBlockDelta"]
+            idx = data.get("contentBlockIndex", 0)
+            delta = data.get("delta") or {}
+            block = current_blocks.setdefault(idx, {"kind": "text", "text": ""})
+            if "text" in delta:
+                piece = delta.get("text", "")
+                block["kind"] = "text"
+                block["text"] = block.get("text", "") + piece
+                yield piece
+            elif "toolUse" in delta:
+                block["kind"] = "tool_use"
+                block["input_buffer"] = block.get("input_buffer", "") + (
+                    delta.get("toolUse", {}).get("input", "")
+                )
+            elif "reasoningContent" in delta:
+                reasoning = delta.get("reasoningContent") or {}
+                if block.get("kind") != "reasoning":
+                    block.clear()
+                    block.update({"kind": "reasoning", "text": "", "signature": ""})
+                block["text"] += reasoning.get("text", "")
+                block["signature"] += reasoning.get("signature", "")
+                if reasoning.get("redactedContent"):
+                    block["redactedContent"] = (
+                        block.get("redactedContent", b"") + reasoning["redactedContent"]
+                    )
+
+        elif "contentBlockStop" in event:
+            idx = event["contentBlockStop"].get("contentBlockIndex", 0)
+            block = current_blocks.pop(idx, None)
+            if not block:
+                continue
+            if block.get("kind") == "tool_use":
+                raw = block.get("input_buffer") or "{}"
+                try:
+                    tool_input = json.loads(raw)
+                except Exception:
+                    logger.warning("invalid tool input JSON from model tool=%s", block.get("name"))
+                    tool_input = {}
+                assistant_content.append({
+                    "toolUse": {
+                        "toolUseId": block.get("toolUseId"),
+                        "name": block.get("name"),
+                        "input": tool_input,
+                    }
+                })
+            elif block.get("kind") == "reasoning":
+                if block.get("redactedContent"):
+                    assistant_content.append({
+                        "reasoningContent": {"redactedContent": block["redactedContent"]}
+                    })
+                elif block.get("text") or block.get("signature"):
+                    assistant_content.append({
+                        "reasoningContent": {
+                            "reasoningText": {
+                                "text": block.get("text", ""),
+                                "signature": block.get("signature", ""),
+                            }
+                        }
+                    })
+            elif block.get("text"):
+                assistant_content.append({"text": block["text"]})
+
+        elif "messageStop" in event:
+            stop_reason = event["messageStop"].get("stopReason")
+
+    return assistant_content, stop_reason
 
 
 @app.post("/api/coach")
@@ -685,91 +815,20 @@ async def coach_endpoint(
         history = list(initial_history)
         assistant_text_accum: list[str] = []
         for _ in range(MAX_TOOL_ROUNDS):
-            request_body = {
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 1024,
-                "system": system_prompt,
-                "tools": TOOLS,
-                "messages": history,
-            }
             try:
-                resp = bedrock.invoke_model_with_response_stream(
-                    modelId=MODEL_ID,
-                    contentType="application/json",
-                    accept="application/json",
-                    body=json.dumps(request_body),
-                )
+                model_stream = _stream_model_round(history, system_prompt)
+                while True:
+                    try:
+                        piece = next(model_stream)
+                    except StopIteration as done:
+                        assistant_content, stop_reason = done.value
+                        break
+                    assistant_text_accum.append(piece)
+                    yield piece
             except Exception as e:
                 logger.exception("bedrock call failed")
                 yield f"\n[coach error: {e}]"
                 return
-
-            assistant_content: list = []
-            stop_reason: Optional[str] = None
-            current_blocks: dict = {}
-
-            for event in resp.get("body", []):
-                chunk = event.get("chunk")
-                if not chunk:
-                    continue
-                try:
-                    data = json.loads(chunk.get("bytes", b"").decode("utf-8"))
-                except Exception:
-                    continue
-                etype = data.get("type")
-
-                if etype == "content_block_start":
-                    idx = data.get("index", 0)
-                    block = dict(data.get("content_block") or {})
-                    if block.get("type") == "text":
-                        block["text"] = ""
-                    elif block.get("type") == "tool_use":
-                        block["_json_buffer"] = ""
-                    current_blocks[idx] = block
-
-                elif etype == "content_block_delta":
-                    idx = data.get("index", 0)
-                    delta = data.get("delta") or {}
-                    block = current_blocks.get(idx)
-                    if block is None:
-                        continue
-                    if delta.get("type") == "text_delta":
-                        piece = delta.get("text", "")
-                        block["text"] = block.get("text", "") + piece
-                        yield piece
-                    elif delta.get("type") == "input_json_delta":
-                        block["_json_buffer"] = block.get("_json_buffer", "") + delta.get("partial_json", "")
-
-                elif etype == "content_block_stop":
-                    idx = data.get("index", 0)
-                    block = current_blocks.pop(idx, None)
-                    if block is None:
-                        continue
-                    if block.get("type") == "tool_use":
-                        raw = block.pop("_json_buffer", "") or "{}"
-                        try:
-                            block["input"] = json.loads(raw)
-                        except Exception:
-                            block["input"] = {}
-                        assistant_content.append({
-                            "type": "tool_use",
-                            "id": block.get("id"),
-                            "name": block.get("name"),
-                            "input": block.get("input", {}),
-                        })
-                    elif block.get("type") == "text":
-                        text_out = block.get("text", "")
-                        assistant_content.append({"type": "text", "text": text_out})
-                        if text_out:
-                            assistant_text_accum.append(text_out)
-
-                elif etype == "message_delta":
-                    delta = data.get("delta") or {}
-                    if delta.get("stop_reason"):
-                        stop_reason = delta["stop_reason"]
-
-                elif etype == "message_stop":
-                    pass
 
             if stop_reason != "tool_use":
                 _persist_turn(thread, latest_user_raw, assistant_text_accum, user_msg_id, assistant_msg_id)
@@ -779,13 +838,15 @@ async def coach_endpoint(
             history.append({"role": "assistant", "content": assistant_content})
             tool_results = []
             for blk in assistant_content:
-                if blk.get("type") != "tool_use":
+                tool_use = blk.get("toolUse")
+                if not tool_use:
                     continue
-                result = _execute_tool(blk.get("name", ""), blk.get("input") or {})
+                result = _execute_tool(tool_use.get("name", ""), tool_use.get("input") or {})
                 tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": blk.get("id"),
-                    "content": json.dumps(result, default=str),
+                    "toolResult": {
+                        "toolUseId": tool_use.get("toolUseId"),
+                        "content": [{"json": json.loads(json.dumps(result, default=str))}],
+                    }
                 })
             if not tool_results:
                 _persist_turn(thread, latest_user_raw, assistant_text_accum, user_msg_id, assistant_msg_id)
@@ -826,7 +887,7 @@ def _persist_turn(
     }
     append_turn(thread, user_msg, assistant_msg)
     try:
-        maybe_summarize(thread, bedrock, MODEL_ID)
+        maybe_summarize(thread, bedrock, MODEL_ID, REASONING_EFFORT)
     except Exception:
         logger.exception("maybe_summarize failed")
 
