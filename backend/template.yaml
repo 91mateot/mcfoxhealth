@@ -75,7 +75,9 @@ Resources:
         MaxAge: 3600
       AccessLogSettings:
         DestinationArn: !GetAtt ApiAccessLogGroup.Arn
-        Format: '{"requestId":"$context.requestId","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","path":"$context.path","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","integrationStatus":"$context.integrationStatus","integrationErrorMessage":"$context.integrationErrorMessage","error":"$context.error.message","userAgent":"$context.identity.userAgent","sourceIp":"$context.identity.sourceIp"}'
+        # HAE 413s are rejected before Lambda. Record byte volume only, never
+        # request bodies, so access logs can distinguish size-related loss.
+        Format: '{"requestId":"$context.requestId","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","path":"$context.path","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","dataProcessed":"$context.dataProcessed","integrationStatus":"$context.integrationStatus","integrationErrorMessage":"$context.integrationErrorMessage","error":"$context.error.message","userAgent":"$context.identity.userAgent","sourceIp":"$context.identity.sourceIp"}'
 
   # ── DynamoDB Tables ──────────────────────────────────────────
   HealthMetricsTable:

@@ -581,6 +581,81 @@ def test_real_empty_events_envelope_page_count_zero_advances_watermark():
     )["Item"]["last_sync"] == "2026-08-06T12:00:00+00:00"
 
 
+def test_real_empty_events_workouts_alias_advances_watermark_without_writes():
+    """The verified empty ``workouts`` alias is a complete empty poll."""
+    h, tables = _fresh_module()
+    old_watermark = "2026-08-05T12:00:00+00:00"
+    sync_started_at = "2026-08-06T12:00:00+00:00"
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": old_watermark,
+    })
+    _stub_offline(h, events=hc.HevyWorkoutEventsResult.success())
+
+    def _events(key, since, **kwargs):
+        return hc.fetch_workout_events(
+            key,
+            since,
+            page_size=kwargs["page_size"],
+            max_pages=kwargs["max_pages"],
+            http_get=lambda _url, _key: ({
+                "page": 1,
+                "page_count": 1,
+                "workouts": [],
+            }, 200),
+        )
+
+    h.fetch_workout_events = _events
+    h._now_iso = lambda: sync_started_at
+
+    body = json.loads(h.lambda_handler({"action": "hevy_poll"}, None)["body"])
+
+    assert body["status"] == "ok"
+    assert body["fetch_status"] == "empty"
+    assert body["fetched"] == 0
+    assert tables["WORKOUTS_TABLE"].items == []
+    assert tables["EXERCISES_TABLE"].items == []
+    assert tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]["last_sync"] == sync_started_at
+
+
+def test_nonempty_events_workouts_alias_remains_incomplete_without_writes(caplog):
+    """A different event-feed shape must not be reclassified as empty."""
+    h, tables = _fresh_module()
+    old_watermark = "2026-08-05T12:00:00+00:00"
+    tables["USER_CONFIG_TABLE"].put_item(Item={
+        "key": "hevy_last_sync",
+        "last_sync": old_watermark,
+    })
+    _stub_offline(h, events=hc.HevyWorkoutEventsResult.success())
+
+    def _events(key, since, **kwargs):
+        return hc.fetch_workout_events(
+            key,
+            since,
+            page_size=kwargs["page_size"],
+            max_pages=kwargs["max_pages"],
+            http_get=lambda _url, _key: ({
+                "page": 1,
+                "page_count": 1,
+                "workouts": [_hevy_workout("unexpected-workout")],
+            }, 200),
+        )
+
+    h.fetch_workout_events = _events
+
+    with caplog.at_level("ERROR"), pytest.raises(h.HevySyncError, match="malformed"):
+        h.lambda_handler({"action": "hevy_poll"}, None)
+
+    assert tables["WORKOUTS_TABLE"].items == []
+    assert tables["EXERCISES_TABLE"].items == []
+    assert tables["USER_CONFIG_TABLE"].get_item(
+        Key={"key": "hevy_last_sync"}
+    )["Item"]["last_sync"] == old_watermark
+    assert "reason=response missing events list" in caplog.text
+
+
 def test_overlap_replays_boundary_events_idempotently():
     h, tables = _fresh_module()
     tables["USER_CONFIG_TABLE"].put_item(Item={

@@ -1,0 +1,13 @@
+{
+  "data": {
+    "metrics": [
+      {"name": "heart_rate_variability", "units": "ms", "data": [{"date": "2030-04-06 02:00:00 -0700", "qty": 41.2, "source": "Sanitized Watch + Sanitized Phone"}]},
+      {"name": "physical_effort", "units": "kcal/hr·kg", "data": [{"date": "2030-04-06 09:00:00 -0700", "qty": 2.0, "source": "Sanitized Watch + Sanitized Phone"}, {"date": "2030-04-06 10:00:00 -0700", "qty": 4.0, "source": "Sanitized Watch + Sanitized Phone"}]},
+      {"name": "walking_speed", "units": "mi/hr", "data": [{"date": "2030-04-06 11:00:00 -0700", "qty": 3.0, "source": "Sanitized Watch + Sanitized Phone"}]},
+      {"name": "walking_step_length", "units": "in", "data": [{"date": "2030-04-06 11:00:00 -0700", "qty": 25.0, "source": "Sanitized Watch + Sanitized Phone"}]},
+      {"name": "walking_double_support_percentage", "units": "%", "data": [{"date": "2030-04-06 11:00:00 -0700", "qty": 31.0, "source": "Sanitized Watch + Sanitized Phone"}]},
+      {"name": "stair_speed_up", "units": "ft/s", "data": [{"date": "2030-04-06 11:00:00 -0700", "qty": 1.2, "source": "Sanitized Watch + Sanitized Phone"}]},
+      {"name": "stair_speed_down", "units": "ft/s", "data": [{"date": "2030-04-06 11:00:00 -0700", "qty": 1.1, "source": "Sanitized Watch + Sanitized Phone"}]}
+    ]
+  }
+}
