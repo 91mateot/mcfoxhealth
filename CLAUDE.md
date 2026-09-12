@@ -8,6 +8,10 @@ Personal health/fitness dashboard. Vite+TS PWA on Vercel, AWS Lambda backend, Wh
 > product, evidence-model, longitudinal-reasoning, source-health, or roadmap
 > work. PR5 remains blocked on the manual HAE Source Validation Gate.
 
+Chat is the current PRISM Coach interface; McFox is the long-term integrated
+application. See [foundation status](PRISM_FOUNDATION_STATUS.md) for the dated
+source/repair evidence and unresolved PR5 gate.
+
 ## Stack
 
 - **Frontend**: Vite 5 + React 18 + TypeScript + SWR. No CSS framework. Deployed to Vercel (`mcfoxhealth.vercel.app`, auto-deploy on push to `main`).
@@ -21,7 +25,7 @@ Personal health/fitness dashboard. Vite+TS PWA on Vercel, AWS Lambda backend, Wh
 ```
 src/              Frontend — screens, modals, components, api.ts, types.ts
 backend/
-  template.yaml           SAM template (5 Lambdas, 11 DynamoDB tables, 1 Lambda Layer)
+  template.yaml           SAM template (5 Lambdas, 13 DynamoDB tables, 1 Lambda Layer)
   shared/shared/          Canonical shared package (scoring, db, timezone, nutrition, ...)
   shared/Makefile         Builds SharedLayer during sam build
   functions/{api,coach,compute,ingest,nutrition}/  Lambda entrypoints
@@ -65,9 +69,10 @@ npm run typecheck      # typecheck only
 
 # Backend
 cd backend
-.venv/bin/python -m pytest backend/tests --deselect backend/tests/test_api_contract.py   # unit tests (contract tests hit live API)
-sam build
-sam deploy --stack-name fitness-dashboard --capabilities CAPABILITY_IAM --resolve-s3 --no-confirm-changeset
+.venv/bin/python -m pytest tests --deselect tests/test_api_contract.py   # unit tests (contract tests hit live API)
+# Deploy only with explicit approval and the RUNBOOK preservation procedure.
+# Review the change set; preserve untouched artifacts (especially Coach).
+# Do not run an unrestricted full-stack build/deploy for a scoped change.
 ```
 
 ## Scoring

@@ -30,6 +30,26 @@ Scores such as recovery, strain, readiness, and ACWR are contextual signals.
 They do not govern the decision by themselves. Trustworthy evidence,
 capability over time, uncertainty, and actionable synthesis are the product.
 
+## Current interface and source ownership
+
+Chat remains the current PRISM Coach interface. McFox is the long-term
+integrated application and persistent intelligence/data layer. The deployed
+McFox Bedrock Coach remains a runtime component; its existence does not change
+this operating split. ChatGPT Work is not the permanent Coach surface.
+
+Apple Health/HAE owns physiological and movement evidence; Hevy owns detailed
+strength-training evidence; Strava provides cardio/GPS enrichment; Withings
+provides direct body-composition evidence. User reports provide subjective
+context. Derived scores remain interpretations, never replacements for source
+evidence. Nutrition has no automated source contract today.
+
+The PRISM Canonical Specification governs Coach reasoning. The user-provided
+September 1 Coach TXT is a pointer to that specification and a full handoff,
+not their contents or the codebase specification. Its historical `sandbox:`
+links are not repository files. Obtain and inspect the actual canonical
+specification before claiming alignment with it; do not reconstruct it from
+this architecture document.
+
 ## Capability ownership policy
 
 > Do not replicate an external application merely to consolidate screens.
@@ -187,31 +207,78 @@ evidence with explicit inputs and uncertainty.
 
 ## Roadmap and gates
 
-PR1–PR4 are complete: Temporal Semantics, Hevy Sync Integrity,
-Missingness-Safe API Semantics, and OAuth Reliability.
+PR1–PR4 established Temporal Semantics, Hevy Sync Integrity,
+Missingness-Safe API Semantics, and OAuth Reliability. Subsequent foundation
+changes shipped through GitHub PRs #16 and #19–#22. Roadmap labels **PR5/PR6/PR7**
+are capability milestones, not GitHub pull-request numbers.
 
-### HAE Source Validation Gate — before PR5
+### Foundation gate — before PR5
 
-PR5 must not begin until manual validation records:
+The dated [foundation status](PRISM_FOUNDATION_STATUS.md) is the current
+reconciliation record. As of September 12, 2026 UTC, the backend matches PR #22,
+but foundation closeout is **blocked** by absent recurring HR/Sleep delivery
+and incomplete repair work. Documentation may be refreshed while phone work
+is pending; that does not open the implementation gate.
 
-- configured, exported, and received HAE metric families
-- units, timestamps, and timezone semantics
-- aggregation behavior and sample count/density
-- healthy-day expectations and degraded-day behavior
-- missing metric families and backfill requirements
-- a representative real HAE workout payload before workout ingestion
+Before PR5, record and verify separately:
+
+- deployed artifacts and current API contracts;
+- configuration, controlled ingestion, and subsequent natural delivery for
+  Activity Daily, Vitals & Mobility, dedicated Heart Rate, and dedicated Sleep;
+- source-specific units, timestamps, timezone, aggregation, and sample-density
+  expectations, distinguishing source absence from transport failure;
+- historical repair coverage, or an explicit user decision to defer bounded
+  historical gaps; no active source outage may remain hidden;
+- healthy Hevy synchronization and scheduled OAuth checks;
+- refreshed authoritative documentation and independent review readiness.
+
+A real HAE workout payload is a **PR7 workout-ingestion gate only**. It does
+not block PR5 metric provenance. No HAE Workouts support is authorized here.
 
 ### PR5 — Provenance, Metric Semantics & Source Health
 
-For each important metric, define its semantic meaning, producing source and
-raw metric, units, aggregation, time window, timezone/date policy, sample
-count, completeness, last observation, computation version, and whether it is
-measured, derived, configured, fallback, or unavailable.
+Add a missingness-safe metric evidence and source-health contract. Before
+coding, enumerate the exact initial metric keys and API response paths on
+current main; the proposed first surface is the existing Today read contract
+and its daily-score inputs. Record the accepted inventory and tests in the
+implementation PR rather than expanding to all endpoints implicitly.
 
-For example, `HRV = 25` is insufficient without knowing the HealthKit metric,
-aggregation, samples, unit, analysis day, source window, and completeness.
-Source health must reflect expected data behavior, not merely that a source
-sent something today.
+The additive metric envelope must represent value, unit, semantic status,
+source feed/raw metric, source timestamp, ingestion timestamp, as-of time,
+sample count, aggregation/derivation method, time window and timezone,
+algorithm version for derivations, structured completeness/quality reasons,
+and evidence-grounded confidence. Distinguish observed, derived, configured
+target, fallback, unavailable, and insufficient history without conflating
+semantic origin with availability.
+
+Preserve legacy scalar fields and existing `metricSemantics` during migration.
+Missing stays missing; genuine zero stays zero; history retains its calendar
+slots. Legacy rows without metadata remain unknown where evidence is absent.
+Do not fabricate source timestamps, sample counts, confidence, or windows.
+
+Source health initially uses only `ok`, `degraded`, and `unknown`, with
+structured reasons separate from state. No health evidence means `unknown`,
+never `ok`. Track Activity Daily, Vitals & Mobility, Heart Rate, Sleep, Hevy,
+Strava, Withings, Nutrition, and other feeds independently. A recent successful
+check or receipt cannot make an old observation fresh. Partial current days
+and completed-day summaries have different expected windows. Unknown inputs
+must reduce confidence in dependent derived states.
+
+Daily scores need an input/provenance snapshot sufficient to explain derived
+values. Preserve canonical source selection and existing temporal semantics;
+provenance does not authorize a scoring change or historical recomputation.
+
+Acceptance cases must cover observed zero; missing metric; insufficient
+history; incomplete day; stale observation with a fresh receipt; absent legacy
+metadata; mixed source coverage; unavailable source-health evidence; late
+correction/replay; raw versus daily-summary aggregation; timezone boundaries;
+and additive compatibility for existing API consumers.
+
+Excluded from PR5: watchdog/alerts/schedules, intervention tables, universal
+event backbone, Daily Operating Picture generation, HAE Workouts, workout
+identity v2, frontend redesign, scoring changes, and historical migrations.
+Use a dedicated implementation branch/PR. Independent review and explicit
+merge/deploy approval remain required.
 
 ### PR6 — Source Watchdog
 

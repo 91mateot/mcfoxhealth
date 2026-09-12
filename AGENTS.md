@@ -21,7 +21,8 @@ Personal health data warehouse (Mateo's). AWS SAM backend in **us-west-2** (stac
 7. **PR-only by default.** Merging and deploying require Mateo's explicit approval. When a PR changes `template.yaml` IAM grants, merge and deploy together or production hits `AccessDenied`.
 8. **Clone fresh** for deploys and agent work — don't reuse a stale local checkout.
 9. **Update `RUNBOOK.md` in the same PR** that changes deploy steps, adds a Lambda action, or uncovers a new trap. Same discipline as `ARCHITECTURE.md`.
-10. **Do not start PR5 before the manual HAE Source Validation Gate is complete.** A representative real HAE workout payload is also required before HAE workout-ingestion semantics are implemented.
+10. **Do not start PR5 before foundation closeout.** Read `PRISM_FOUNDATION_STATUS.md` and the gates in `PRISM_PRODUCT_ARCHITECTURE.md`; reverify their dated evidence. Active HR/Sleep outages block PR5. A real HAE workout payload gates PR7 workout ingestion only.
+11. **Chat is the current PRISM Coach interface; McFox is the long-term integrated product.** Do not infer the Canonical Specification from a handoff pointer or runtime UI.
 
 ## Testing
 
@@ -29,7 +30,11 @@ Personal health data warehouse (Mateo's). AWS SAM backend in **us-west-2** (stac
 cd backend && .venv/bin/python -m pytest tests \
   --deselect tests/test_api_contract.py --deselect tests/test_coach_auth.py -q
 ```
-Baseline **224 passing** (2026-07-27). The two deselected files have pre-existing failures (live-network calls; missing `fastapi` dep) unrelated to any change you make.
+The **224 passing** count is historical (2026-07-27), not a current baseline.
+`test_api_contract.py` includes live-network checks. Install the Coach test
+dependencies before including `test_coach_auth.py`; a missing `fastapi` package
+is an environment gap, not proof of a product failure. State actual exclusions
+and results for each validation run.
 
 ## Conventions
 
