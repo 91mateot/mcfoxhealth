@@ -168,6 +168,25 @@ export function useNutrition(date: string): SWRResponse<NutritionResponse> {
   return useSWR<NutritionResponse>(`/api/nutrition/${date}`, fetcher);
 }
 
+/** Refresh every core dataset mounted by App. Publish new cache values only
+ * after every fetch succeeds so failures keep the prior snapshot intact. */
+export async function refreshAppData(): Promise<void> {
+  const nutritionKey = `/api/nutrition/${todayISO()}`;
+  const [today, workouts, progress, nutrition] = await Promise.all([
+    fetcher<TodayResponse>("/api/today"),
+    fetcher<WorkoutsResponse>("/api/workouts"),
+    fetcher<ProgressResponse>("/api/progress"),
+    fetcher<NutritionResponse>(nutritionKey),
+  ]);
+
+  await Promise.all([
+    mutate("/api/today", today, { revalidate: false }),
+    mutate("/api/workouts", workouts, { revalidate: false }),
+    mutate("/api/progress", progress, { revalidate: false }),
+    mutate(nutritionKey, nutrition, { revalidate: false }),
+  ]);
+}
+
 export function useNutritionHistory(enabled = true, days = 7): SWRResponse<NutritionHistoryResponse> {
   return useSWR<NutritionHistoryResponse>(
     enabled ? `/api/nutrition/history?days=${days}` : null,

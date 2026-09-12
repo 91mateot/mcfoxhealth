@@ -933,6 +933,33 @@ repair and require no repair-session change. These checks validate the intended
 live rows; a successful deploy, HTTP response, or HAE UI completion alone is
 not repair proof.
 
+### 2.16 Coach model changes require a Bedrock protocol check
+
+`CoachFunction` uses Bedrock ConverseStream so its messages, tool calls, and
+stream events stay on Bedrock's common content-block format. Model-specific
+inference fields remain explicit. The intended production configuration is in
+`template.yaml`:
+
+- `COACH_MODEL_ID=us.openai.gpt-5.6-sol`
+- `COACH_REASONING_EFFORT=low`
+
+GPT-5.6 Sol does not accept the legacy Anthropic Messages request body that the
+Coach previously sent through `InvokeModelWithResponseStream`. Keep the main
+tool loop, persisted history, images, tool results, and conversation summarizer
+on Converse/ConverseStream content blocks. Pass `reasoning.effort` through
+`additionalModelRequestFields`, and keep `maxTokens` explicit on every call.
+
+Before deployment, verify the profile is active in `us-west-2`, then run a
+small authenticated compatibility canary for text and one inert tool schema.
+After deployment, require all of the following before calling the migration
+healthy: Lambda state `Active` / update status `Successful`; environment values
+match the two settings above; `/health` returns 200; an authenticated Coach
+request streams visible text and its feedback trailer; a controlled read-only
+Coach question does not call a write tool; and the Coach log window contains no
+`AccessDeniedException`, `ValidationException`, traceback, timeout, or stream
+parser error. Preserve the prior Coach artifact hash and stack template as the
+rollback target.
+
 ---
 
 ## 3. Deploy

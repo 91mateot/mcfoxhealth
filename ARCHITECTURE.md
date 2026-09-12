@@ -26,7 +26,7 @@ Hevy API (poll)  ──Schedule hevy_poll  ──▶                            
                                                                                  correlations
 Browser / app  ──HTTP API /api/* ─────────▶ ApiFunction  (read models)
 Browser / app  ──HTTP API /nutrition/* ───▶ NutritionFunction
-Browser / app  ──HTTP API /coach/* ───────▶ CoachFunction (Bedrock tool-use)
+Browser / app  ──HTTP API /coach/* ───────▶ CoachFunction (Bedrock ConverseStream + tool use)
 ```
 
 Shared business logic lives in `backend/shared/shared/` and is packaged as a
@@ -165,7 +165,7 @@ preserves 3+ member groups without loss).
 | `compute/` | daily + weekly schedules | Baselines, daily scores, correlations, lift roll-ups. |
 | `api/` | `GET/POST /api/*` | Read models for the dashboard. |
 | `nutrition/` | `/nutrition/*` | Meal logging, favorites, workout annotation route. |
-| `coach/` | `/coach/*` | Bedrock tool-use coach (FastAPI app). |
+| `coach/` | `/coach/*` | Bedrock ConverseStream tool-use coach (FastAPI app); model and reasoning effort are explicit environment settings. |
 
 ## DynamoDB tables (`fitness-*`)
 

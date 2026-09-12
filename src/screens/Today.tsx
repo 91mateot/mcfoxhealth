@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { mutate } from "swr";
 import { FONT, MONO, type Palette } from "../theme";
 import {
   JOURNAL_TAGS,
@@ -20,7 +19,7 @@ import { CaffeinePanel } from "../components/CaffeinePanel";
 import { PlannedWorkoutCard } from "../components/PlannedWorkoutCard";
 import { NoteComposer, type NoteDraft } from "../components/NoteComposer";
 import { HydrationDetail } from "../modals/HydrationDetail";
-import { submitJournal, todayISO } from "../api";
+import { refreshAppData, submitJournal, todayISO } from "../api";
 
 interface TodayScreenProps {
   C: Palette;
@@ -364,6 +363,7 @@ function formatAge(updatedAt: string | null | undefined, now: number): string {
 function FreshnessIndicator({ C, updatedAt }: { C: Palette; updatedAt: string | null | undefined }) {
   const [now, setNow] = useState(() => Date.now());
   const [refreshing, setRefreshing] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
 
   // Tick every 30s so the relative time doesn't drift while the tab is open.
   useEffect(() => {
@@ -374,20 +374,28 @@ function FreshnessIndicator({ C, updatedAt }: { C: Palette; updatedAt: string | 
   const handleRefresh = async () => {
     if (refreshing) return;
     setRefreshing(true);
+    setRefreshFailed(false);
     try {
-      await mutate("/api/today");
+      await refreshAppData();
       setNow(Date.now());
+    } catch {
+      setRefreshFailed(true);
     } finally {
       setRefreshing(false);
     }
   };
 
-  const label = refreshing ? "refreshing…" : `updated ${formatAge(updatedAt, now)}`;
+  const label = refreshing
+    ? "refreshing app data…"
+    : refreshFailed
+    ? "refresh failed · retry"
+    : `updated ${formatAge(updatedAt, now)}`;
 
   return (
     <button
       onClick={handleRefresh}
       aria-label="Refresh data"
+      aria-live="polite"
       disabled={refreshing}
       style={{
         background: C.s2,

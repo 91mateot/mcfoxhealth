@@ -46,7 +46,7 @@
       "name": "CoachFunction",
       "code_uri": "backend/functions/coach/",
       "triggers": ["HTTP API /coach/*"],
-      "notes": "Bedrock tool-use coach (FastAPI app)."
+      "notes": "Bedrock ConverseStream tool-use coach (FastAPI app); model us.openai.gpt-5.6-sol with low reasoning is configured explicitly."
     }
   ],
   "shared_modules": [

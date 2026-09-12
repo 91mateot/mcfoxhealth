@@ -70,6 +70,8 @@ def test_messages_for_bedrock_tolerates_legacy_ids_missing(monkeypatch):
     # Should not raise — the id column is purely additive for feedback routing.
     out = cs.messages_for_bedrock(thread)
     assert [m["role"] for m in out] == ["user", "assistant"]
+    assert out[0]["content"] == [{"text": "legacy user msg"}]
+    assert out[1]["content"] == [{"text": "legacy coach msg"}]
 
 
 def test_new_message_id_is_unique_and_prefixed(monkeypatch):
@@ -77,3 +79,33 @@ def test_new_message_id_is_unique_and_prefixed(monkeypatch):
     ids = {cs.new_message_id() for _ in range(50)}
     assert len(ids) == 50
     assert all(i.startswith("msg_") for i in ids)
+
+
+def test_conversation_summary_uses_converse_with_low_reasoning(monkeypatch):
+    cs = _load_module(monkeypatch)
+    _wire_table(monkeypatch, cs)
+    bedrock = MagicMock()
+    bedrock.converse.return_value = {
+        "output": {"message": {"content": [{"text": "Compact summary"}]}}
+    }
+    thread = {
+        "conversation_id": "conv_test",
+        "messages": [
+            {"from": "me" if i % 2 == 0 else "coach", "text": f"turn {i}"}
+            for i in range(30)
+        ],
+        "summarized_through": 0,
+    }
+
+    cs.maybe_summarize(
+        thread,
+        bedrock,
+        "us.openai.gpt-5.6-sol",
+        "low",
+    )
+
+    assert thread["summary"] == "Compact summary"
+    kwargs = bedrock.converse.call_args.kwargs
+    assert kwargs["modelId"] == "us.openai.gpt-5.6-sol"
+    assert kwargs["inferenceConfig"] == {"maxTokens": 400}
+    assert kwargs["additionalModelRequestFields"] == {"reasoning": {"effort": "low"}}
