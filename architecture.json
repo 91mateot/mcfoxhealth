@@ -35,8 +35,20 @@
     "parameter_file": "backend/release/prism-steps-daily.parameters.json",
     "iam": "GetItem only; exact date partitions and dedicated secret; sort keys application-enforced",
     "pilot_preserved": "original prism-steps-read and original Site URL/token unchanged",
-    "deployment": "not merged or deployed",
-    "schedule_created": false
+    "deployment": "deployed_verified_disabled_before_2026-10-25_pacific_start",
+    "schedule_created": false,
+    "approved_head": "97fee969898cbd4a26be5548a0ac835e9344bbfe",
+    "merge_commit": "7855b2aeb48faefbd2010c5a2ab45208fdbeae08",
+    "steps_url": "https://w285603fla.execute-api.us-west-2.amazonaws.com/api/prism/steps",
+    "site_version": 15,
+    "site_environment_revision": 8,
+    "remaining_gates": [
+      "October 25 Pacific operating start",
+      "daily activation and import/repeat/storage/display canaries",
+      "fresh-cloud service write and independent metadata readback",
+      "conditional linked schedule",
+      "natural phone recurrence"
+    ]
   },
   "lambdas": [
     {

@@ -1,5 +1,14 @@
 # PRISM ongoing Steps — coordinated release review
 
+> Release execution update, October 24, 2026 Pacific: the owner approved reviewed
+> head `97fee969898cbd4a26be5548a0ac835e9344bbfe`; PR #27 merged as `7855b2a`.
+> The new isolated daily stack is deployed and artifact/IAM verified. The daily
+> credential pair is provisioned, AWS verifier disabled, Site daily false at
+> environment revision 8. No source day was read before the October 25 Pacific
+> start. Activation/canaries, fresh-cloud verification and conditional scheduling
+> remain approved but unexecuted. See RUNBOOK's dated execution entry and live
+> handoff for current evidence. The original review package below is retained.
+
 Prepared October 24, 2026 Pacific. **Review only for AWS daily permissions,
 new operational credentials, activation and scheduling.** Existing fixed-day
 pilot configuration stays unchanged. No new health date was read in this preparation.

@@ -1043,6 +1043,48 @@ URL and `PRISM_STEPS_ENABLED=true`. This is the fixed-day manual pilot.
 `PRISM_STEPS_DAILY_ENABLED` remains absent/false; no schedule exists. Do not
 rotate or extend the live 24-hour pilot credential while preparing expansion.
 
+#### Daily release execution — October 24, 2026 Pacific
+
+PR #27, approved head `97fee969898cbd4a26be5548a0ac835e9344bbfe`, was merged
+as `7855b2aeb48faefbd2010c5a2ab45208fdbeae08`. A fresh clone built and
+deployed only new `prism-steps-daily-read`. Its reviewed change set had exactly
+six additions, no modifications/removals. Stack CREATE_COMPLETE; actual
+handler and all 656 layer files match the fresh build. Live IAM policy and
+15 simulations passed: 92 exact partitions, GetItem only, exact daily secret,
+no query/scan/write/compute/pilot-secret access. Sort keys remain application
+restricted. Original pilot zip/layer and both existing stack inventories/
+update timestamps matched the preflight baseline.
+
+Daily URL: `https://w285603fla.execute-api.us-west-2.amazonaws.com/api/prism/steps`.
+Dedicated daily pair was provisioned in one local context; the AWS verifier
+is **disabled**, unexpired and bounded, with no secret contents in this note.
+Site version 15/source `7b3c5a253b8a84da64d558d33a8b8fd62d660986` was
+republished at environment revision 8, owner-private access revision 1.
+Daily remains false; original pilot keys/URL and unrelated secrets remain
+unchanged. Native automations is empty. Metadata-only service readback confirms
+owner binding and no daily run; disabled POST returns 409. No live health day
+was fetched in this pre-staging session.
+
+The approved operating start is **October 25, 2026 00:00 America/Los_Angeles
+(07:00 UTC)**. Do not enable early, shift the anchor, or call intentional
+pre-start refusal a defect. Activation, three-day/repeat/storage/display
+canaries, fresh-cloud write/readback and conditional scheduling remain open.
+A local service call does not establish independence from the Mac. The Sites
+tools here expose schedule creation but no one-shot fresh-cloud test runner;
+no schedule was created before its validation gates passed. Existing approval
+covers the unchanged remaining steps; no new approval is required merely to
+continue after the start.
+
+Local runtime-only verifier control uses the trusted `asm-exec` dynamic-reference
+wrapper, never a direct agent secret-value read. A check confirmed valid,
+disabled, unexpired/bounded configuration; contents were not returned. The
+operator helper refuses enable outside the frozen term and can disable only
+the dedicated daily verifier. Local helper/evidence paths, full resource IDs
+and the exact continuation sequence are recorded in the live integration
+handoff; they are local execution aids, not a background runner or cloud
+prerequisite. No phone actions, source record edits or main-stack deployment
+occurred. The reviewed release plan below remains historical review evidence.
+
 #### Daily expansion review and rollback
 
 See [`backend/PRISM_STEPS_DAILY_REVIEW.md`](backend/PRISM_STEPS_DAILY_REVIEW.md)

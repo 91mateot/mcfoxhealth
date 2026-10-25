@@ -54,8 +54,10 @@ Credential state adds only a 14-day renewal boolean; no expiry/verifier appears
 in the API. The companion adds separate date-keyed snapshots/run receipts and
 a platform-authenticated private service updater. The daily release uses new isolated stack `prism-steps-daily-read` and separate
 Site daily URL/token; the original pilot stays intact. Its three reads publish in
-one D1 transaction after lease and owner-binding revalidation. Daily defaults
-off and no schedule is installed. See [daily release package](backend/PRISM_STEPS_DAILY_REVIEW.md).
+one D1 transaction after lease and owner-binding revalidation. The approved PR #27 daily stack was subsequently deployed on October 24
+Pacific, verified against the build and finite IAM, with the credential and
+Site daily mode disabled until the October 25 operating start. No daily import
+or schedule has run. Daily defaults off and no schedule is installed. See [daily release package](backend/PRISM_STEPS_DAILY_REVIEW.md).
 Source freshness, fetch time, and unknown phone completeness remain distinct.
 
 Absolute timestamps are source truth; DynamoDB `date` fields are derived
