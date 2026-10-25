@@ -34,7 +34,7 @@ Lambda layer (`SharedLayer`) imported by every function.
 
 ## Temporal semantics
 
-### Proposed isolated PRISM Steps read pilot
+### Isolated PRISM Steps read pilot
 
 `backend/prism-steps.template.yaml` defines a separate `prism-steps-read`
 stack: a dedicated HTTP API and Lambda read the existing health table through
@@ -42,8 +42,9 @@ strongly consistent `GetItem` calls. IAM restricts the source-day partition;
 the handler restricts reads to `steps#hae_daily_summary` and legacy
 `steps#hae`, using the shared HAE resolver without adding totals. A dedicated
 expiring hashed-token secret is independent of all existing McFox credentials.
-No existing stack resources or phone workflows change. This is proposed code,
-not a deployed integration. See [the contract and gates](backend/PRISM_STEPS_READ.md).
+No existing stack resources or phone workflows change. The AWS-only stack was
+deployed October 24, 2026 after explicit approval of PR #25; PRISM importing
+remains disabled. See [the contract and gates](backend/PRISM_STEPS_READ.md).
 PRISM storage, display and scheduling are separate work; source freshness,
 fetch time and unknown phone completeness must remain distinct.
 
