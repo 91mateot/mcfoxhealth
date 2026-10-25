@@ -1001,6 +1001,21 @@ historical Activity repair, Workouts/GPX, or other automation changes.
 
 ## 3. Deploy
 
+### Isolated PRISM Steps read pilot (proposed, not deployed)
+
+`backend/prism-steps.template.yaml` is an independent stack, **not** an update
+to `fitness-dashboard`. See [`backend/PRISM_STEPS_READ.md`](backend/PRISM_STEPS_READ.md)
+for the contract, secure provisioning boundary, build/change-set procedure and
+acceptance gates. It grants only exact-record reads in one allowed source-day
+partition and access to its own hashed-token secret. The handler restricts
+reads to the two Steps aggregate identities and reuses the shared resolver.
+It has no shared McFox API/ingest credential, writes, compute invocation,
+phone configuration or schedule. The initial allowed day is 2026-10-23.
+
+Do not deploy the main stack or rebuild Coach to ship this pilot. Merge and
+deployment still require Mateo's approval. Offline checks are not live source
+or authorization proof; PRISM import and natural HAE recurrence remain open.
+
 **Non-obvious prerequisite:** Lambdas are python3.13; the box default is 3.12 and there's no Docker. `sam build` fails without the PATH export.
 
 ```bash
