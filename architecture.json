@@ -9,6 +9,18 @@
     "compute": "AWS Lambda behind HTTP API",
     "storage": "DynamoDB (fitness-* tables)"
   },
+  "proposed_prism_steps_pilot": {
+    "status": "code_only_not_deployed",
+    "template": "backend/prism-steps.template.yaml",
+    "stack": "prism-steps-read",
+    "handler": "backend/functions/prism_steps/handler.py",
+    "route": "GET /api/prism/steps?date=YYYY-MM-DD on a separate HTTP API",
+    "authorization": "Dedicated expiring hashed token; single AllowedDate enforced in application and IAM LeadingKeys",
+    "reads": "GetItem of steps#hae_daily_summary then legacy steps#hae on fitness-health-metrics; shared HAE resolver",
+    "writes_tables": [],
+    "changes_existing_stack": false,
+    "remaining_gates": ["review and deployment approval", "secure credential provisioning", "live bounded verification", "PRISM adapter and display", "browser-closed fetch", "natural HAE recurrence"]
+  },
   "lambdas": [
     {
       "name": "IngestFunction",

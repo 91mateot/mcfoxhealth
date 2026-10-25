@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Isolated PRISM single-day Steps read pilot (no McFox stack updates)
+
+Parameters:
+  HealthMetricsTableName:
+    Type: String
+    Default: fitness-health-metrics
+    AllowedValues: [fitness-health-metrics]
+  AllowedDate:
+    Type: String
+    Default: '2026-10-23'
+    AllowedPattern: '^\d{4}-\d{2}-\d{2}$'
+    Description: The only source-day partition this pilot may read
+  StepsSecretArn:
+    Type: String
+    AllowedPattern: '^arn:aws:secretsmanager:us-west-2:[0-9]{12}:secret:prism-steps-read-[A-Za-z0-9_-]+$'
+    Description: Dedicated enabled/token_sha256/expires_at secret; never fitness-api-key
+
+Resources:
+  StepsApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: '$default'
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 5
+        ThrottlingRateLimit: 1
+
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      ContentUri: shared/
+      CompatibleRuntimes: [python3.13]
+    Metadata:
+      BuildMethod: makefile
+
+  StepsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/prism_steps/
+      Handler: handler.lambda_handler
+      Runtime: python3.13
+      Timeout: 10
+      MemorySize: 128
+      Layers: [!Ref SharedLayer]
+      Environment:
+        Variables:
+          HEALTH_METRICS_TABLE: !Ref HealthMetricsTableName
+          PRISM_STEPS_ALLOWED_DATE: !Ref AllowedDate
+          PRISM_STEPS_SECRET_ARN: !Ref StepsSecretArn
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${HealthMetricsTableName}'
+              Condition:
+                ForAllValues:StringEquals:
+                  dynamodb:LeadingKeys: [!Ref AllowedDate]
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref StepsSecretArn
+      Events:
+        GetSteps:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref StepsApi
+            Path: /api/prism/steps
+            Method: GET
+
+Outputs:
+  StepsUrl:
+    Description: Fixed-origin server-side PRISM source endpoint (not a phone destination)
+    Value: !Sub 'https://${StepsApi}.execute-api.${AWS::Region}.amazonaws.com/api/prism/steps'
