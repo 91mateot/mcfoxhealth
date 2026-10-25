@@ -2,7 +2,7 @@
 
 Prepared October 24, 2026 Pacific. **Review only for AWS daily permissions,
 new operational credentials, activation and scheduling.** Existing fixed-day
-pilot stays running. No new health date was read in this preparation.
+pilot configuration stays unchanged. No new health date was read in this preparation.
 
 ## Result and preserved scope
 
@@ -170,21 +170,26 @@ Do not rotate/extend the live pilot credential. After release approval:
 
 ## Compatible Site publication evidence
 
-The authorized compatible-only Site release is published as **version 14**:
+The final compatible-only Site release is published as **version 15** (version
+14 was an intermediate disabled release; 15 adds separate metadata readback):
 
-- Source: `ea8a3eb9ec22988a2600064d354fe33ba1e64d47`.
-- Saved version: `appgprj_6ad37e842c808191bbf2e1b58457e71c~appgver_9c587d6b0d38819180c19beed8ccfe95`.
-- Deployment: `appgdep_6add80055f008191acf5394d5fa164e5`, succeeded.
+- Source: `7b3c5a253b8a84da64d558d33a8b8fd62d660986`.
+- Saved version: `appgprj_6ad37e842c808191bbf2e1b58457e71c~appgver_25e9d2e80f308191b50daf8784622097`.
+- Deployment: `appgdep_6add8125a1488191a81e1ac87e1ea037`, succeeded.
 - Runtime environment revision **6**: daily explicitly false; original pilot
   switch true, original source URL and masked secret entries preserved.
 - Owner-private access revision **1** preserved; automations still empty.
 - Deployment archive SHA-256 (artifact, not a credential verifier):
-  `dbcd2adfb0f3cf2ab8bceaba82e9e61e91a825615cc897d24982f1d85fe6633f`.
+  `56f73122ce2c43e2b2b32ab62cd65a7dac655a5ea15f3c5dc2c2326b9650f431`.
 - Same-Site platform service access, without visitor identity: daily POST
-  returns **409 daily_disabled**, no run receipt; daily GET returns **401
-  owner_sign_in_required**. This verifies the deployed disabled boundary only.
-  It creates no import and cannot prove production owner binding, real daily
-  reads, durable cloud publication or recurring execution while daily is off.
+  returns **409 daily_disabled**, no run receipt; health-bearing daily GET
+  returns **401 owner_sign_in_required**. Separate `GET /api/steps/daily/receipt`
+  rechecks binding and reads only execution metadata, so a fresh cloud request
+  can verify its persisted run ID without browser identity or measurements.
+  Deployed metadata GET returned **200**, binding verified, daily false, and
+  no latest/successful daily run. No owner ID or measurement was returned.
+  Actual daily reads/publication and recurring execution remain gated while
+  daily is off; the disabled POST cannot create an import.
 - Local unsigned preview serves successfully and renders the ongoing Steps
   section; saved-owner status is unavailable in that preview. Authenticated
   real-value display was deliberately not reread for this preparation.
@@ -193,4 +198,4 @@ The authorized compatible-only Site release is published as **version 14**:
 
 For Site rollback, redeploy prior compatible version 13 with daily false;
 retain additive migration tables/journal. The original pilot configuration is
-unchanged. Publishing version 14 does not authorize the AWS release gates above.
+unchanged. Publishing version 15 does not authorize the AWS release gates above.
