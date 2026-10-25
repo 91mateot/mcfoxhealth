@@ -1001,7 +1001,7 @@ historical Activity repair, Workouts/GPX, or other automation changes.
 
 ## 3. Deploy
 
-### Isolated PRISM Steps read pilot (proposed, not deployed)
+### Isolated PRISM Steps reader (working manual pilot; daily expansion gated)
 
 `backend/prism-steps.template.yaml` is an independent stack, **not** an update
 to `fitness-dashboard`. See [`backend/PRISM_STEPS_READ.md`](backend/PRISM_STEPS_READ.md)
@@ -1012,13 +1012,62 @@ reads to the two Steps aggregate identities and reuses the shared resolver.
 It has no shared McFox API/ingest credential, writes, compute invocation,
 phone configuration or schedule. The initial allowed day is 2026-10-23.
 
-Do not deploy the main stack or rebuild Coach to ship this pilot. Merge and
-deployment still require Mateo's approval. Offline checks are not live source
-or authorization proof; PRISM import and natural HAE recurrence remain open.
+Do not deploy the main stack or rebuild Coach to ship this pilot. PR #25 was
+explicitly approved and merged at `a7b1e82e05579397a838721fd77093057aa1c495`.
+The separate stack reached CREATE_COMPLETE on October 24, 2026 Pacific.
+The live integration handoff subsequently records the October 23 Site import,
+repeat and durable reload passing. Natural HAE recurrence remains unverified.
+Further scope changes require approval.
 The patch continuation's Python 3.13 validation and isolated release/provisioning
 procedure are recorded in [`backend/PRISM_STEPS_RELEASE_REVIEW.md`](backend/PRISM_STEPS_RELEASE_REVIEW.md).
 Legacy source provenance uses bounded lists; the pilot preserves those shapes
 and rejects a serialized response over 16 KiB without exposing partial data.
+
+Scoped live verification (October 24, 2026): six additions only, tested handler
+and all 656 layer files byte-matched, single GET route and exact inline IAM
+verified. Endpoint:
+`https://t3pylufe31.execute-api.us-west-2.amazonaws.com/api/prism/steps`.
+AllowedDate remains `2026-10-23`. IAM simulation denies other dates,
+query/scan/write, unrelated secrets and compute invocation; sort-key isolation
+is application-enforced. Live auth checks returned 401 with the verifier
+disabled/missing credentials and 403 for a valid credential on the wrong day.
+No health-response body was read. Existing five McFox artifacts and shared
+layer 44 were unchanged; no phone access or exports occurred.
+
+Both stores were provisioned in one owner-approved session. The dedicated
+verifier was activated after deployment checks and was unexpired at the final
+check. Its 24-hour lifetime is deliberate; do not fetch or print its contents.
+The latest handoff and native Site inspection supersede the earlier disabled
+snapshot: Site version 13 uses environment revision 5 with the approved source
+URL and `PRISM_STEPS_ENABLED=true`. This is the fixed-day manual pilot.
+`PRISM_STEPS_DAILY_ENABLED` remains absent/false; no schedule exists. Do not
+rotate or extend the live 24-hour pilot credential while preparing expansion.
+
+#### Daily expansion review and rollback
+
+See [`backend/PRISM_STEPS_DAILY_REVIEW.md`](backend/PRISM_STEPS_DAILY_REVIEW.md)
+for frozen parameters, tests and secure rotation. `AccessMode=pilot` remains
+the template default and keeps the original IAM partition. `daily` requires
+an explicit reviewed anchor and all 92 exact date keys; runtime permits only
+three completed Pacific days and refuses operation outside the 90-day term.
+Regenerate and review the anchor if release timing makes it stale. Merge and
+deploy this permissions expansion as a NEW `prism-steps-daily-read` stack
+only after Mateo's approval. Preserve the original pilot stack/URL/token.
+Do not deploy `fitness-dashboard`, rebuild Coach, alter phone workflows,
+create a schedule, or enable Site daily mode during preparation.
+
+The Site migration is schema-only/additive and leaves the pilot's tables,
+receipts, Hevy and training history intact. First successful daily run copies
+the old pilot snapshot as date-keyed evidence transactionally; failure cannot
+publish a partial window. The service updater requires unique verified pilot
+owner evidence and the unchanged owner-private Sites boundary. Do not make
+that route public. Disable only daily mode for rollback; preserve pilot and
+additive tables/receipts. Do not drop migrations after publication.
+
+Documentation reconciliation: this PR incorporates the release evidence from
+unmerged docs-only PR #26 (`67092f3`) and corrects its superseded Site-disabled
+state using the live handoff/native metadata. PR #26 itself is not merged;
+reviewers should supersede it with this documentation after accepting this PR.
 
 **Non-obvious prerequisite:** Lambdas are python3.13; the box default is 3.12 and there's no Docker. `sam build` fails without the PATH export.
 
