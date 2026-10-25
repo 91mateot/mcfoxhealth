@@ -34,7 +34,7 @@ Lambda layer (`SharedLayer`) imported by every function.
 
 ## Temporal semantics
 
-### Proposed isolated PRISM Steps read pilot
+### Isolated PRISM Steps read pilot
 
 `backend/prism-steps.template.yaml` defines a separate `prism-steps-read`
 stack: a dedicated HTTP API and Lambda read the existing health table through
@@ -42,10 +42,21 @@ strongly consistent `GetItem` calls. IAM restricts the source-day partition;
 the handler restricts reads to `steps#hae_daily_summary` and legacy
 `steps#hae`, using the shared HAE resolver without adding totals. A dedicated
 expiring hashed-token secret is independent of all existing McFox credentials.
-No existing stack resources or phone workflows change. This is proposed code,
-not a deployed integration. See [the contract and gates](backend/PRISM_STEPS_READ.md).
-PRISM storage, display and scheduling are separate work; source freshness,
-fetch time and unknown phone completeness must remain distinct.
+No existing stack resources or phone workflows change. The AWS-only stack was
+deployed October 24, 2026 after explicit approval of PR #25; the separate PRISM Site subsequently completed its October 23 manual import,
+repeat and reload pilot (live handoff). Daily mode remains disabled. See [the contract and gates](backend/PRISM_STEPS_READ.md).
+The reviewed expansion keeps `AccessMode=pilot` as default. Opt-in `daily`
+uses one aware clock and `America/Los_Angeles` to permit exactly yesterday and
+the previous two completed dates, inside a frozen 90-operation-day term.
+IAM uses a static finite 92-partition union, never a rolling wildcard. IAM
+restricts partition keys; Steps sort keys remain application-restricted.
+Credential state adds only a 14-day renewal boolean; no expiry/verifier appears
+in the API. The companion adds separate date-keyed snapshots/run receipts and
+a platform-authenticated private service updater. The daily release uses new isolated stack `prism-steps-daily-read` and separate
+Site daily URL/token; the original pilot stays intact. Its three reads publish in
+one D1 transaction after lease and owner-binding revalidation. Daily defaults
+off and no schedule is installed. See [daily release package](backend/PRISM_STEPS_DAILY_REVIEW.md).
+Source freshness, fetch time, and unknown phone completeness remain distinct.
 
 Absolute timestamps are source truth; DynamoDB `date` fields are derived
 analysis context. `backend/shared/shared/timezone.py` centralizes parsing,

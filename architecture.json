@@ -10,7 +10,9 @@
     "storage": "DynamoDB (fitness-* tables)"
   },
   "proposed_prism_steps_pilot": {
-    "status": "code_only_not_deployed",
+    "status": "manual_pilot_passed_daily_expansion_review_only",
+    "verified": "2026-10-24",
+    "steps_url": "https://t3pylufe31.execute-api.us-west-2.amazonaws.com/api/prism/steps",
     "template": "backend/prism-steps.template.yaml",
     "stack": "prism-steps-read",
     "handler": "backend/functions/prism_steps/handler.py",
@@ -19,7 +21,22 @@
     "reads": "GetItem of steps#hae_daily_summary then legacy steps#hae on fitness-health-metrics; shared HAE resolver",
     "writes_tables": [],
     "changes_existing_stack": false,
-    "remaining_gates": ["review and deployment approval", "secure credential provisioning", "live bounded verification", "PRISM adapter and display", "browser-closed fetch", "natural HAE recurrence"]
+    "remaining_gates": ["daily AWS release approval", "daily-only secure provisioning", "daily activation and browser-closed durable proof", "schedule approval", "natural HAE recurrence"]
+  },
+  "prism_steps_daily_review": {
+    "stack": "prism-steps-daily-read",
+    "default_mode": "pilot",
+    "daily_enabled": false,
+    "zone": "America/Los_Angeles",
+    "lookback_days": 3,
+    "operation_days": 90,
+    "proposed_anchor": "2026-10-25",
+    "static_partition_count": 92,
+    "parameter_file": "backend/release/prism-steps-daily.parameters.json",
+    "iam": "GetItem only; exact date partitions and dedicated secret; sort keys application-enforced",
+    "pilot_preserved": "original prism-steps-read and original Site URL/token unchanged",
+    "deployment": "not merged or deployed",
+    "schedule_created": false
   },
   "lambdas": [
     {

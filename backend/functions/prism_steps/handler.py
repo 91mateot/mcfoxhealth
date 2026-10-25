@@ -7,7 +7,8 @@ import hmac
 import json
 import os
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from urllib.parse import parse_qsl
 
@@ -49,7 +50,38 @@ def _valid_day(value):
         return False
 
 
-def _authorized(headers):
+def _now():
+    """Single injectable aware clock for credential and Pacific calendar checks."""
+    return datetime.now(timezone.utc)
+
+
+def _daily_config():
+    raw_anchor = os.environ["PRISM_STEPS_DAILY_ANCHOR"]
+    if not _valid_day(raw_anchor):
+        raise ValueError("canonical frozen anchor required")
+    anchor = date.fromisoformat(raw_anchor)
+    supplied = os.environ["PRISM_STEPS_DAILY_APPROVED_DATES"].split(",")
+    expected = [(anchor + timedelta(days=i)).isoformat() for i in range(-3, 89)]
+    if supplied != expected:
+        raise ValueError("invalid frozen date perimeter")
+    return anchor, set(expected)
+
+
+def _day_allowed(day, now):
+    mode = os.environ.get("PRISM_STEPS_ACCESS_MODE", "pilot")
+    if mode == "pilot":
+        allowed = os.environ["PRISM_STEPS_ALLOWED_DATE"]
+        return _valid_day(allowed) and day == allowed
+    if mode != "daily":
+        return False
+    anchor, approved = _daily_config()
+    today = now.astimezone(ZoneInfo("America/Los_Angeles")).date()
+    return (anchor <= today < anchor + timedelta(days=90)
+            and day in approved
+            and 1 <= (today - date.fromisoformat(day)).days <= 3)
+
+
+def _authorized(headers, now):
     """Read each time: disabling/rotating the secret must not leave a warm cache."""
     supplied = [v for k, v in headers.items() if k.lower() == "x-prism-steps-key"]
     if len(supplied) != 1 or not isinstance(supplied[0], str):
@@ -70,9 +102,21 @@ def _authorized(headers):
     if not re.fullmatch(r"[a-f0-9]{64}", digest) or not isinstance(expiry, str):
         return False
     expires = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
-    if expires.utcoffset() is None or expires <= datetime.now(timezone.utc):
+    if expires.utcoffset() is None or expires <= now:
         return False
-    return hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(), digest)
+    if os.environ.get("PRISM_STEPS_ACCESS_MODE", "pilot") == "daily":
+        issued = datetime.fromisoformat(config["issued_at"].replace("Z", "+00:00"))
+        anchor, _ = _daily_config()
+        end = datetime.combine(anchor + timedelta(days=90), datetime.min.time(),
+                               tzinfo=ZoneInfo("America/Los_Angeles"))
+        # The credential is no longer than 90 elapsed days and cannot outlive
+        # the frozen operational perimeter. Provisioning may choose less.
+        if (issued.utcoffset() is None or issued > now or expires <= issued
+                or expires - issued > timedelta(days=90) or expires > end):
+            return False
+    if not hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(), digest):
+        return False
+    return {"renewal_due": expires - now <= timedelta(days=14)}
 
 
 def _get_row(table, day, source):
@@ -132,7 +176,7 @@ def _observation(row, resolved, day):
     return observation
 
 
-def lambda_handler(event, context):
+def lambda_handler(event, context, *, now=None):
     if event.get("version") != "2.0" or event.get("rawPath") != PATH:
         return _response(404, {"error": "not_found"})
     if event.get("requestContext", {}).get("http", {}).get("method") != "GET":
@@ -148,10 +192,13 @@ def lambda_handler(event, context):
         return _response(400, {"error": "single_date_required"})
     day = pairs[0][1]
     try:
-        if not _authorized(event.get("headers") or {}):
+        now = _now() if now is None else now
+        if not isinstance(now, datetime) or now.utcoffset() is None:
+            raise ValueError("aware server clock required")
+        credential = _authorized(event.get("headers") or {}, now)
+        if not credential:
             return _response(401, {"error": "unauthorized"})
-        allowed_day = os.environ["PRISM_STEPS_ALLOWED_DATE"]
-        if not _valid_day(allowed_day) or day != allowed_day:
+        if not _day_allowed(day, now):
             return _response(403, {"error": "date_not_allowed"})
         table = boto3.resource("dynamodb").Table(os.environ["HEALTH_METRICS_TABLE"])
         spec = HAE_DAILY_ACTIVITY_METRICS["steps"]
@@ -166,14 +213,19 @@ def lambda_handler(event, context):
         observation = None
         if resolved["metric_source"] is not None:
             observation = _observation(rows[resolved["metric_source"]], resolved, day)
-        return _response(200, {
+        body = {
             "version": 1, "backend": "mcfox", "transport": "health_auto_export",
             "metric": "step_count", "date": day,
             "availability": "available" if observation is not None else "unavailable",
             "observation": observation,
             "completeness": {"lookup_complete": True, "next_cursor": None,
                              "phone_data_complete": "unknown"},
-        })
+        }
+        # Preserve the pilot wire contract. Daily adds only a renewal boolean,
+        # never a verifier, expiry timestamp or authentication material.
+        if os.environ.get("PRISM_STEPS_ACCESS_MODE", "pilot") == "daily":
+            body["credential"] = credential
+        return _response(200, body)
     except Exception:
         # Do not log event, credentials, source row, exceptions or AWS response.
         return _response(503, {"error": "source_unavailable"})
