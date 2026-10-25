@@ -23,15 +23,20 @@ FIELDS = (
     "updated_at", "source_date", "analysis_date", "source_utc_offset",
     "analysis_utc_offset", "source_timezone", "analysis_timezone",
     "date_derivation", "hae_automation_name", "hae_automation_aggregation",
-    "hae_automation_period",
+    "hae_automation_period", "hae_raw_metric_names", "hae_sources",
 )
+LEGACY_LIST_FIELDS = {"hae_raw_metric_names": 128, "hae_raw_units": 64,
+                      "hae_sources": 256}
 
 
 def _response(status, body):
+    encoded = json.dumps(body, separators=(",", ":"), allow_nan=False)
+    if len(encoded.encode()) > 16384:
+        raise ValueError("response exceeds source contract bound")
     return {
         "statusCode": status,
         "headers": {"content-type": "application/json", "cache-control": "no-store"},
-        "body": json.dumps(body, separators=(",", ":"), allow_nan=False),
+        "body": encoded,
     }
 
 
@@ -100,6 +105,17 @@ def _observation(row, resolved, day):
         if field in ("date", "metric_source", "value", "unit"):
             continue
         raw = row.get(field)
+        # The raw/legacy writer retains bounded lists; daily summaries use
+        # scalar metadata. Preserve the writer's provenance without flattening.
+        if (resolved["source"] == "legacy_hae_aggregate"
+                and field in LEGACY_LIST_FIELDS and isinstance(raw, list)):
+            if len(raw) > 16 or any(
+                not isinstance(item, str) or len(item) > LEGACY_LIST_FIELDS[field]
+                for item in raw
+            ):
+                raise ValueError("invalid legacy stored metadata")
+            provenance[field] = raw
+            continue
         if raw is not None and (not isinstance(raw, str) or len(raw) > 512):
             raise ValueError("invalid stored metadata")
         provenance[field] = raw

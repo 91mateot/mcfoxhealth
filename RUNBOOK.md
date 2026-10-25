@@ -1015,6 +1015,10 @@ phone configuration or schedule. The initial allowed day is 2026-10-23.
 Do not deploy the main stack or rebuild Coach to ship this pilot. Merge and
 deployment still require Mateo's approval. Offline checks are not live source
 or authorization proof; PRISM import and natural HAE recurrence remain open.
+The patch continuation's Python 3.13 validation and isolated release/provisioning
+procedure are recorded in [`backend/PRISM_STEPS_RELEASE_REVIEW.md`](backend/PRISM_STEPS_RELEASE_REVIEW.md).
+Legacy source provenance uses bounded lists; the pilot preserves those shapes
+and rejects a serialized response over 16 KiB without exposing partial data.
 
 **Non-obvious prerequisite:** Lambdas are python3.13; the box default is 3.12 and there's no Docker. `sam build` fails without the PATH export.
 

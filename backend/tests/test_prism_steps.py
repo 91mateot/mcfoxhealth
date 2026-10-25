@@ -105,6 +105,44 @@ def test_legacy_is_labeled_and_never_given_summary_semantics(setup):
     assert body["observation"]["provenance"]["ingested_at"] is None
 
 
+def test_legacy_writer_provenance_lists_are_preserved(setup):
+    metadata = {"hae_raw_units": ["count"],
+                "hae_raw_metric_names": ["step_count"],
+                "hae_sources": ["Synthetic Watch"]}
+    setup.rows = {LEGACY: row(LEGACY, 0, **metadata)}
+    status, body = call()
+    assert status == 200 and body["observation"]["value"] == 0
+    provenance = body["observation"]["provenance"]
+    assert {key: provenance[key] for key in metadata} == metadata
+    assert body["observation"]["semantics"] == "legacy_hae_aggregate"
+    assert len(setup.reads) == 2
+
+
+@pytest.mark.parametrize("metadata", [
+    {"hae_raw_units": ["count"] * 17},
+    {"hae_raw_units": ["x" * 65]},
+    {"hae_raw_metric_names": ["x" * 129]},
+    {"hae_sources": ["x" * 257]},
+    {"hae_sources": [{"unexpected": "shape"}]},
+    {"hae_raw_units": [1]},
+])
+def test_legacy_metadata_lists_remain_bounded_and_typed(setup, metadata):
+    setup.rows = {LEGACY: row(LEGACY, **metadata)}
+    assert call() == (503, {"error": "source_unavailable"})
+
+
+def test_combined_legacy_metadata_cannot_exceed_response_bound(setup):
+    metadata = {field: "x" * 512 for field in handler.FIELDS
+                if field not in {"date", "metric_source", "value", "unit",
+                                 "hae_semantics", *handler.LEGACY_LIST_FIELDS}}
+    metadata.update({field: ["x" * limit] * 16
+                     for field, limit in handler.LEGACY_LIST_FIELDS.items()})
+    # Escaping can make a valid-length metadata string larger on the wire.
+    metadata["hae_source"] = "\\" * 512
+    setup.rows = {LEGACY: row(LEGACY, **metadata)}
+    assert call() == (503, {"error": "source_unavailable"})
+
+
 def test_repeat_fingerprint_stable_and_changed_source_changes_fingerprint(setup):
     setup.rows[SUMMARY] = row(value=123)
     first = call()[1]

@@ -42,12 +42,16 @@ are in `provenance.hae_raw_units`; recording-app provenance is
 recording app is inferred when absent. Daily bucket timestamps are preserved
 as source labels; they are not upload times. `quality: stored_value_valid`
 checks storage shape only, not Apple Health completeness or clinical quality.
+Legacy aggregates preserve the writer's `hae_raw_units`,
+`hae_raw_metric_names`, and `hae_sources` lists (at most 16 bounded strings),
+without flattening them into summary-style scalar provenance.
 
 `completeness.lookup_complete` means both required exact-key lookups are
 resolved (or the preferred summary was found); `next_cursor` is null and
 `phone_data_complete` stays `unknown`. A content fingerprint is not a monotonic
 source revision. Responses are bounded by projected fields (512 characters
-each), a JavaScript-safe integer count, and no-store headers. Dependencies or
+each; legacy list members retain the writer's 64/128/256-character limits),
+a 16 KiB total JSON body ceiling, a JavaScript-safe integer count, and no-store headers. Dependencies or
 invalid storage yield sanitized 503 without a partial response or logged data.
 
 ## Secure provisioning (future authorized local execution)
