@@ -95,7 +95,7 @@ No automation was created; native Site `automations` was empty on inspection.
 
 ## Validation and limits
 
-- Python 3.13.13: focused receiver tests **83 passed**; prescribed credential-
+- Python 3.13.13: **83 receiver cases passed**; prescribed credential-
   and network-isolated suite **457 passed, 21 deselected**, one existing
   Starlette/httpx deprecation warning. No AWS/secret/source calls in tests.
 - SAM CLI 1.158.0 lint and isolated Python3.13 build passed. Offline SAM expansion
@@ -167,3 +167,30 @@ Do not rotate/extend the live pilot credential. After release approval:
    deduplicated actionable auth/source/renewal issues, without values/secrets.
 6. Natural HAE delivery remains an independent evidence gate. Do not trigger an
    export or wait for it to complete this implementation/review milestone.
+
+## Compatible Site publication evidence
+
+The authorized compatible-only Site release is published as **version 14**:
+
+- Source: `ea8a3eb9ec22988a2600064d354fe33ba1e64d47`.
+- Saved version: `appgprj_6ad37e842c808191bbf2e1b58457e71c~appgver_9c587d6b0d38819180c19beed8ccfe95`.
+- Deployment: `appgdep_6add80055f008191acf5394d5fa164e5`, succeeded.
+- Runtime environment revision **6**: daily explicitly false; original pilot
+  switch true, original source URL and masked secret entries preserved.
+- Owner-private access revision **1** preserved; automations still empty.
+- Deployment archive SHA-256 (artifact, not a credential verifier):
+  `dbcd2adfb0f3cf2ab8bceaba82e9e61e91a825615cc897d24982f1d85fe6633f`.
+- Same-Site platform service access, without visitor identity: daily POST
+  returns **409 daily_disabled**, no run receipt; daily GET returns **401
+  owner_sign_in_required**. This verifies the deployed disabled boundary only.
+  It creates no import and cannot prove production owner binding, real daily
+  reads, durable cloud publication or recurring execution while daily is off.
+- Local unsigned preview serves successfully and renders the ongoing Steps
+  section; saved-owner status is unavailable in that preview. Authenticated
+  real-value display was deliberately not reread for this preparation.
+  UI/domain tests use synthetic data. Source Desk/Notion/Drive link constants
+  byte-match the previous source.
+
+For Site rollback, redeploy prior compatible version 13 with daily false;
+retain additive migration tables/journal. The original pilot configuration is
+unchanged. Publishing version 14 does not authorize the AWS release gates above.
