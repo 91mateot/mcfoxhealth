@@ -1,7 +1,9 @@
 # PRISM Steps read pilot
 
-Status: proposed code; no deployment, credential provisioning, PRISM import or
-natural HAE recurrence is established by these offline tests.
+Status: AWS pilot deployed October 24, 2026 after explicit approval of PR #25.
+Dedicated credentials were provisioned in the same session and the verifier
+activated after scoped deployment checks. PRISM importing remains disabled;
+no Site canary/import/display or natural HAE recurrence is established.
 
 This is a separate SAM stack (`prism-steps-read`) in the same AWS account and
 `us-west-2`. Build **only** `prism-steps.template.yaml`. Do not deploy it as
@@ -76,10 +78,14 @@ or unavailable auth configuration fails closed. Customer-managed KMS keys
 would require a separately reviewed exact-key decrypt grant; the template
 does not include one.
 
-No safe cross-session raw-token transfer facility has been established here.
-If local AWS and native Sites secret tools cannot securely share one
-in-memory value, stop at that boundary and report it. Do not substitute a
-shared key or transfer the broader Sites service token to the phone.
+The owner explicitly approved normal native secret-marked tool input for the
+October 24 release, superseding the earlier zero-tool-trace broker requirement.
+The release generated a fresh token and provisioned both stores in one local
+session; no masked token readback or cross-chat transfer was used. This does
+not promise zero tool traces. Keep values out of documents, source, files,
+application logs and browser bundles. Never substitute a shared key or transfer
+the broader Sites service token to the phone. Further provisioning needs its
+own applicable authorization.
 
 ## Build and deployment gate
 

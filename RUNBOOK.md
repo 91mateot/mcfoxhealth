@@ -1001,7 +1001,7 @@ historical Activity repair, Workouts/GPX, or other automation changes.
 
 ## 3. Deploy
 
-### Isolated PRISM Steps read pilot (proposed, not deployed)
+### Isolated PRISM Steps read pilot (AWS deployed; Site import disabled)
 
 `backend/prism-steps.template.yaml` is an independent stack, **not** an update
 to `fitness-dashboard`. See [`backend/PRISM_STEPS_READ.md`](backend/PRISM_STEPS_READ.md)
@@ -1012,13 +1012,35 @@ reads to the two Steps aggregate identities and reuses the shared resolver.
 It has no shared McFox API/ingest credential, writes, compute invocation,
 phone configuration or schedule. The initial allowed day is 2026-10-23.
 
-Do not deploy the main stack or rebuild Coach to ship this pilot. Merge and
-deployment still require Mateo's approval. Offline checks are not live source
-or authorization proof; PRISM import and natural HAE recurrence remain open.
+Do not deploy the main stack or rebuild Coach to ship this pilot. PR #25 was
+explicitly approved and merged at `a7b1e82e05579397a838721fd77093057aa1c495`.
+The separate stack reached CREATE_COMPLETE on October 24, 2026 Pacific.
+Further scope changes still require approval; PRISM import and natural HAE
+recurrence remain open.
 The patch continuation's Python 3.13 validation and isolated release/provisioning
 procedure are recorded in [`backend/PRISM_STEPS_RELEASE_REVIEW.md`](backend/PRISM_STEPS_RELEASE_REVIEW.md).
 Legacy source provenance uses bounded lists; the pilot preserves those shapes
 and rejects a serialized response over 16 KiB without exposing partial data.
+
+Scoped live verification (October 24, 2026): six additions only, tested handler
+and all 656 layer files byte-matched, single GET route and exact inline IAM
+verified. Endpoint:
+`https://t3pylufe31.execute-api.us-west-2.amazonaws.com/api/prism/steps`.
+AllowedDate remains `2026-10-23`. IAM simulation denies other dates,
+query/scan/write, unrelated secrets and compute invocation; sort-key isolation
+is application-enforced. Live auth checks returned 401 with the verifier
+disabled/missing credentials and 403 for a valid credential on the wrong day.
+No health-response body was read. Existing five McFox artifacts and shared
+layer 44 were unchanged; no phone access or exports occurred.
+
+Both stores were provisioned in one owner-approved session. The dedicated
+verifier was activated after deployment checks and was unexpired at the final
+check. Its 24-hour lifetime is deliberate; do not fetch or print its contents.
+PRISM Site version 13 runs environment revision 4, with
+`PRISM_STEPS_ENABLED=false` and no Steps source URL configured. The Google Drive
+PRISM integration handoff holds sanitized stack/change-set/secret-version
+identifiers. URL configuration, canary/repeat/display verification, scheduling,
+and any date-scope expansion remain separate work.
 
 **Non-obvious prerequisite:** Lambdas are python3.13; the box default is 3.12 and there's no Docker. `sam build` fails without the PATH export.
 

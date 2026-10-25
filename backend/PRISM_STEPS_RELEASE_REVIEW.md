@@ -1,5 +1,13 @@
 # PRISM Steps pilot release review
 
+Release update: PR #25 was subsequently explicitly approved and merged at
+`a7b1e82e05579397a838721fd77093057aa1c495`. The isolated AWS stack is deployed;
+both stores were provisioned through the owner-approved same-session native
+secret-input procedure, superseding the older broker/approval gates below.
+PRISM importing remains disabled. See the scoped live evidence in
+[`RUNBOOK.md`](../RUNBOOK.md); the remainder preserves the original review
+package, not a new request to execute or provision anything.
+
 Prepared October 24, 2026. **Not merged, deployed, or provisioned.** This is an
 approval package, not permission to execute the commands below. The PRISM site
 is still unconnected; source availability in McFox is not a PRISM import.

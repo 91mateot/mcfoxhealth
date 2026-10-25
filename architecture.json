@@ -10,7 +10,9 @@
     "storage": "DynamoDB (fitness-* tables)"
   },
   "proposed_prism_steps_pilot": {
-    "status": "code_only_not_deployed",
+    "status": "aws_deployed_prism_import_disabled",
+    "verified": "2026-10-24",
+    "steps_url": "https://t3pylufe31.execute-api.us-west-2.amazonaws.com/api/prism/steps",
     "template": "backend/prism-steps.template.yaml",
     "stack": "prism-steps-read",
     "handler": "backend/functions/prism_steps/handler.py",
@@ -19,7 +21,7 @@
     "reads": "GetItem of steps#hae_daily_summary then legacy steps#hae on fitness-health-metrics; shared HAE resolver",
     "writes_tables": [],
     "changes_existing_stack": false,
-    "remaining_gates": ["review and deployment approval", "secure credential provisioning", "live bounded verification", "PRISM adapter and display", "browser-closed fetch", "natural HAE recurrence"]
+    "remaining_gates": ["PRISM URL configuration and canary/repeat/display verification", "browser-closed fetch", "natural HAE recurrence", "review before any date-scope expansion"]
   },
   "lambdas": [
     {
